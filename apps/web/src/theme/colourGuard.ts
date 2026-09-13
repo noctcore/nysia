@@ -88,16 +88,34 @@ const PALETTE_CLASS = new RegExp(
  * JSX attribute, which separates with an equals sign rather than a colon; an assignment
  * through the style object; a `setProperty` call, whose separator is a comma; and a quoted
  * key, where the quote between the property and the colon broke the match. So the
- * separator is now either punctuation, an arbitrary expression is allowed to sit between
- * it and the literal, and each quote character gets its own pattern — which also lets a
- * value contain the *other* quote, catching a shorthand whose url is quoted inside it.
+ * separator is now either punctuation, an expression may sit between it and the literal,
+ * and each quote character gets its own pattern — which also lets a value contain the
+ * *other* quote, catching a shorthand whose url is quoted inside it.
  *
- * What it still cannot see, stated so the next reader knows it is known and can trust the
- * rest of this list: a colour that reaches CSS through a variable rather than a literal, a
- * colour name in a string that no painting property introduces, and a value whose own quote
- * character appears inside it escaped, which ends the match early. The first two need types
- * or a parser rather than a sweep; the third needs one, and the hex and colour-function
- * rules, which do scan whole files, are the backstop for all three.
+ * ## What it cannot see
+ *
+ * This list is meant to be exhaustive, so that a reader who checks it can trust the rest of
+ * the comment. Two entries below were missing while the comment claimed completeness, which
+ * is worse than the gaps were:
+ *
+ *  - a colour that reaches CSS through a variable rather than a literal. Needs types.
+ *  - a colour name in a string that no painting property introduces. Needs types.
+ *  - a value whose own quote character appears inside it escaped, which ends the match
+ *    early. Needs a parser.
+ *  - an expression between the property and the literal that contains a semicolon, a comma
+ *    or a brace, or that runs past the length cap. Those are what stop the span crossing
+ *    out of the value it belongs to, and the price is a call with more than one argument.
+ *  - a painting property this list does not name. It covers CSS, and a library that takes
+ *    its own colour keys — a terminal theme object, a chart config — is outside it. A key
+ *    that merely *contains* one of these words is outside it too: the boundary guard that
+ *    stops `fill` matching inside `autofill` is the same guard, and the same trade.
+ *
+ * The hex and colour-function rules, which do scan whole files, are the backstop for all
+ * five: only a *named* colour can hide in any of them.
+ *
+ * In the other direction, the rule does have false positives — a value that merely contains
+ * a colour word, most obviously a url with one in the path. They are tracked separately;
+ * none of them is silent, so none of them can ship a pixel.
  */
 const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
 
