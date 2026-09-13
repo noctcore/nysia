@@ -13,12 +13,8 @@ if (!container) {
 }
 
 /*
- * The line wave 2 changed.
- *
- * The mock became the daemon-backed provider from `src/transport`, and nothing else in
- * `apps/web` moved: every component reads session, project and tab data through the `Store`
- * interface, and both providers satisfy the same contract in `store/storeContract.ts`. The
- * mock is still there and still tested, for anyone working on the chrome without a daemon.
+ * The one line wave 2 changed: the mock became the daemon-backed provider, and no component
+ * moved. Both satisfy `store/storeContract.ts`, so the chrome cannot tell them apart.
  */
 const store = createDaemonStore();
 

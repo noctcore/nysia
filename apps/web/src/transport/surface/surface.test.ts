@@ -318,7 +318,7 @@ describe('a pane that is not visible', () => {
     fixture.surface.show(host());
     expect(fixture.latest().writes).toHaveLength(1);
     expect(fixture.surface.bufferedBytes).toBe(0);
-    expect(fixture.surface.droppedWhileHidden).toBe(false);
+    expect(fixture.surface.takeDroppedWhileHidden()).toBe(0);
   });
 
   it('drops the whole buffer on overflow and never a part of it', () => {
@@ -330,10 +330,10 @@ describe('a pane that is not visible', () => {
     fixture.surface.write(new Uint8Array(HIDDEN_BUFFER_CAP_BYTES).fill(0x78));
 
     expect(fixture.surface.bufferedBytes).toBe(0);
-    expect(fixture.surface.droppedWhileHidden).toBe(true);
 
     fixture.surface.show(host());
     expect(fixture.latest().writes).toEqual([RESET_SEQUENCE]);
+    expect(fixture.surface.takeDroppedWhileHidden()).toBeGreaterThan(0);
   });
 
   it('keeps acknowledging the bytes it dropped', () => {
@@ -344,16 +344,27 @@ describe('a pane that is not visible', () => {
     expect(fixture.bytes).toEqual([HIDDEN_BUFFER_CAP_BYTES + 1]);
   });
 
-  it('holds the drop flag until the caller has repainted', () => {
-    // Only the caller can repaint, because the authoritative state is in Rust (D-7). The
-    // surface would have nothing to redraw from if it cleared the flag itself.
+  it('reports a drop once, and never resets a pane that drained cleanly', () => {
+    // The defect this covers: the pending reset was never cleared, so every later `show`
+    // re-injected `ESC c` and wiped a pane whose buffer had drained perfectly well. One
+    // overflow early in a session blanked that terminal on every tab switch afterwards.
     const fixture = harness();
     fixture.surface.write(new Uint8Array(HIDDEN_BUFFER_CAP_BYTES + 1));
     fixture.surface.show(host());
+    expect(fixture.latest().writes).toEqual([RESET_SEQUENCE]);
 
-    expect(fixture.surface.droppedWhileHidden).toBe(true);
-    fixture.surface.acknowledgeDrop();
-    expect(fixture.surface.droppedWhileHidden).toBe(false);
+    // Reading the report clears it: one drop, one notice.
+    expect(fixture.surface.takeDroppedWhileHidden()).toBe(HIDDEN_BUFFER_CAP_BYTES + 1);
+    expect(fixture.surface.takeDroppedWhileHidden()).toBe(0);
+
+    // Hide, take a little output that fits, and reveal again. Nothing was lost this time,
+    // so nothing may be reset.
+    fixture.surface.hide();
+    fixture.surface.write(text.encode('after'));
+    fixture.surface.show(host());
+
+    expect(fixture.latest().writes).not.toContain(RESET_SEQUENCE);
+    expect(fixture.surface.takeDroppedWhileHidden()).toBe(0);
   });
 
   it('bounds memory however long the pane stays hidden', () => {
@@ -448,6 +459,23 @@ describe('the WebGL pool', () => {
     expect(pool.isDemoted(1)).toBe(true);
     expect(pool.acquire(1)).toBe('dom');
     expect(pool.holds(1)).toBe(false);
+  });
+
+  it('adopts a platform learned late without orphaning the contexts it handed out', () => {
+    // Surfaces built before `host_platform` answers hold a reference to this pool. Replacing
+    // it would leave those panes counting against a table nothing else reads, which on macOS
+    // is how a window exhausts an app-wide cap it believed it was under.
+    const pool = new WebglPool(policyFor(''));
+    expect(pool.acquire(1), 'the cautious default draws with DOM').toBe('dom');
+
+    pool.adopt(policyFor('windows'));
+    expect(pool.acquire(1)).toBe('webgl');
+    expect(pool.live).toBe(1);
+
+    // Narrowing is honoured as holders release, not by blanking a pane mid-frame.
+    pool.adopt(policyFor('macos'));
+    expect(pool.holds(1), 'a live context is left alone').toBe(true);
+    expect(pool.policy.maxContexts).toBe(6);
   });
 
   it('honours an opt-out even where WebGL is the default', () => {

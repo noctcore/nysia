@@ -6,17 +6,30 @@ import { StoreCommandError } from '../store/errors';
 import { describeStoreContract } from '../store/storeContract';
 import type { CommandFailure, DaemonBridge } from './bridge';
 import { DaemonStore } from './DaemonStore';
-import { CHANNEL_FRAME_HEADER_BYTES } from './frames';
+import type { StreamId } from './frames';
 import type { TerminalFactory, XtermLike } from './surface/XtermSurface';
 import { TerminalRouter } from './terminals';
+import { encodeFrame, encodeHeaderOnly } from './testFrames';
 
 /**
  * A daemon that answers over an in-process bridge.
  *
- * W4's daemon is not in this tree yet, so the alternative to this was to ship the provider
- * untested and find out on integration. What it fakes is deliberately only the *socket*:
- * the decoder, the credit ledger, the surfaces and the store are all the real ones, so what
- * these tests exercise is the code that ships.
+ * W4's daemon is not in this tree yet, so the alternative was to ship the provider untested
+ * and find out on integration. What it fakes is deliberately only the *socket*: the decoder,
+ * the credit ledger, the surfaces and the store are all the real ones.
+ *
+ * ## It enforces the Rust side's preconditions
+ *
+ * This is the part an earlier version got wrong, and the cost was the worst defect in the
+ * branch. `attachChannel` simply stored a callback and refused nothing, so a connect
+ * sequence that asked the Rust side for something it could not yet give passed every test
+ * here and could never reach a real daemon. A fake that cannot fail the way the real thing
+ * fails proves that the code runs, not that it works — so each of these mirrors a refusal
+ * `state.rs` actually makes:
+ *
+ *  - `terminal_attach` before `daemon_connect` → there is no connection to attach to;
+ *  - `stream_attach` before `terminal_attach` → there is no stream connection to route on;
+ *  - `stream_attach` for a session the daemon does not hold → unknown session.
  */
 class FakeDaemon implements DaemonBridge {
   sessions: WireSession[] = [];
@@ -29,6 +42,11 @@ class FakeDaemon implements DaemonBridge {
   #delivery: ((bytes: Uint8Array) => void) | null = null;
   connects = 0;
   attaches = 0;
+  /** Whether a control connection exists, as `Client::connect` decides. */
+  #connected = false;
+  /** Ids handed out on this connection. Spent, never reissued — as proto requires. */
+  #nextStream = 1;
+  readonly streams = new Map<string, StreamId>();
 
   readonly window = {
     minimize: async (): Promise<void> => {},
@@ -48,7 +66,27 @@ class FakeDaemon implements DaemonBridge {
     switch (command) {
       case 'daemon_connect':
         this.connects += 1;
+        this.#connected = true;
         return undefined as T;
+      case 'stream_attach': {
+        // Both refusals are real: `attach_session` needs a stream connection, and the daemon
+        // cannot route a session it does not hold.
+        if (this.attaches === 0) {
+          throw disconnected('no stream connection is open');
+        }
+        const handle = args?.handle;
+        if (!this.sessions.some((candidate) => candidate.handle === handle)) {
+          throw disconnected(`no session ${String(handle)}`);
+        }
+        const existing = this.streams.get(String(handle));
+        if (existing !== undefined) {
+          return existing as T;
+        }
+        const assigned = this.#nextStream;
+        this.#nextStream += 1;
+        this.streams.set(String(handle), assigned);
+        return assigned as T;
+      }
       case 'daemon_watch':
         return new Promise<T>((resolve) => {
           this.#dropped = () => resolve(undefined as T);
@@ -74,6 +112,12 @@ class FakeDaemon implements DaemonBridge {
   }
 
   async attachChannel(onDelivery: (bytes: Uint8Array) => void): Promise<void> {
+    // `Client::attach_channel` refuses outright when no daemon is attached. Modelling that
+    // is the whole point: without it, a connect sequence that attached before it connected
+    // looked perfectly healthy here and could never work anywhere else.
+    if (!this.#connected) {
+      throw disconnected('the window is not connected to a daemon');
+    }
     this.attaches += 1;
     this.#delivery = onDelivery;
   }
@@ -85,10 +129,18 @@ class FakeDaemon implements DaemonBridge {
 
   /** Pretend the socket dropped. */
   drop(): void {
+    this.#connected = false;
+    this.attaches = 0;
+    this.streams.clear();
     const resolve = this.#dropped;
     this.#dropped = null;
     resolve?.();
   }
+}
+
+/** What the Rust side returns when a precondition is not met. */
+function disconnected(message: string): CommandFailure {
+  return { message, nextSteps: ['Start the Nysia daemon, then try again.'], retryable: true };
 }
 
 /** A wire session, numbered so a fixture reads clearly. */
@@ -334,7 +386,7 @@ describe('output arriving on the channel', () => {
     const host = {} as HTMLElement;
     surface.show(host);
 
-    daemon.send(frame('output', target ?? 0, new Uint8Array(2048)));
+    daemon.send(encodeFrame('output', target ?? 0, new Uint8Array(2048)));
     written.push(2048);
 
     // Under the ack batch: held back on purpose, because a grant per chunk would spend a
@@ -353,7 +405,7 @@ describe('output arriving on the channel', () => {
 
     const chunk = 48 * 1024;
     for (let sent = 0; sent <= CREDIT_WINDOW_DEFAULT.ackBatch; sent += chunk) {
-      daemon.send(frame('output', stream, new Uint8Array(chunk)));
+      daemon.send(encodeFrame('output', stream, new Uint8Array(chunk)));
     }
 
     await until(() => daemon.calls.some((call) => call.command === 'terminal_ack'));
@@ -367,23 +419,13 @@ describe('output arriving on the channel', () => {
     const { store, daemon } = build();
     await ready(store);
 
-    const garbage = new Uint8Array(CHANNEL_FRAME_HEADER_BYTES);
-    garbage[0] = 0;
+    const garbage = encodeHeaderOnly(0, 0);
     expect(() => daemon.send(garbage)).not.toThrow();
     expect(store.getSnapshot().errors.length).toBeGreaterThan(0);
   });
 });
 
-/** Encode one frame the way the Rust side does. */
-function frame(kind: 'output' | 'bell', stream: number, payload: Uint8Array): Uint8Array {
-  const buffer = new Uint8Array(CHANNEL_FRAME_HEADER_BYTES + payload.length);
-  const header = new DataView(buffer.buffer);
-  buffer[0] = kind === 'output' ? 1 : 3;
-  header.setUint32(1, stream, false);
-  header.setUint32(5, payload.length, false);
-  buffer.set(payload, CHANNEL_FRAME_HEADER_BYTES);
-  return buffer;
-}
+
 
 async function ready(store: DaemonStore): Promise<void> {
   await until(() => store.getSnapshot().status === 'ready');

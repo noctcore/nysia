@@ -81,15 +81,24 @@ export class XtermSurface implements TerminalSurface {
     return this.#hiddenBytes;
   }
 
+  /** Bytes held for a hidden pane that were thrown away, awaiting a report. */
+  #droppedBytes = 0;
+
   /**
-   * Whether the transient buffer overflowed and the pane will need repainting.
+   * Take the record of output discarded while this pane was hidden, in bytes.
    *
-   * The caller reads this after {@link show} to decide whether to ask the daemon for the
-   * screen again. The surface cannot answer that itself — the authoritative state is in
-   * Rust, which is the whole point of D-7.
+   * **One shot.** Reading it clears it, which is what stops one overflow being reported
+   * forever — and the reset that goes with it being re-injected on every later `show`,
+   * wiping a pane that had nothing wrong with it.
+   *
+   * The caller reports the loss; the surface cannot. What was dropped is gone from this
+   * process, and the authoritative screen is in Rust (D-7) — so all this can honestly say
+   * is how much went, and to whom it mattered.
    */
-  get droppedWhileHidden(): boolean {
-    return this.#resetPending;
+  takeDroppedWhileHidden(): number {
+    const dropped = this.#droppedBytes;
+    this.#droppedBytes = 0;
+    return dropped;
   }
 
   write(bytes: Uint8Array): void {
@@ -207,6 +216,7 @@ export class XtermSurface implements TerminalSurface {
     if (this.#hiddenBytes + bytes.length > HIDDEN_BUFFER_CAP_BYTES) {
       // The whole buffer, not a trim. See the class docs: a cut at an arbitrary offset ends
       // mid-sequence and xterm's parser never recovers from one.
+      this.#droppedBytes += this.#hiddenBytes + bytes.length;
       this.#hidden = [];
       this.#hiddenBytes = 0;
       this.#resetPending = true;
@@ -228,13 +238,12 @@ export class XtermSurface implements TerminalSurface {
     }
     this.#hidden = [];
     this.#hiddenBytes = 0;
-    // Deliberately *not* cleared: the caller reads `droppedWhileHidden` after `show` to
-    // decide whether to ask the daemon to repaint, and clearing it here would lose that.
-    // `acknowledgeDrop` is how it is cleared, once the repaint has been requested.
-  }
-
-  /** The caller has repainted after a drop; stop reporting one. */
-  acknowledgeDrop(): void {
+    // Cleared here, with the reset it asked for now written. Leaving it set was a real
+    // defect: every later `show` re-injected `ESC c` and wiped a pane whose buffer had
+    // drained perfectly well, so one overflow early in a session blanked that terminal on
+    // every tab switch for the rest of the process. What the *caller* still needs to know
+    // — that output was lost — is `takeDroppedWhileHidden`, which survives this and is
+    // cleared by being read.
     this.#resetPending = false;
   }
 

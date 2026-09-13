@@ -18,7 +18,6 @@ import {
 } from '../store/types';
 import { describeFailure, isRetryable, type DaemonBridge } from './bridge';
 import type { StreamId } from './frames';
-import { streamIdFor } from './terminals';
 import type { TerminalRouter } from './terminals';
 
 /**
@@ -70,8 +69,15 @@ export class DaemonStore implements Store {
   readonly #router: TerminalRouter;
   readonly #retryDelaysMs: readonly number[];
 
-  /** Session handles in the order the daemon first reported them — see `streamIdFor`. */
-  #order: SessionHandle[] = [];
+  /**
+   * Which stream id the daemon assigned each session, from its `stream_attach` answer.
+   *
+   * Learned, never derived. Both sides used to compute the id from the order sessions
+   * appeared in `session_list` — two implementations of one convention, which is the
+   * arrangement that rots. The daemon picks the id now and says so, because it is the only
+   * party that knows which ids are already in use on this connection.
+   */
+  readonly #streams = new Map<SessionHandle, StreamId>();
   #nextErrorId = 1;
   #disposed = false;
 
@@ -131,17 +137,22 @@ export class DaemonStore implements Store {
       throw this.fail('closeTab', `Session ${paneKey} is no longer open.`);
     }
 
+    // The refresh is inside the try on purpose. It is a `session_list` round trip, and a
+    // socket closing mid-command is the likeliest real failure in this whole file — outside
+    // the try it would reject with a raw failure rather than a `StoreCommandError`, land in
+    // the unexpected-failure path, and the user would be shown nothing at all.
     try {
       await this.#bridge.invoke('session_close', { handle: tab.handle });
+
+      const stream = this.#streams.get(tab.handle);
+      if (stream !== undefined) {
+        this.#router.close(stream);
+        this.#streams.delete(tab.handle);
+      }
+      await this.#refresh();
     } catch (cause) {
       throw this.fail('closeTab', describeFailure(cause));
     }
-
-    const stream = streamIdFor(tab.handle, this.#order);
-    if (stream !== null) {
-      this.#router.close(stream);
-    }
-    await this.#refresh();
   };
 
   openTab = async (launcher: string): Promise<void> => {
@@ -165,13 +176,15 @@ export class DaemonStore implements Store {
           rows: 24,
         },
       });
+      // Inside the try for the same reason as `closeTab`: this is a round trip, and a
+      // failure here has to reach the user as a `StoreCommandError` or it reaches nobody.
+      await this.#refresh();
     } catch (cause) {
       // The daemon's own message and next step, verbatim — "pwsh is not on PATH" and what
       // to do about it, rather than a menu that closed and a tab that never appeared.
       throw this.fail('openTab', describeFailure(cause));
     }
 
-    await this.#refresh();
     const opened = this.#snapshot.tabs.find((tab) => tab.handle === handle);
     if (opened) {
       this.#update((current) => ({ ...current, activeTab: opened.paneKey }));
@@ -192,7 +205,22 @@ export class DaemonStore implements Store {
   /** The surface a pane draws into, or `null` before the daemon has named the session. */
   surfaceStream(paneKey: PaneKey): StreamId | null {
     const tab = this.#snapshot.tabs.find((candidate) => candidate.paneKey === paneKey);
-    return tab ? streamIdFor(tab.handle, this.#order) : null;
+    return tab ? (this.#streams.get(tab.handle) ?? null) : null;
+  }
+
+  /**
+   * Tell the user that output was thrown away while a pane was hidden.
+   *
+   * The drop is how memory stays bounded for a background pane (see
+   * `surface/TerminalSurface.ts`), and it is not a fault — but a terminal that silently
+   * skips a stretch of its own output is worse than one that says so, because the reader
+   * takes what is left as following on from what came before.
+   */
+  reportDroppedOutput(bytes: number): void {
+    this.#recordOnce(
+      'selectTab',
+      `A background session produced more output than Nysia holds for a hidden pane, so ${bytes} bytes were dropped and its screen was reset.`,
+    );
   }
 
   /** The router, for the pane component that mounts surfaces. */
@@ -208,23 +236,31 @@ export class DaemonStore implements Store {
    * while the daemon is down would bury every other message in the list, and the disconnect
    * that caused it already has a notice of its own.
    *
-   * Rejects rather than recording, so the caller decides. `TerminalView` swallows it.
+   * A failure is **recorded once** rather than thrown away. One notice per character typed
+   * would bury the list, so it is deduplicated by message the way the reconnect loop's is —
+   * but typing into a dead session and seeing nothing anywhere is how a user concludes the
+   * whole window is broken.
    */
   async sendInput(paneKey: PaneKey, text: string): Promise<void> {
     const tab = this.#snapshot.tabs.find((candidate) => candidate.paneKey === paneKey);
     if (!tab) {
-      throw new Error(`Session ${paneKey} is no longer open.`);
+      this.#recordOnce('selectTab', `Session ${paneKey} is no longer open.`);
+      return;
     }
-    await this.#bridge.invoke('terminal_send', {
-      request: { handle: tab.handle, text, enter: false, interrupt: false },
-    });
+    try {
+      await this.#bridge.invoke('terminal_send', {
+        request: { handle: tab.handle, text, enter: false, interrupt: false },
+      });
+    } catch (cause) {
+      this.#recordOnce('selectTab', describeFailure(cause));
+    }
   }
 
   /**
    * Tell the daemon a pane changed size, in cells.
    *
-   * Same reasoning as {@link sendInput}: a resize that failed because the socket dropped is
-   * the disconnect's notice, not its own.
+   * Recorded once on failure, like {@link sendInput}: a pane wrapping at the wrong width
+   * with nothing said about why is the kind of fault users work around for months.
    */
   async resize(paneKey: PaneKey, cols: number, rows: number): Promise<void> {
     const tab = this.#snapshot.tabs.find((candidate) => candidate.paneKey === paneKey);
@@ -233,9 +269,13 @@ export class DaemonStore implements Store {
     }
     // The surface has already sized itself — it is what measured the host — so this only
     // carries the answer to the daemon, which owns the PTY.
-    await this.#bridge.invoke('terminal_resize', {
-      request: { handle: tab.handle, cols, rows },
-    });
+    try {
+      await this.#bridge.invoke('terminal_resize', {
+        request: { handle: tab.handle, cols, rows },
+      });
+    } catch (cause) {
+      this.#recordOnce('selectTab', describeFailure(cause));
+    }
   }
 
   /**
@@ -305,6 +345,13 @@ export class DaemonStore implements Store {
     }
 
     try {
+      // The channel first, and deliberately before anything that needs a session to exist.
+      // Opening the output connection is not a per-session act — it is the connection every
+      // session's frames will ride — so it has to work against a daemon holding none. An
+      // earlier order asked for a session here and fetched the session list afterwards,
+      // which meant the attach could never succeed against any daemon: it ran before the
+      // only call that could have satisfied it, failed, set `reconnecting`, and retried in
+      // the same order forever.
       await this.#bridge.attachChannel((delivery) => {
         const unreadable = this.#router.deliver(delivery);
         if (unreadable) {
@@ -328,13 +375,18 @@ export class DaemonStore implements Store {
   async #refresh(): Promise<void> {
     const sessions = await this.#bridge.invoke<WireSession[]>('session_list');
 
-    // Append-only, so a session keeps the stream id it was first given. Rebuilding the
-    // order on every refresh would renumber every stream behind a closed pane and route
-    // output into the wrong terminal.
+    // Ask the daemon to route each session this window does not already hold an id for. It
+    // answers with the id, so nothing here guesses one — and a session already attached is
+    // skipped rather than attached twice, because an id is spent for the life of the
+    // connection and a second would route frames nothing reads.
     for (const session of sessions) {
-      if (!this.#order.includes(session.handle)) {
-        this.#order.push(session.handle);
+      if (this.#streams.has(session.handle)) {
+        continue;
       }
+      const stream = await this.#bridge.invoke<StreamId>('stream_attach', {
+        handle: session.handle,
+      });
+      this.#streams.set(session.handle, stream);
     }
 
     const tabs = sessions.map(toTab);
