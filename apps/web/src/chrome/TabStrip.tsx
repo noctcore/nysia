@@ -151,6 +151,23 @@ function TabButton({
         type="button"
         tabIndex={-1}
         aria-label={`Close ${tab.title}`}
+        onMouseDown={(event) => {
+          /*
+           * Without this the focus test below is a tautology.
+           *
+           * `tabIndex={-1}` keeps the button out of the tab order, but in Chromium and
+           * WebView2 it stays *click*-focusable: mousedown moves `document.activeElement`
+           * onto the button before `onClick` runs, so `contains(activeElement)` is true on
+           * every pointer close, whatever had focus a moment earlier. Suppressing the
+           * default leaves the caret where the user put it, which is both the behaviour
+           * this control should have and the only way the test below can answer honestly.
+           *
+           * This is invisible to a synthetic `element.click()`, which dispatches no
+           * mousedown and moves no focus — so a probe driving the UI that way will keep
+           * reporting the bug fixed. It has to be a real pointer event.
+           */
+          event.preventDefault();
+        }}
         onClick={(event) => {
           // Otherwise the click bubbles to the tab and selects what it is about to close.
           event.stopPropagation();
