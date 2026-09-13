@@ -122,6 +122,8 @@ gh pr checks <n> --watch
 ```
 
 A PR is not done until **both legs are green**. If one is red, fix it before reporting.
+Read the result per job: `gh run watch --exit-status` has been observed exiting 0 while the
+macOS leg was failing, so trust the per-job conclusions, not an aggregate exit code.
 
 ## 8. If you are a dispatched worker
 
