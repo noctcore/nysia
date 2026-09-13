@@ -56,24 +56,51 @@ const PALETTE_CLASS = new RegExp(
 );
 
 /**
- * Rule 4: a bare CSS colour name, in either of the two places one can be written.
+ * Rule 4: a bare CSS colour name, in the two positions where a bare word *is* a colour.
  *
  * It cannot scan whole files the way the hex and function rules do — these words are
- * ordinary English, and "the red build turned green" is not a violation. So it looks in
- * the two syntactic positions where a bare word *is* a colour:
+ * ordinary English, and "the red build turned green" is not a violation. So it looks at:
  *
- *  - inside a Tailwind arbitrary value, which is bracketed and never carries a quote;
- *  - as the entire content of a quoted string, which is what an inline style is. The rule
- *    used to stop at brackets, so an inline style naming a colour shipped with every gate
- *    green — while the same style naming a hex or a colour function was caught, because
- *    those two rules scan the whole file. The scope is consistent now.
+ *  - a Tailwind arbitrary value, which is bracketed and never carries a quote;
+ *  - a string literal that is the value of a CSS property, which is what an inline style
+ *    is.
  *
- * Requiring the *whole* string to be the colour name is what keeps prose out: a comment
- * mentioning one is not a one-word string literal. Backticks are excluded for the same
- * reason, since a doc comment marks up code with them.
+ * The property prefix is what makes the second one safe, and it replaced a much blunter
+ * rule that flagged *any* single-word quoted string. That rule had three problems, and the
+ * prefix answers all of them at once:
+ *
+ *  - it fired on unrelated code. `apps/web/src/transport` is being written now, and a
+ *    protocol literal spelling `gold`, `navy`, `silver` or `tan` would have tripped a
+ *    colour guard in a module that paints nothing. A guard that cries wolf on someone
+ *    else's file is a guard the next person in a hurry switches off, which costs more than
+ *    the case it was catching.
+ *  - it could only see one word, so a multi-token value slipped through. A shorthand
+ *    naming a colour among other tokens is caught now.
+ *  - it had to exclude backticks, because a doc comment marks up code with them. With a
+ *    property required in front, a template literal is no more ambiguous than a quoted
+ *    one, so all three quote characters are in scope.
+ *
+ * What it still cannot see, stated so the next reader knows it is known: a colour that
+ * reaches CSS through a variable rather than a literal (`color: chosen`), and a colour
+ * name in a string that no property introduces. Both need types or a parser rather than a
+ * sweep; the hex and colour-function rules, which do scan whole files, are the backstop.
  */
 const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
-const WHOLE_STRING = /'\s*([a-zA-Z]+)\s*'|"\s*([a-zA-Z]+)\s*"/g;
+
+/**
+ * A property that can paint: anything ending in `color` in either casing, plus the
+ * shorthands that take one among other tokens. Matching the suffix rather than a list
+ * covers `borderTopColor`, `textDecorationColor` and every sibling without enumerating
+ * them.
+ */
+const PAINTING_PROPERTY =
+  '[a-zA-Z-]*[cC]olor|background|background-?[iI]mage|' +
+  'border(?:-?(?:top|right|bottom|left|Top|Right|Bottom|Left))?|' +
+  'outline|fill|stroke|box-?[sS]hadow|text-?[sS]hadow';
+const STYLE_VALUE = new RegExp(
+  `(?:${PAINTING_PROPERTY})\\s*:\\s*(['"\`])([^'"\`\\n]*)\\1`,
+  'g',
+);
 const NAMED_COLOURS = new Set(
   ('aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue ' +
     'blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue ' +
@@ -122,10 +149,13 @@ export function findColourLiterals(source: string): readonly ColourLiteral[] {
       }
     }
   }
-  for (const match of source.matchAll(WHOLE_STRING)) {
-    const word = (match[1] ?? match[2] ?? '').toLowerCase();
-    if (NAMED_COLOURS.has(word)) {
-      found.push({ kind: 'named-colour', text: match[0] });
+  for (const match of source.matchAll(STYLE_VALUE)) {
+    const value = (match[2] ?? '').toLowerCase();
+    for (const word of value.matchAll(/[a-z]+/g)) {
+      if (NAMED_COLOURS.has(word[0])) {
+        found.push({ kind: 'named-colour', text: match[0] });
+        break;
+      }
     }
   }
 
