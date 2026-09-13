@@ -9,6 +9,7 @@
 //! (`pnpm ts-drift`) fails the build when it stops matching what this crate produces.
 
 pub mod credit;
+pub mod envelope;
 pub mod error;
 pub mod frame;
 pub mod handshake;
@@ -19,6 +20,10 @@ pub mod terminal;
 pub mod version;
 
 pub use credit::{CreditAck, CreditFrame, CreditGrant, CreditWindow};
+pub use envelope::{
+    EnvelopeError, MutationReceipt, RequestEnvelope, RequestId, RequestPayload, ResponseEnvelope,
+    ResponsePayload,
+};
 pub use error::{ErrorCode, ErrorEnvelope, ErrorEnvelopeError, NextSteps};
 pub use frame::{
     FRAME_HEADER_BYTES, Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_PAYLOAD_BYTES,
