@@ -20,6 +20,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod channel;
+mod commands;
+mod daemon;
+mod state;
 
 use std::process::ExitCode;
 
@@ -34,7 +37,28 @@ fn main() -> ExitCode {
 
     // The window chrome is drawn by the webview on every platform (decorations are off in
     // tauri.conf.json), because the design uses the same custom titlebar everywhere.
-    match tauri::Builder::default().run(tauri::generate_context!()) {
+    //
+    // The client is managed state rather than a global, so every command reaches it through
+    // `try_state` and a missing one is a message rather than a panic. It holds no
+    // connection until the webview asks for one: the daemon outlives the window, so
+    // connecting is something the window does, not something it is born with (D-1).
+    let app = tauri::Builder::default()
+        .manage(state::Client::new())
+        .invoke_handler(tauri::generate_handler![
+            commands::daemon_connect,
+            commands::daemon_status,
+            commands::daemon_watch,
+            commands::session_list,
+            commands::session_create,
+            commands::session_close,
+            commands::terminal_attach,
+            commands::terminal_ack,
+            commands::terminal_send,
+            commands::terminal_resize,
+            commands::host_platform,
+        ]);
+
+    match app.run(tauri::generate_context!()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!(%error, "the Nysia window could not start");
