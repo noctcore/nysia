@@ -77,10 +77,19 @@ pub struct TerminalRead {
 }
 
 /// How much state a session retains.
+///
+/// Every field is a ceiling, and between them they are the whole of a session's memory
+/// footprint. That matters more here than it would in a per-window terminal: under D-1 one
+/// daemon owns every session, so an unbounded one does not leak its own process, it takes
+/// all the others down with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VtConfig {
     /// How many logical lines the line log keeps before evicting the oldest.
     pub line_log_lines: usize,
+    /// How many bytes of logical-line text the line log keeps, the uncommitted head
+    /// included. Without this, a stream containing no newline at all — which is every row
+    /// soft-wrapped and so no line ever finished — grows the log forever.
+    pub line_log_bytes: usize,
     /// How many raw bytes the replay ring keeps.
     pub replay_bytes: usize,
 }
@@ -89,6 +98,7 @@ impl Default for VtConfig {
     fn default() -> Self {
         Self {
             line_log_lines: 10_000,
+            line_log_bytes: 4 * 1024 * 1024,
             replay_bytes: 256 * 1024,
         }
     }
@@ -197,7 +207,7 @@ impl TerminalState {
             replies,
             osc: OscSniffer::new(),
             replay: ReplayRing::with_capacity(config.replay_bytes),
-            lines: LineLog::with_capacity(config.line_log_lines),
+            lines: LineLog::with_capacity(config.line_log_lines, config.line_log_bytes),
             size,
             overflows: 0,
         }
@@ -444,11 +454,16 @@ mod tests {
     }
 
     #[test]
-    fn a_clear_typed_one_byte_at_a_time_reads_back_clean() {
-        // The regression this whole read API exists for. Orca's default read returns the
-        // accumulated escape-stripped stream, so a `clear` typed one key at a time — each
-        // keystroke arriving as its own echo — reads back as `cclclecleaclear`. The screen
-        // is a projection of the grid, so it cannot accumulate that way.
+    fn the_screen_projection_shows_the_result_not_the_keystrokes() {
+        // The screen is a projection of the grid, so it cannot accumulate the way an
+        // echo-stripped byte stream does: `clear` typed one key at a time, each keystroke
+        // arriving as its own echo, still reads back as one word and then as nothing.
+        //
+        // Orca's default read returns its accumulated stream and famously reports that as
+        // `cclclecleaclear`. Nysia has no such mode to compare against — `--stream` here is
+        // the logical line log plus the viewport, both of which are projections too — so
+        // this is a regression test on the screen projection, not a reproduction of that
+        // artefact. Which mode is the *default* is a separate guarantee with its own test.
         let mut state = state();
         state.feed(b"$ ");
         for byte in b"clear" {
@@ -461,9 +476,8 @@ mod tests {
 
         // The prompt's trailing space is padding on an otherwise empty row, so the
         // rendered screen is the prompt alone.
-        let read = state.read(ReadMode::Screen, 0, usize::MAX);
-        assert_eq!(read.text, "$");
-        assert!(!read.text.contains("cclcl"));
+        assert_eq!(state.screen(), "$");
+        assert!(!state.screen().contains("cclcl"));
     }
 
     #[test]
@@ -563,6 +577,43 @@ abcdefg",
     }
 
     #[test]
+    fn a_newline_free_stream_does_not_grow_the_session_without_bound() {
+        // The whole path, not just the log: bytes arrive at the grid, every row fills the
+        // width and is marked wrapped, every scrolled row is handed to the line log with
+        // `wrapped = true`, and nothing ever ends a logical line. This is `yes | tr -d
+        // "\n"`, a minified bundle, `base64 -w0` of a large file.
+        let budget = 64 * 1024;
+        let mut state = TerminalState::new(
+            TerminalSize::new(80, 24),
+            VtConfig {
+                line_log_lines: 8,
+                line_log_bytes: budget,
+                replay_bytes: 4 * 1024,
+            },
+        );
+
+        let chunk: Vec<u8> = std::iter::repeat_n(b'x', 64 * 1024).collect();
+        for _ in 0..64 {
+            state.feed(&chunk);
+        }
+
+        // Four megabytes of newline-free output went in.
+        let log = state.line_log();
+        assert!(
+            log.retained_bytes() <= log.byte_ceiling(),
+            "the line log retained {} bytes against a ceiling of {}",
+            log.retained_bytes(),
+            log.byte_ceiling()
+        );
+        assert!(log.byte_ceiling() <= budget * 2);
+        assert!(state.replay().len() <= 4 * 1024);
+        assert!(
+            log.split_lines() > 0,
+            "a line this long must have been committed in pieces"
+        );
+    }
+
+    #[test]
     fn the_alternate_screen_does_not_reach_the_line_log() {
         let mut state = state();
         state.feed(b"primary\r\n");
@@ -655,8 +706,23 @@ abcdefg",
     }
 
     #[test]
-    fn screen_is_the_default_mode() {
-        assert_eq!(ReadMode::default(), ReadMode::Screen);
+    fn a_read_with_no_mode_given_is_the_screen_and_not_the_stream() {
+        // §7.2's divergence from Orca is about the *default*, so the test has to exercise
+        // the default rather than name it. The two projections are made to differ first —
+        // four lines have scrolled out, four are still on screen — so moving `#[default]`
+        // to `Stream` turns this red instead of leaving it green.
+        let mut state = state();
+        for n in 0..8 {
+            state.feed(format!("line {n}\r\n").as_bytes());
+        }
+        let screen = state.read(ReadMode::Screen, 0, usize::MAX).text;
+        let stream = state.read(ReadMode::Stream, 0, usize::MAX).text;
+        assert_ne!(screen, stream, "the two projections must differ here");
+
+        let defaulted = state.read(ReadMode::default(), 0, usize::MAX);
+        assert_eq!(defaulted.mode, ReadMode::Screen);
+        assert_eq!(defaulted.text, screen);
+        assert_ne!(defaulted.text, stream);
     }
 
     #[test]
