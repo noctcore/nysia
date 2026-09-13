@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { StoreCommandError } from './errors';
+import { StoreCommandError, hasDistinctIds } from './errors';
 import type { Store, StoreSnapshot } from './types';
 
 /**
@@ -179,6 +179,34 @@ export function describeStoreContract(name: string, create: StoreFactory): void 
         expect(recorded?.id).toBe(
           rejection instanceof StoreCommandError ? rejection.errorId : undefined,
         );
+      });
+
+      it('gives every failure its own id', async () => {
+        // `CommandErrors` keys the notice list on this id and dismisses by it, so a
+        // provider that reused one id for every failure would pass every other case here
+        // and then, on screen, render duplicate React keys and a dismiss button that
+        // cleared the whole list at once.
+        const store = await ready();
+        await store.openTab('launcher.that.does.not.exist').catch(() => {});
+        await store.selectProject('nowhere').catch(() => {});
+
+        const errors = store.getSnapshot().errors;
+        expect(errors.length).toBeGreaterThanOrEqual(2);
+        expect(hasDistinctIds(errors), errors.map((e) => e.id).join(', ')).toBe(true);
+      });
+
+      it('keeps ids distinct when the same command fails the same way twice', async () => {
+        // Two failures a second apart are two notices, not one that flickers — which only
+        // holds if the id is per failure rather than per command or per message.
+        const store = await ready();
+        await store.openTab('launcher.that.does.not.exist').catch(() => {});
+        await store.openTab('launcher.that.does.not.exist').catch(() => {});
+
+        const repeated = store
+          .getSnapshot()
+          .errors.filter((error) => error.command === 'openTab');
+        expect(repeated).toHaveLength(2);
+        expect(repeated[0]?.id).not.toBe(repeated[1]?.id);
       });
 
       it('changes nothing else', async () => {
