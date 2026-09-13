@@ -92,10 +92,41 @@ describe('findColourLiterals', () => {
     }
   });
 
+  it('finds a colour among the other tokens of a shorthand', () => {
+    // The rule used to see only a whole one-word string, so a shorthand naming a colour
+    // alongside a width and a style went straight through.
+    expect(
+      findColourLiterals("style={{ border: '1px solid red' }}").map((c) => c.kind),
+    ).toEqual(['named-colour']);
+    expect(
+      findColourLiterals('style={{ boxShadow: "0 0 8px rgba red" }}').map((c) => c.kind),
+    ).toContain('named-colour');
+  });
+
+  it('finds a colour in a template literal, now that a property has to introduce it', () => {
+    // Backticks were excluded while any one-word string counted, because a doc comment
+    // marks up code with them. With a property in front they are no more ambiguous than
+    // the other two quotes.
+    expect(findColourLiterals('style={{ color: `red` }}').map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
+  });
+
+  it('stays quiet on a string that no style property introduces', () => {
+    // The rule this replaced flagged any single-word quoted string, which would have
+    // fired on protocol literals in `src/transport` — a colour guard shouting at a module
+    // that paints nothing is a guard someone switches off.
+    for (const innocent of [
+      "const tier = 'gold';",
+      "if (kind === 'silver') return;",
+      "shell === 'tan'",
+      "{ label: 'navy' }",
+    ]) {
+      expect(findColourLiterals(innocent), innocent).toEqual([]);
+    }
+  });
+
   it('does not mistake prose or an ordinary short string for a colour', () => {
-    // The whole string has to be the colour name, which is what keeps English out: a
-    // comment mentioning one is not a one-word string literal, and a doc comment marks up
-    // code with backticks rather than quotes.
     expect(findColourLiterals('// the red build turned green again')).toEqual([]);
     expect(findColourLiterals('/** paints it `red` when it fails */')).toEqual([]);
     expect(findColourLiterals("const label = 'red alert';")).toEqual([]);
