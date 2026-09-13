@@ -2,19 +2,27 @@
  * Proof that every lint-meta architecture rule trips (traps register #13).
  *
  * `pnpm lint` runs the rules against the real repository, where they are expected to find
- * nothing — which on its own proves nothing at all. This points the same runner at the
- * fixture trees: `trips`, where each rule is broken directly; `trips-transitive`, which
- * exercises the indirect branch of the crate rule; and `clean`, which exercises every
- * carve-out the rules allow.
+ * nothing — which on its own proves nothing at all. This points the same rules at fixtures
+ * built to break them:
+ *
+ * - `fixtures/trips` and `fixtures/clean` — source trees for rule (a). Every literal form
+ *   and the astral characters sit **above** the asserted imports, so removing the literal
+ *   handling or the code-unit indexing makes this proof red rather than only the unit tests.
+ * - `fixtures/cargo/violating` and `fixtures/cargo/clean` — real cargo workspaces, resolved
+ *   offline through path dependencies on a stub crate named `tauri`, for rules (b) and (c).
+ * - `fixtures/cargo/unresolvable` — a workspace cargo cannot read, to prove the rules
+ *   report that they could not run instead of reporting zero violations.
  */
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import process from 'node:process';
 
-import { runRules, type Violation } from '../tools/lint-meta/src/rules.ts';
+import { runCargoRules, runSourceRules, type Violation } from '../tools/lint-meta/src/rules.ts';
 import { findRepoRoot } from '../tools/lint-meta/src/repoRoot.ts';
 
 const repoRoot = findRepoRoot();
-const fixture = (name: string): string => join(repoRoot, 'tools', 'lint-meta', 'fixtures', name);
+const fixture = (...parts: string[]): string =>
+  join(repoRoot, 'tools', 'lint-meta', 'fixtures', ...parts);
 
 const failures: string[] = [];
 
@@ -58,56 +66,84 @@ function expectMessage(violations: readonly Violation[], rule: string, fragment:
   }
 }
 
+function expectClean(violations: readonly Violation[], what: string): void {
+  if (violations.length > 0) {
+    failures.push(
+      `${what} reported ${violations.length} violation(s): ` +
+        violations.map((v) => `${v.file} ${v.rule}`).join(', '),
+    );
+  }
+}
+
 process.stdout.write('prove:lint-meta\n');
 
-const trips = runRules(fixture('trips'));
+// ---------------------------------------------------------------------------------------
+// Rule (a) — the Rust and TypeScript source scan.
+// ---------------------------------------------------------------------------------------
+const trips = runSourceRules(fixture('trips'));
 expectRule(trips, 'no-tauri-outside-desktop');
-expectRule(trips, 'no-tauri-in-rust-crates');
-
-// crates/nysia can reach tauri straight out of [workspace.dependencies] without editing a
-// single shared file, so the rule has to inspect every crate and not only the dependency
-// chain rooted at nysia-core.
-expectFile(trips, 'no-tauri-in-rust-crates', 'crates/nysia/Cargo.toml');
 
 // The three Rust spellings a line-anchored `use tauri::` regex walked straight past. Exact
-// lines, so the locator is proven and not just the boolean.
+// lines, so the locator is proven and not just the boolean — and every literal form and the
+// astral characters that must not hide them sit above these lines in the fixture.
 expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 22); // use ::tauri::Builder;
 expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 25); // use {tauri, serde};
 expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 28); // the multi-line form
 
-// A multi-line grouped import in a .js file. ESLint's ban blocks were {ts,tsx} only and
-// the regex was line-anchored, so this spelling was covered by neither layer.
+// A multi-line grouped import in a .js file, and a `require()` in a .cjs one. ESLint's ban
+// blocks were {ts,tsx} only, and `no-restricted-imports` never covered `require` at all.
 expectFile(trips, 'no-tauri-outside-desktop', 'apps/web/src/legacy.js');
 
-// A renamed dependency pulls the same crate under another key; reading keys alone missed it.
-expectMessage(trips, 'no-tauri-in-rust-crates', 'package = "tauri"');
+expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
+process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');
 
-// The transitive branch has its own fixture: nysia-core is clean and the violation arrives
-// through nysia-proto. Without it, that branch is code nobody has watched fail.
-const transitive = runRules(fixture('trips-transitive'));
-expectRule(transitive, 'no-tauri-reaching-core');
-expectFile(transitive, 'no-tauri-in-rust-crates', 'crates/nysia-proto/Cargo.toml');
-expectMessage(transitive, 'no-tauri-reaching-core', 'nysia-core -> nysia-proto');
+// ---------------------------------------------------------------------------------------
+// Rules (b) and (c) — cargo's own resolution of a real workspace.
+// ---------------------------------------------------------------------------------------
+const cargoTrips = runCargoRules(fixture('cargo', 'violating'));
+expectRule(cargoTrips, 'no-tauri-in-rust-crates');
+expectRule(cargoTrips, 'no-tauri-reaching-core');
 
-const clean = runRules(fixture('clean'));
-if (clean.length > 0) {
+// crates/nysia can reach tauri straight out of [workspace.dependencies] without editing a
+// shared file, so every crate is inspected and not only the chain rooted at nysia-core.
+// Here it is declared through a rename under a quoted table header.
+expectFile(cargoTrips, 'no-tauri-in-rust-crates', 'crates/nysia/Cargo.toml');
+expectMessage(cargoTrips, 'no-tauri-in-rust-crates', 'package = "tauri"');
+
+// Declared under a quoted key, in a `[ dependencies ]` header carrying whitespace and a
+// trailing comment. The hand-written parser reported 0 violations for every one of these.
+expectFile(cargoTrips, 'no-tauri-in-rust-crates', 'crates/nysia-proto/Cargo.toml');
+
+// nysia-core's manifest carries a trailing comment after `[package]`. The old parser could
+// not read its name and dropped that crate from the scan entirely, so rules (b) and (c) went
+// blind on it; cargo has no such trouble and the chain through it is visible.
+expectMessage(cargoTrips, 'no-tauri-reaching-core', 'nysia-core -> nysia-proto -> tauri');
+
+expectClean(runCargoRules(fixture('cargo', 'clean')), 'the clean cargo workspace');
+process.stdout.write('  clean: apps/desktop may link tauri in its own manifest\n');
+
+// A rule that cannot run must say so. This is the failure mode the whole round is about:
+// reporting "0 violations" because the check never happened.
+const unreadable = spawnSync(
+  process.execPath,
+  [join(repoRoot, 'tools', 'lint-meta', 'src', 'cli.ts'), fixture('cargo', 'unresolvable')],
+  { cwd: repoRoot, encoding: 'utf8', shell: false },
+);
+if (unreadable.status !== 2) {
   failures.push(
-    `the clean fixture reported ${clean.length} violation(s): ` +
-      clean.map((v) => `${v.file} ${v.rule}`).join(', '),
+    `an unreadable workspace exited ${unreadable.status}, not 2 — a dependency rule that ` +
+      'could not run must never look like a clean one',
   );
 } else {
-  process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');
+  process.stdout.write('  reports failure: an unreadable workspace exits 2, not 0\n');
 }
 
+// ---------------------------------------------------------------------------------------
 // The repo-wide scan skips the fixtures. If that exclusion ever widened, the rules would
-// stop seeing real code, so assert the real tree is still being scanned.
-const scanned = runRules(repoRoot);
-if (scanned.length > 0) {
-  failures.push(
-    `the repository itself has ${scanned.length} violation(s): ` +
-      scanned.map((v) => `${v.file} ${v.rule}`).join(', '),
-  );
-}
+// stop seeing real code, so assert the real tree is still scanned by both halves.
+// ---------------------------------------------------------------------------------------
+expectClean(runSourceRules(repoRoot), 'the repository source scan');
+expectClean(runCargoRules(repoRoot), 'the repository dependency graph');
 
 if (failures.length > 0) {
   for (const failure of failures) process.stderr.write(`prove:lint-meta FAILED — ${failure}\n`);

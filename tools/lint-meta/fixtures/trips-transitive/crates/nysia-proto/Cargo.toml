@@ -1,6 +1,0 @@
-[package]
-name = "nysia-proto"
-
-[dependencies]
-serde = { workspace = true }
-tauri = { workspace = true }

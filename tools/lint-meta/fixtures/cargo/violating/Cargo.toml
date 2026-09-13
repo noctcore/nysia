@@ -1,0 +1,11 @@
+# A real cargo workspace, resolvable offline: every dependency is a path dependency, so
+# `cargo metadata` needs no registry and no network.
+[workspace]
+resolver = "3"
+members = [
+  "vendor/tauri",
+  "crates/nysia-proto",
+  "crates/nysia-core",
+  "crates/nysia",
+  "apps/desktop/src-tauri",
+]

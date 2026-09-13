@@ -1,0 +1,11 @@
+# The same shape as `violating`, with only apps/desktop linking the UI toolkit — which is
+# exactly what the allowlist permits. Proves the rules stay silent where they should.
+[workspace]
+resolver = "3"
+members = [
+  "vendor/tauri",
+  "crates/nysia-proto",
+  "crates/nysia-core",
+  "crates/nysia",
+  "apps/desktop/src-tauri",
+]

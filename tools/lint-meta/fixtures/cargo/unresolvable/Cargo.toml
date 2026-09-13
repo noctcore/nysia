@@ -1,0 +1,4 @@
+# Deliberately unreadable. `cargo metadata` fails here, and lint-meta must exit 2 — a
+# dependency rule that could not run must never report "0 violations".
+[workspace
+resolver = "3"
