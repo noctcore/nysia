@@ -99,6 +99,11 @@ decisions D-1..D-18), `docs/design/design-spec.md` (tokens, chrome, three screen
 - TypeScript: no `any`, no non-null `!`. Wire types come from `nysia-proto` via ts-rs —
   never hand-write a type that Rust already exports.
 - Tests are node-only vitest and `cargo test`. Test behaviour, not implementation.
+- **A security default that an ordinary caller can undo is not a default, it is a
+  suggestion.** If a value is scrubbed, refused or confined for a safety reason, layering
+  caller input on top of it must not reintroduce it. Where a deliberate override is
+  genuinely needed, put it behind a separately named entry point whose name says so, so the
+  call site is obvious in review and greppable — never on the path everyone already uses.
 
 ## 7. Gates — all must pass before you open a PR
 
