@@ -947,6 +947,17 @@ mod tests {
             .expect("a shell session starts")
     }
 
+    /// Wait until the shell has drawn its prompt and gone quiet.
+    ///
+    /// Typing before this reliably loses rather than occasionally: a shell that has not
+    /// finished starting echoes what is typed and then redraws the line when its line editor
+    /// takes over, so the command appears twice and runs zero times. An empty screen means it
+    /// has written nothing yet; quiet alone would be satisfied by the silence before it starts.
+    fn await_prompt(session: &OwnedSession) {
+        until(session, |text| !text.trim().is_empty());
+        let _ = session.wait(WaitFor::Idle, Some(DEADLINE));
+    }
+
     /// Wait until the session's screen satisfies `predicate`, or give up.
     fn until(session: &OwnedSession, predicate: impl Fn(&str) -> bool) -> String {
         let deadline = Instant::now() + DEADLINE;
@@ -983,7 +994,7 @@ mod tests {
         let registry = SessionRegistry::new();
         let created = create(&registry, None);
         let session = registry.get(&created.handle).expect("the session is there");
-        until(&session, |text| !text.trim().is_empty());
+        await_prompt(&session);
 
         for line in TestShell::pick().lines {
             session
@@ -1077,7 +1088,7 @@ mod tests {
         let registry = SessionRegistry::new();
         let created = create(&registry, None);
         let session = registry.get(&created.handle).expect("the session is there");
-        until(&session, |text| !text.trim().is_empty());
+        await_prompt(&session);
 
         session
             .send(&TerminalSend::line(created.handle.clone(), "exit 7"))
