@@ -1,0 +1,53 @@
+# Fails a pull request that is missing a type or a priority label.
+#
+# `pull_request`, not `pull_request_target`, and the difference matters: this job checks
+# out the PR head to get at .github/scripts/require-pr-facets.mjs, which is how the PR
+# that introduces the script gets checked by it. Running PR code is only safe because
+# `pull_request` hands a fork a read-only token; the same checkout under
+# `pull_request_target` would be a token handover. See the invariant in pr-triage.yml.
+#
+# It re-reads the labels over the API rather than trusting the event payload, so adding
+# the missing label and re-running turns the check green without a new push.
+
+name: pr-facets
+
+on:
+  pull_request:
+    # `labeled`/`unlabeled` are here on purpose: applying the missing label is the fix,
+    # and it should re-run the check. Safe where pr-triage.yml could not do it — this
+    # job writes no labels, so it cannot re-trigger itself.
+    types: [opened, reopened, synchronize, labeled, unlabeled, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: pr-facets-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  facets:
+    name: type and priority
+    runs-on: ubuntu-latest
+    # Dependabot labels its own PRs and cannot be asked to pick a priority.
+    if: github.actor != 'dependabot[bot]'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # The rule, exercised against known-bad label sets. If this step passes while the
+      # rule is broken it is no longer a check, so it runs before the check itself.
+      - name: self-test the rule
+        run: node .github/scripts/require-pr-facets.mjs --self-test
+
+      - name: require a type and a priority label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr view "$PR" --json labels --jq '.labels[].name' \
+            | node .github/scripts/require-pr-facets.mjs
