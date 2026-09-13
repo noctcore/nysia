@@ -759,6 +759,9 @@ mod tests {
         const fn assert_send<T: Send>() {}
         assert_send_sync::<PtySession>();
         assert_send::<PtyOutput>();
+        // The grid goes behind the daemon's mutex alongside the session, so it has to be
+        // `Send` for that mutex to be `Sync`.
+        assert_send::<TerminalState>();
     }
 
     #[test]

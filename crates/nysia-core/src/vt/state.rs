@@ -308,41 +308,55 @@ impl TerminalState {
     /// [`ReadMode::Stream`] returns the logical lines at or after `cursor`, at most `limit`
     /// of them, and appends the current viewport once the log is exhausted — so a short
     /// command's output is complete even before it has scrolled anywhere.
+    ///
+    /// [`TerminalRead::next_cursor`] is where the *returned* page stopped, not where the
+    /// log currently ends: a caller that pages with it sees every line exactly once.
     #[must_use]
     pub fn read(&self, mode: ReadMode, cursor: u64, limit: usize) -> TerminalRead {
-        let text = match mode {
-            ReadMode::Screen => self.screen(),
+        let (text, next_cursor) = match mode {
+            ReadMode::Screen => (self.screen(), self.lines.next_id()),
             ReadMode::Stream => self.stream(cursor, limit),
         };
         TerminalRead {
             mode,
             text,
-            next_cursor: self.lines.next_id(),
+            next_cursor,
             oldest_cursor: self.lines.oldest_id(),
         }
     }
 
     /// The `--stream` projection: scrolled-out lines from `cursor`, then the viewport.
-    fn stream(&self, cursor: u64, limit: usize) -> String {
+    ///
+    /// Returns the text and the cursor the next read should present. The viewport is
+    /// appended only when the page was not cut short by `limit`, because a caller that is
+    /// still paging through the log has not caught up with the screen yet.
+    fn stream(&self, cursor: u64, limit: usize) -> (String, u64) {
+        if limit == 0 {
+            return (String::new(), cursor);
+        }
         let scrolled: Vec<&LogicalLine> = self.lines.since(cursor, limit).collect();
-        let exhausted = scrolled.len() < limit;
+        let cut_short = scrolled.len() == limit;
         let mut text = scrolled
             .iter()
             .map(|line| line.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        if !exhausted {
-            return text;
+
+        if cut_short {
+            // Resume from just after the last line handed over, never from the end of the
+            // log: the lines in between have not been read yet.
+            let next = scrolled.last().map_or(cursor, |line| line.id + 1);
+            return (text, next);
         }
+
         let screen = self.screen();
-        if screen.is_empty() {
-            return text;
+        if !screen.is_empty() {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&screen);
         }
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(&screen);
-        text
+        (text, self.lines.next_id())
     }
 
     /// Copy every row that entered the grid's history into the line log, then clear the
@@ -570,13 +584,48 @@ abcdefg",
         for n in 0..8 {
             state.feed(format!("line {n}\r\n").as_bytes());
         }
+        // Four lines have scrolled out; the other four are still on screen.
         let first = state.read(ReadMode::Stream, 0, 2);
         assert_eq!(first.text, "line 0\nline 1");
-        assert_eq!(first.next_cursor, 4);
+        // Not `next_id()`: lines 2 and 3 have not been handed over yet, and a caller that
+        // followed a cursor pointing past them would never see them.
+        assert_eq!(first.next_cursor, 2);
         assert_eq!(first.oldest_cursor, 0);
 
-        let rest = state.read(ReadMode::Stream, 2, usize::MAX);
-        assert_eq!(rest.text, "line 2\nline 3\nline 4\nline 5\nline 6\nline 7");
+        let second = state.read(ReadMode::Stream, first.next_cursor, 2);
+        assert_eq!(second.text, "line 2\nline 3");
+        assert_eq!(second.next_cursor, 4);
+
+        let rest = state.read(ReadMode::Stream, second.next_cursor, usize::MAX);
+        assert_eq!(rest.text, "line 4\nline 5\nline 6\nline 7");
+        assert_eq!(rest.next_cursor, 4);
+    }
+
+    #[test]
+    fn paging_the_stream_yields_every_line_exactly_once() {
+        let mut state = state();
+        for n in 0..20 {
+            state.feed(format!("line {n}\r\n").as_bytes());
+        }
+        let mut seen = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let page = state.read(ReadMode::Stream, cursor, 3);
+            if page.text.is_empty() {
+                break;
+            }
+            seen.extend(page.text.lines().map(str::to_owned));
+            if page.next_cursor == cursor {
+                break;
+            }
+            cursor = page.next_cursor;
+            if cursor >= state.line_log().next_id() {
+                break;
+            }
+        }
+        // Fifteen scrolled-out lines plus the five still on screen, each exactly once.
+        let expected: Vec<String> = (0..20).map(|n| format!("line {n}")).collect();
+        assert_eq!(seen, expected);
     }
 
     #[test]
