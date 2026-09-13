@@ -10,12 +10,18 @@
 //! cap it advances the head past the next newline.
 //!
 //! **That is a heuristic, not a guarantee, and the limit is worth stating exactly.** A
-//! newline is a reliable boundary in the output that dominates a terminal — printable text,
-//! `CSI` cursor moves, `SGR` colour runs — because none of those can contain one. It is
-//! *not* a boundary inside a string-type sequence: `0x0A` inside a `DCS` payload is passed
-//! through as data, and inside `OSC` or `APC` it is ignored and the sequence continues. A
-//! trimmed replay can therefore still resume in the middle of one of those, and a client
-//! that starts parsing there will mis-read until the terminator arrives.
+//! newline is a *useful* boundary in the output that dominates a terminal, because printable
+//! text, `CSI` cursor moves and `SGR` colour runs do not normally carry one. It is not a
+//! boundary the parser guarantees, in two separate ways:
+//!
+//! - Inside a string-type sequence, `0x0A` is content: it is passed through as data in a
+//!   `DCS` payload, and ignored while the sequence continues in `OSC` or `APC`.
+//! - Even in a `CSI`, a newline is not a terminator. The state machine executes a C0
+//!   control where it finds one and stays in the same state, so a `CSI` straddling the trim
+//!   point can contain the very byte the head is aligned to.
+//!
+//! A trimmed replay can therefore still resume mid-sequence, and a client that starts
+//! parsing there will mis-read until the terminator arrives.
 //!
 //! The complete answer is not this ring's to give: §7.3 says that on overflow the whole
 //! transient buffer is dropped and `ESC c` is injected, so the client resets rather than
