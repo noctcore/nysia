@@ -24,6 +24,8 @@
 //!
 //! Owned by wave 1 (W2).
 
+mod env;
 mod resolve;
 
+pub use env::{FORCED_COLORTERM, FORCED_TERM, SCRUBBED_VARS, sanitize};
 pub use resolve::{ResolveError, ResolvedProgram, resolve};
