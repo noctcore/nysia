@@ -8,5 +8,11 @@ import type { HelloRejected } from "./HelloRejected";
  * Untagged, because the two arms are told apart by `ok` — which is a literal `true` or
  * `false` in both Rust and TypeScript, so neither side has to guess from which optional
  * field happens to be present.
+ *
+ * Untagged has one sharp edge worth naming: serde reports a failure in *any* arm as "data
+ * did not match any variant", so a rejection this build cannot parse is indistinguishable
+ * from a frame that was never a `hello` response. [`RejectReason::Unknown`] is what keeps
+ * the rejection arm as tolerant as the acceptance arm — unknown fields are already ignored
+ * on both sides, and now an unknown `kind` is too.
  */
 export type HelloResponse = HelloAccepted | HelloRejected;

@@ -419,6 +419,28 @@ pub enum RejectReason {
         /// What could not be read.
         detail: String,
     },
+    /// A reason this build does not know, from a daemon newer than it.
+    ///
+    /// The forward-compatibility valve, and it belongs on this side of the handshake more
+    /// than anywhere else. [`HelloResponse`] is untagged, so a `reason` this build cannot
+    /// parse does not merely lose the reason — it fails the whole frame, serde falls
+    /// through to [`HelloAccepted`], that fails too, and the client is left holding "data
+    /// did not match any variant" with no idea it was rejected at all. §3.1 asks a client
+    /// to refuse an incompatible daemon cleanly, and not being able to read *why* is the
+    /// worst version of that.
+    ///
+    /// `#[serde(other)]` catches any unrecognised `kind`, so the client still learns that
+    /// it was refused and still gets `retryable` — which is the field it actually branches
+    /// on. Serialising is honest rather than lossy: this build never invents a reason it
+    /// was not given, so an `Unknown` it writes out says `{"kind":"unknown"}`.
+    ///
+    /// ts-rs prints `failed to parse serde attribute: other` while compiling this, and that
+    /// is expected rather than a problem to chase. It does not understand `other` and so
+    /// ignores it, which leaves the exported union carrying `{ "kind": "unknown" }` — an
+    /// accurate description of what Rust *writes*. What Rust *reads* is wider than any
+    /// union could say, and that asymmetry is the point of the variant.
+    #[serde(other)]
+    Unknown,
 }
 
 impl RejectReason {
@@ -427,6 +449,13 @@ impl RejectReason {
     /// Only [`ShuttingDown`](RejectReason::ShuttingDown) is retryable: the daemon is on its
     /// way out and the next connection attempt reaches a fresh one. The other three are
     /// properties of the client, and retrying reproduces them exactly.
+    ///
+    /// [`Unknown`](RejectReason::Unknown) is not retryable either, which is the
+    /// conservative reading: a reason this build cannot name is not one it can argue it
+    /// will survive, and reconnecting in a loop against a daemon that keeps refusing is
+    /// worse than stopping. A client that wants the daemon's own opinion reads
+    /// [`HelloRejected::retryable`], which is carried on the wire precisely so the reason
+    /// taxonomy does not have to be understood to act on it.
     #[must_use]
     pub const fn retryable(&self) -> bool {
         matches!(self, Self::ShuttingDown)
@@ -469,6 +498,12 @@ impl HelloRejected {
 /// Untagged, because the two arms are told apart by `ok` — which is a literal `true` or
 /// `false` in both Rust and TypeScript, so neither side has to guess from which optional
 /// field happens to be present.
+///
+/// Untagged has one sharp edge worth naming: serde reports a failure in *any* arm as "data
+/// did not match any variant", so a rejection this build cannot parse is indistinguishable
+/// from a frame that was never a `hello` response. [`RejectReason::Unknown`] is what keeps
+/// the rejection arm as tolerant as the acceptance arm — unknown fields are already ignored
+/// on both sides, and now an unknown `kind` is too.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(untagged)]
 #[ts(export)]
@@ -654,6 +689,47 @@ mod tests {
                 "retryable": false,
             })
         );
+    }
+
+    #[test]
+    fn a_rejection_from_a_newer_daemon_is_still_read_as_a_rejection() {
+        // The failure this guards against is not "the reason is lost". It is that an
+        // untagged enum reports any arm's failure as "data did not match any variant", so
+        // an unparseable rejection looks to the client like a frame that was never a hello
+        // response at all — §3.1's clean refusal turning into a mystery.
+        let from_a_newer_daemon = serde_json::json!({
+            "ok": false,
+            "reason": { "kind": "rate_limited", "retryAfterMs": 5_000 },
+            "retryable": true,
+        });
+        let response: HelloResponse = serde_json::from_value(from_a_newer_daemon)
+            .expect("an unknown reason must not cost the client the whole frame");
+
+        match response {
+            HelloResponse::Rejected(rejected) => {
+                assert_eq!(rejected.reason, RejectReason::Unknown);
+                // `retryable` is what a client actually branches on, and it survives
+                // intact — the daemon's own opinion, not this build's guess.
+                assert!(rejected.retryable);
+            }
+            HelloResponse::Accepted(_) => panic!("a rejection was read as an acceptance"),
+        }
+
+        // A known reason still parses as itself; the valve is a fallback, not a catch-all.
+        let known = serde_json::json!({
+            "ok": false,
+            "reason": { "kind": "shutting_down" },
+            "retryable": true,
+        });
+        assert_eq!(
+            serde_json::from_value::<HelloResponse>(known).unwrap(),
+            HelloResponse::Rejected(HelloRejected::new(RejectReason::ShuttingDown))
+        );
+
+        // An unknown reason is the one case where this build will not claim retryability on
+        // the daemon's behalf.
+        assert!(!RejectReason::Unknown.retryable());
+        assert!(!HelloRejected::new(RejectReason::Unknown).retryable);
     }
 
     #[test]
