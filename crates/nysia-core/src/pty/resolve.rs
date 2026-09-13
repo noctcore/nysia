@@ -288,11 +288,29 @@ fn validate_windows(path: &Path) -> Result<ResolvedProgram, ResolveError> {
         "exe" | "com" => Ok(ResolvedProgram::direct(path.to_path_buf())),
         // `cmd.exe /c` is how a `.cmd` or `.bat` shim gets launched at all: it is a script,
         // and `CreateProcess` refuses scripts.
+        //
+        // The `call` is load-bearing, not decoration. `cmd /c` applies this rule to the
+        // tail after the switch: unless the tail holds exactly two quotes, and if its
+        // *first character is a quote*, cmd strips that leading quote and the last quote on
+        // the line. A shim under a path containing a space is quoted, so the tail does
+        // start with one; add any argument that also needs quoting — a space, an empty
+        // string — and the count passes two, so the strip tears the command in half.
+        // `"C:\p ath\x.cmd" "a b"` becomes `C:\p ath\x.cmd" "a b`, and cmd answers "is not
+        // recognized". A user whose account name contains a space meets this on an ordinary
+        // npm shim.
+        //
+        // Starting the tail with an unquoted word means the strip never triggers and every
+        // quote survives as written. `call` is the right word for it: it is how a batch file
+        // is invoked from a batch context, and it propagates the exit code.
         "cmd" | "bat" => {
             let shell = interpreter("cmd.exe", path)?;
             Ok(ResolvedProgram {
                 program: shell,
-                leading_args: vec![OsString::from("/c"), path.as_os_str().to_owned()],
+                leading_args: vec![
+                    OsString::from("/c"),
+                    OsString::from("call"),
+                    path.as_os_str().to_owned(),
+                ],
                 through_cmd: true,
             })
         }
@@ -395,7 +413,11 @@ mod tests {
     fn argv_puts_the_interpreter_first_and_the_callers_args_last() {
         let resolved = ResolvedProgram {
             program: PathBuf::from("cmd.exe"),
-            leading_args: vec![OsString::from("/c"), OsString::from("claude.cmd")],
+            leading_args: vec![
+                OsString::from("/c"),
+                OsString::from("call"),
+                OsString::from("claude.cmd"),
+            ],
             through_cmd: true,
         };
         let argv = resolved.argv(["--help"]).expect("a plain flag is safe");
@@ -404,6 +426,7 @@ mod tests {
             vec![
                 OsString::from("cmd.exe"),
                 OsString::from("/c"),
+                OsString::from("call"),
                 OsString::from("claude.cmd"),
                 OsString::from("--help"),
             ]
@@ -419,7 +442,11 @@ mod tests {
         // a task-derived argument to `claude.cmd`.
         let shim = ResolvedProgram {
             program: PathBuf::from("cmd.exe"),
-            leading_args: vec![OsString::from("/c"), OsString::from("claude.cmd")],
+            leading_args: vec![
+                OsString::from("/c"),
+                OsString::from("call"),
+                OsString::from("claude.cmd"),
+            ],
             through_cmd: true,
         };
         for hostile in [
@@ -512,6 +539,46 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    fn a_batch_shim_keeps_the_cmd_tail_from_starting_with_a_quote() {
+        // The whole of the spaced-path fix, and the thing that regresses if `call` is
+        // dropped: the tail after `/c` must not begin with a quote.
+        //
+        // Measured rather than reasoned, on this exact pair of command lines:
+        //
+        //   cmd /c "C:\...\nysia shim space\echo-args.cmd" "a b" plain
+        //     -> 'C:\Users\kacpe\AppData\Local\Temp\nysia' is not recognized as an
+        //        internal or external command, operable program or batch file.
+        //   cmd /c call "C:\...\nysia shim space\echo-args.cmd" "a b" plain
+        //     -> SHIMARGS=["a b" plain]
+        //
+        // Launching one from a test would be better than asserting the shape, but a
+        // `cmd /c` one-shot inside a ConPTY does not come back: the child never reports an
+        // exit through `try_wait` and its output never reaches the master, which is a
+        // harness problem of its own and not this module's.
+        let dir = std::env::temp_dir().join("nysia shim space");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let shim = dir.join("echo-args.cmd");
+        std::fs::write(&shim, "@echo off\r\necho SHIMARGS=[%*]\r\n").expect("write shim");
+
+        let resolved = resolve(&shim).expect("the shim must resolve");
+        let argv = resolved
+            .argv(["a b", "plain"])
+            .expect("a spaced argument is not a metacharacter");
+
+        assert_eq!(argv[1], OsString::from("/c"));
+        assert_eq!(
+            argv[2],
+            OsString::from("call"),
+            "without `call` the tail starts with the quoted shim path and cmd strips it"
+        );
+        assert_eq!(argv[3], shim.as_os_str());
+        assert_eq!(argv[4], OsString::from("a b"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn a_cmd_shim_is_launched_through_cmd_exe() {
         // The trap: `CreateProcess` cannot launch a `.cmd`, so an npm shim has to go
         // through its interpreter or the spawn fails with `NotFound`.
@@ -528,7 +595,9 @@ mod tests {
                 .is_some_and(|name| name.eq_ignore_ascii_case("cmd.exe"))
         );
         assert_eq!(resolved.leading_args[0], OsString::from("/c"));
-        assert_eq!(resolved.leading_args[1], shim.as_os_str());
+        // `call` keeps the tail from starting with a quote; see `validate_windows`.
+        assert_eq!(resolved.leading_args[1], OsString::from("call"));
+        assert_eq!(resolved.leading_args[2], shim.as_os_str());
 
         std::fs::remove_dir_all(&dir).ok();
     }
