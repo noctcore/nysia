@@ -50,7 +50,7 @@ import { runAllRules, runSourceRules } from './rules.ts';
 const argument = process.argv[2];
 const root = argument === undefined ? findRepoRoot() : resolve(argument);
 const includeFixtures = process.argv.includes('--include-fixtures');
-/** Rule (a) alone, for a tree that is not a cargo workspace. */
+/** The source rules alone — (a) and (d) — for a tree that is not a cargo workspace. */
 const sourceOnly = process.argv.includes('--source-only');
 
 let violations;
@@ -69,7 +69,8 @@ try {
 }
 
 if (violations.length === 0) {
-  process.stdout.write(`lint-meta: 3 rules, 0 violations\n`);
+  // Two source rules (tauri imports, store-context calls); the cargo rules add two more.
+  process.stdout.write(`lint-meta: ${sourceOnly ? 2 : 4} rules, 0 violations\n`);
   process.exit(0);
 }
 
