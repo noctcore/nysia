@@ -94,6 +94,9 @@ describe('settings', () => {
     }
     // Per-project settings follow the store's projects, not a literal list.
     expect(settings).toContain('shiroani');
+    // Settings search has its own key (design-spec.md §5); the palette's is ⌘K.
+    expect(settings).toContain('⌘F');
+    expect(settings).not.toContain('⌘K');
   });
 
   it('offers both themes and every accent preset', () => {
