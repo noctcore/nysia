@@ -4,7 +4,7 @@
 //! orchestration; this process opens a window, and killing it must never interrupt a
 //! running session. Anything stateful that appears here is a bug, not a shortcut.
 //!
-//! Two rules for whoever fills this in (wave 2, W5):
+//! Two rules that govern every line added here:
 //!
 //! - **Every Tauri command is `async fn` + `spawn_blocking` + `try_state`.** A sync command
 //!   runs on the main thread and freezes the webview. Never `tokio::spawn` inside one: the
@@ -13,9 +13,13 @@
 //!   multiplexed binary `Channel`, coalesced to at least 1 KiB per frame — payloads under
 //!   1024 bytes are delivered through `eval`.
 //!
-//! There are no commands yet. Wave 0 ships a window and nothing else.
+//! What lives here is the client half of the socket protocol and the one multiplexed
+//! `Channel` that carries terminal output to the webview. Nothing else: sessions, PTYs,
+//! terminal state and the store all belong to the daemon.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod channel;
 
 use std::process::ExitCode;
 
