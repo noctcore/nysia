@@ -1,3 +1,4 @@
+import { runCommand } from '../store/runCommand';
 import { useSnapshot, useStore } from '../store/useStore';
 import type { Tab } from '../store/types';
 import { GLYPH } from '../ui/glyphs';
@@ -46,7 +47,7 @@ function TabButton({ tab, active }: { readonly tab: Tab; readonly active: boolea
         type="button"
         role="tab"
         aria-selected={active}
-        onClick={() => void store.selectTab(tab.paneKey)}
+        onClick={() => runCommand(store.selectTab(tab.paneKey))}
         className="max-w-[240px] cursor-pointer truncate border-0 bg-transparent p-0 focus-visible:shadow-focus focus-visible:outline-none"
       >
         {tab.title}
@@ -54,7 +55,7 @@ function TabButton({ tab, active }: { readonly tab: Tab; readonly active: boolea
       <button
         type="button"
         aria-label={`Close ${tab.title}`}
-        onClick={() => void store.closeTab(tab.paneKey)}
+        onClick={() => runCommand(store.closeTab(tab.paneKey))}
         className="text-fg3 hover:text-fg ml-1.5 cursor-pointer border-0 bg-transparent p-0 focus-visible:shadow-focus focus-visible:outline-none"
       >
         {GLYPH.close}

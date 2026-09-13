@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
 
+import { CommandErrors } from './chrome/CommandErrors';
 import { IconRail } from './chrome/IconRail';
 import { StatusBar } from './chrome/StatusBar';
 import { Titlebar } from './chrome/Titlebar';
@@ -24,10 +25,13 @@ export function App() {
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
   return (
-    <div className="bg-bg1 text-fg grid h-full grid-rows-[var(--spacing-titlebar)_1fr_var(--spacing-statusbar)] overflow-hidden">
+    <div className="bg-bg1 text-fg relative grid h-full grid-rows-[var(--spacing-titlebar)_1fr_var(--spacing-statusbar)] overflow-hidden">
       <Titlebar settingsOpen={settingsOpen} onCloseSettings={closeSettings} />
       {settingsOpen ? <SettingsScreen /> : <AppBody onOpenSettings={openSettings} />}
       <StatusBar />
+      {/* Outside both bodies: a command can fail from settings as easily as from the
+          session screen, and the notice must not move when the mode does. */}
+      <CommandErrors />
     </div>
   );
 }

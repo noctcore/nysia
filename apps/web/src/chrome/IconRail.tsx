@@ -1,3 +1,4 @@
+import { runCommand } from '../store/runCommand';
 import { useSnapshot, useStore } from '../store/useStore';
 import type { NavSection } from '../store/types';
 import { GLYPH } from '../ui/glyphs';
@@ -34,7 +35,7 @@ export function IconRail({ onOpenSettings }: { readonly onOpenSettings: () => vo
           label={label}
           glyph={glyph}
           active={nav === section}
-          onClick={() => void store.selectNav(section)}
+          onClick={() => runCommand(store.selectNav(section))}
         />
       ))}
       <RailButton

@@ -1,0 +1,56 @@
+import { runCommand } from '../store/runCommand';
+import { useSnapshot, useStore } from '../store/useStore';
+import { GLYPH } from '../ui/glyphs';
+
+/**
+ * Where a failed command lands.
+ *
+ * Without this the store's error list is a tree falling in an empty forest: the provider
+ * records that the shell binary was missing, and the user sees a menu close. The notices
+ * sit just above the status bar, anchored to the left like the usage popover, so the one
+ * corner of the window that talks about the daemon is the corner that reports it failing.
+ *
+ * They do not time out. A launch that failed is something the user has to act on — the
+ * message carries the daemon's `nextSteps` — and a notice that removes itself while
+ * someone is reading it is worse than one they have to dismiss.
+ */
+export function CommandErrors() {
+  const { errors } = useSnapshot();
+  const store = useStore();
+
+  if (errors.length === 0) {
+    return null;
+  }
+
+  return (
+    <div
+      role="log"
+      aria-live="polite"
+      aria-label="Command failures"
+      className="pointer-events-none absolute bottom-statusbar left-3.5 z-30 flex w-[380px] flex-col gap-2 pb-2"
+    >
+      {errors.map((error) => (
+        <div
+          key={error.id}
+          className="border-status-failed bg-bg2 text-term pointer-events-auto flex items-start gap-3 rounded-panel border p-3 shadow-flyout"
+        >
+          <span aria-hidden="true" className="text-status-failed leading-none">
+            {GLYPH.dot}
+          </span>
+          <div className="flex-1">
+            <div className="text-fg font-semibold">{error.command} failed</div>
+            <div className="text-fg2 mt-1 leading-normal">{error.message}</div>
+          </div>
+          <button
+            type="button"
+            aria-label={`Dismiss ${error.command} failure`}
+            onClick={() => runCommand(store.dismissError(error.id))}
+            className="text-fg3 hover:text-fg cursor-pointer border-0 bg-transparent p-0 leading-none focus-visible:shadow-focus focus-visible:outline-none"
+          >
+            {GLYPH.close}
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}

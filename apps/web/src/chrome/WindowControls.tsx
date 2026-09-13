@@ -1,3 +1,4 @@
+import { runCommand } from '../store/runCommand';
 import { useStore } from '../store/useStore';
 import { GLYPH } from '../ui/glyphs';
 
@@ -46,7 +47,7 @@ function ControlButton({
     <button
       type="button"
       aria-label={label}
-      onClick={() => void onClick()}
+      onClick={() => runCommand(onClick())}
       className={`text-fg2 hover:bg-bg2 grid w-[46px] cursor-pointer place-items-center border-0 bg-transparent focus-visible:shadow-focus focus-visible:outline-none ${className}`}
     >
       <span aria-hidden="true">{glyph}</span>
