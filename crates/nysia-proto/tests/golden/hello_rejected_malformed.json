@@ -1,0 +1,8 @@
+{
+  "ok": false,
+  "reason": {
+    "detail": "first frame was not JSON",
+    "kind": "malformed"
+  },
+  "retryable": false
+}

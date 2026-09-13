@@ -1,0 +1,8 @@
+{
+  "ok": false,
+  "reason": {
+    "detail": "caller is not in a session this daemon spawned",
+    "kind": "unauthorized"
+  },
+  "retryable": false
+}
