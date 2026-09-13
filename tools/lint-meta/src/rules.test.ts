@@ -91,10 +91,16 @@ describe('blankRustComments', () => {
   // An astral char literal is two UTF-16 code units. A pattern matching one leaves the
   // closing quote to pair with whatever follows; the orphaned double quote then opens a
   // string that runs to the next one in the file, erasing everything between.
+  //
+  // Both spellings below put a `'"'` immediately after the astral literal, with no space,
+  // and that is the whole point of them. A third case, `const C: char = '🔥';`, used to
+  // sit here and proved nothing: revert the surrogate-pair alternative in CHAR_LITERAL and
+  // it still passes. A bare literal orphans its quote too, but with no `"` after it in the
+  // file nothing opens a runaway string, so the import below survives and the test is
+  // green either way. Do not re-add it — a case that cannot fail is not a case (trap 12).
   it.each([
     ['an array of char literals', `const C: [char; 2] = ['\u{1F525}','"'];`],
     ['a match pattern', `fn f(c: char) -> bool { matches!(c, '\u{1F525}'|'"') }`],
-    ['a bare astral char literal', `const C: char = '\u{1F525}';`],
   ])('reads %s as a char literal rather than a lifetime', (_what, literal) => {
     const source = `${literal}\nuse tauri::Builder;\n`;
     const blanked = blankRustComments(source);
