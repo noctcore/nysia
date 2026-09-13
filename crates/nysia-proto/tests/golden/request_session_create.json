@@ -6,6 +6,7 @@
     "RUST_LOG": "info"
   },
   "kind": "shell",
+  "paneKey": "tab_1:leaf_1",
   "profile": {
     "distro": "Ubuntu-24.04",
     "shell": "wsl"

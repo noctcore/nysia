@@ -43,15 +43,43 @@ pub enum ShellProfile {
 
 /// Spawn a session.
 ///
-/// The daemon assigns the [`PaneKey`] and the [`SessionHandle`]; a caller cannot name a
-/// pane into existence, because the pane key is the durable primary key for status and
-/// orchestration and minting it is the daemon's job.
+/// The [`SessionHandle`] is always the daemon's to mint. The [`PaneKey`] is not: whoever
+/// owns the pane names it, and when nobody does the daemon fills in. See
+/// [`pane_key`](Self::pane_key).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct SessionCreate {
     /// A shell or an agent.
     pub kind: SessionKind,
+    /// The pane this session belongs to, when the caller owns one.
+    ///
+    /// **The GUI supplies it.** It creates the tab and the leaf, so it already holds
+    /// `<tabId>:<leafId>` (§3.3). Having the daemon mint a key instead would leave the
+    /// window maintaining a map from daemon keys back to its own tree — the bookkeeping §4
+    /// exists to delete, and the first thing to rot the next time a tab is split or
+    /// restored.
+    ///
+    /// **The CLI omits it.** `nysia session create` has no pane and no tab, and requiring a
+    /// key from it would force it to invent one — putting the minting logic in every client
+    /// rather than in the one process that owns persistence. When this is `null` the daemon
+    /// mints a well-formed synthetic `<uuid>:<uuid>`.
+    ///
+    /// Either way [`SessionCreated::pane_key`] carries the definitive value, so a caller
+    /// never has to guess what it ended up with.
+    ///
+    /// Two rules come with this. They are properties of the wire rather than of one
+    /// implementation, which is why they are written down here even though the daemon is
+    /// what enforces them:
+    ///
+    /// 1. A create naming a pane key that already has a live session is **refused**, never
+    ///    silently rebound. Two clients racing for one pane is a real case, and the loser
+    ///    has to be told rather than left believing it owns a session it does not.
+    /// 2. The incarnation counter is **per pane key and owned by the daemon**, so a
+    ///    relaunch in the same pane is `<paneKey>@<n+1>`. A client that counted for itself
+    ///    would restart at zero across its own restart and make two spawns
+    ///    indistinguishable — which is the one thing [`Incarnation`] exists to prevent.
+    pub pane_key: Option<PaneKey>,
     /// Which shell, when `kind` is [`SessionKind::Shell`]. `null` takes the platform
     /// default. Ignored for an agent session, which is always `claude`.
     pub profile: Option<ShellProfile>,
@@ -205,6 +233,7 @@ mod tests {
     fn env_overrides_serialise_in_a_stable_order() {
         let create = SessionCreate {
             kind: SessionKind::Shell,
+            pane_key: Some(PaneKey::new("tab_1", "leaf_1").unwrap()),
             profile: Some(ShellProfile::Pwsh),
             cwd: None,
             env_overrides: BTreeMap::from([
@@ -230,6 +259,7 @@ mod tests {
     fn a_create_round_trips_with_every_optional_field_absent() {
         let create = SessionCreate {
             kind: SessionKind::Agent,
+            pane_key: None,
             profile: None,
             cwd: None,
             env_overrides: BTreeMap::new(),
@@ -243,6 +273,57 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<SessionCreate>(json).unwrap(),
             create
+        );
+    }
+
+    #[test]
+    fn a_create_lets_the_pane_owner_name_the_pane_and_everyone_else_omit_it() {
+        // The GUI already holds `<tabId>:<leafId>`, so it says so.
+        let from_the_window = SessionCreate {
+            kind: SessionKind::Shell,
+            pane_key: Some(PaneKey::new("tab_1", "leaf_1").unwrap()),
+            profile: Some(ShellProfile::Pwsh),
+            cwd: None,
+            env_overrides: BTreeMap::new(),
+            cols: 80,
+            rows: 24,
+        };
+        assert_eq!(
+            serde_json::to_value(&from_the_window).unwrap()["paneKey"],
+            "tab_1:leaf_1"
+        );
+
+        // The CLI has no pane and no tab, so it does not invent one.
+        let from_the_cli = SessionCreate {
+            pane_key: None,
+            ..from_the_window.clone()
+        };
+        assert_eq!(
+            serde_json::to_value(&from_the_cli).unwrap()["paneKey"],
+            serde_json::Value::Null
+        );
+
+        for create in [from_the_window, from_the_cli] {
+            let json = serde_json::to_value(&create).unwrap();
+            assert_eq!(
+                serde_json::from_value::<SessionCreate>(json).unwrap(),
+                create
+            );
+        }
+
+        // A malformed key is still refused at the boundary rather than three layers later:
+        // `Option` makes the field absent-able, not unvalidated.
+        assert!(
+            serde_json::from_value::<SessionCreate>(serde_json::json!({
+                "kind": "shell",
+                "paneKey": "no-separator",
+                "profile": null,
+                "cwd": null,
+                "envOverrides": {},
+                "cols": 80,
+                "rows": 24,
+            }))
+            .is_err()
         );
     }
 

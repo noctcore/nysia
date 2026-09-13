@@ -332,6 +332,7 @@ mod tests {
     fn create() -> RequestPayload {
         RequestPayload::SessionCreate(SessionCreate {
             kind: SessionKind::Shell,
+            pane_key: None,
             profile: None,
             cwd: None,
             env_overrides: BTreeMap::new(),
