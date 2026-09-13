@@ -17,6 +17,8 @@
 //!
 //! Owned by wave 1 (W2).
 
+mod osc;
 mod replay;
 
+pub use osc::{CommandState, OscSniffer, ShellState};
 pub use replay::ReplayRing;
