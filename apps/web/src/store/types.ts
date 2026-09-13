@@ -39,10 +39,13 @@ export type LauncherId = string;
 export type NavSection = 'session' | 'tasks' | 'history';
 
 /**
- * Agent lifecycle, as the status palette paints it (design-spec.md §1).
+ * Agent lifecycle, as the status palette will paint it (design-spec.md §1).
  *
- * `idle` has no colour of its own — a shell is always idle, and an agent between turns
- * reads as ordinary foreground rather than claiming a semantic colour.
+ * Carried from v0.1 even though nothing paints it yet: the sidebar's session dot is the
+ * accent, because there it only has to say "an agent lives here". The lifecycle colours
+ * belong to the Tasks table (v0.3), where a row has to be triaged at a glance among
+ * dozens. Modelling the state now means the daemon-backed provider has somewhere to put
+ * it without the interface changing shape.
  */
 export type SessionStatus = 'idle' | 'running' | 'needsInput' | 'queued' | 'failed';
 
