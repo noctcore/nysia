@@ -11,6 +11,7 @@
 pub mod handshake;
 pub mod identity;
 mod newtype;
+pub mod session;
 pub mod version;
 
 pub use handshake::{
@@ -18,6 +19,10 @@ pub use handshake::{
     HelloRequest, HelloResponse, LaunchNonce, OkFalse, OkTrue, PidRecord, RejectReason,
 };
 pub use identity::{IdentityError, Incarnation, PaneKey, SessionHandle, SessionKind};
+pub use session::{
+    ExitStatus, SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary,
+    ShellProfile,
+};
 pub use version::{
     EndpointError, MIN_ATTACHABLE_PROTOCOL_VERSION, PROTOCOL_VERSION, ProtocolRange,
     ProtocolVersion, endpoint_stem, unix_socket_file_name, windows_pipe_name,
