@@ -361,12 +361,37 @@ describe('the documented residue', () => {
   });
 
   it('misses a painting property the list does not name', () => {
-    // A library with its own colour keys — a terminal theme, a chart config — is outside a
-    // rule that knows CSS property names. `selectionBackground` is the sharper half: the
-    // word is in the list, but the boundary guard that stops `fill` matching inside
-    // `autofill` stops `background` matching here too. The two are the same trade.
+    // A useful subset of CSS, not CSS. The comment used to claim it covered CSS, and these
+    // five are what made that false.
+    for (const css of [
+      "{ textDecoration: 'underline red' }",
+      "{ columnRule: '1px solid red' }",
+      "{ textEmphasis: 'dot red' }",
+      "{ borderInlineStart: '1px solid red' }",
+      "{ filter: 'drop-shadow(0 0 2px red)' }",
+    ]) {
+      expect(findColourLiterals(css), css).toEqual([]);
+    }
+  });
+
+  it('misses a colour key that belongs to a library rather than to CSS', () => {
+    // `selectionBackground` is the sharper half: the word *is* in the list, but the
+    // boundary guard that stops `fill` matching inside `autofill` stops `background`
+    // matching here too. The two are the same trade.
     expect(findColourLiterals("{ cursorAccent: 'red' }")).toEqual([]);
     expect(findColourLiterals("{ selectionBackground: 'navy' }")).toEqual([]);
+  });
+
+  it('misses bare CSS text carried inside a string or a template', () => {
+    // In all three the property is *inside* the literal, and the rule looks for a property
+    // introducing one. Needs a CSS parser, not a wider pattern.
+    expect(findColourLiterals("el.style.cssText = 'color: red';")).toEqual([]);
+    expect(findColourLiterals('const s = css`color: red;`;')).toEqual([]);
+    expect(findColourLiterals(`html += '<div style="color: red"></div>';`)).toEqual([]);
+  });
+
+  it('misses a custom property whose name is computed', () => {
+    expect(findColourLiterals("{ [`--color-${key}`]: 'red' }")).toEqual([]);
   });
 
   it('does fire on a value that merely contains a colour word', () => {
@@ -377,6 +402,15 @@ describe('the documented residue', () => {
         (c) => c.kind,
       ),
     ).toEqual(['named-colour']);
+  });
+
+  it('does fire across a statement that forgot its semicolon', () => {
+    // The price of letting the span cross line ends. This tree is semicolon-terminated
+    // throughout and nothing enforces that, so it is a live trap rather than a theoretical
+    // one — and, like the other false positive, a loud one.
+    const unterminated = `const color = pick()
+const tier = 'gold'`;
+    expect(findColourLiterals(unterminated).map((c) => c.kind)).toEqual(['named-colour']);
   });
 });
 
