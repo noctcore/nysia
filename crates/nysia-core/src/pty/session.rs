@@ -137,6 +137,9 @@ pub enum SpawnError {
     /// The process tree could not be confined, so a tree-kill could not be guaranteed.
     #[error("could not confine the process tree: {0}")]
     Confinement(#[source] std::io::Error),
+    /// One of the session's two threads could not be started.
+    #[error("could not start a session thread: {0}")]
+    Thread(#[source] std::io::Error),
 }
 
 /// One chunk of output, or the reason there is not one.
@@ -297,8 +300,9 @@ impl PtySession {
         let closing = Arc::new(AtomicBool::new(false));
 
         let (tx, rx) = sync_channel::<Vec<u8>>(spec.output_queue.max(1));
-        let reader_thread = spawn_reader(reader, tx, Arc::clone(&eof), Arc::clone(&closing));
-        let waiter_thread = spawn_waiter(child, Arc::clone(&exit));
+        let reader_thread = spawn_reader(reader, tx, Arc::clone(&eof), Arc::clone(&closing))
+            .map_err(SpawnError::Thread)?;
+        let waiter_thread = spawn_waiter(child, Arc::clone(&exit)).map_err(SpawnError::Thread)?;
 
         let session = Self {
             handle: SessionHandle::generate(),
@@ -479,23 +483,31 @@ impl std::fmt::Debug for PtySession {
 }
 
 /// Start the one blocking thread that drains the master.
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     chunks: SyncSender<Vec<u8>>,
     eof: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
-) -> JoinHandle<()> {
+) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("nysia-pty-reader".to_owned())
         .spawn(move || {
             let mut buffer = vec![0u8; READ_BUFFER];
+            // Set once the consumer has gone away. The reader does *not* stop then: an
+            // undrained master leaves the child blocked in `write`, and on Windows leaves
+            // `ClosePseudoConsole` with nowhere to put its flush.
+            let mut discarding = false;
             loop {
                 match reader.read(&mut buffer) {
                     // A zero-length read is EOF: every slave fd is closed.
                     Ok(0) => break,
                     Ok(read) => {
-                        if !send_chunk(&chunks, buffer[..read].to_vec(), &closing) {
-                            break;
+                        if !discarding && !send_chunk(&chunks, buffer[..read].to_vec(), &closing) {
+                            discarding = true;
                         }
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
@@ -504,7 +516,6 @@ fn spawn_reader(
             }
             eof.store(true, Ordering::Release);
         })
-        .unwrap_or_else(|err| panic!("could not start the pty reader thread: {err}"))
 }
 
 /// Hand a chunk to the consumer, blocking while the queue is full — unless shutdown has
@@ -532,10 +543,14 @@ fn send_chunk(chunks: &SyncSender<Vec<u8>>, chunk: Vec<u8>, closing: &AtomicBool
 }
 
 /// Start the thread that records the child's exit status, separately from the reader.
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
 fn spawn_waiter(
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     exit: Arc<ExitSlot>,
-) -> JoinHandle<()> {
+) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("nysia-pty-waiter".to_owned())
         .spawn(move || {
@@ -544,7 +559,6 @@ fn spawn_waiter(
                 .unwrap_or_else(|_| ExitStatus::with_exit_code(u32::MAX));
             exit.set(status);
         })
-        .unwrap_or_else(|err| panic!("could not start the pty waiter thread: {err}"))
 }
 
 /// Join a thread, or give up on it after [`JOIN_TIMEOUT`] and let it run detached.
@@ -718,6 +732,35 @@ mod tests {
         let (session, _output) = shell();
         assert!(session.handle().as_str().starts_with("sess_"));
         assert!(session.pid().is_some_and(|pid| pid > 0));
+    }
+
+    #[test]
+    fn a_session_is_shareable_across_threads() {
+        // W4 puts one of these behind an `Arc` in the daemon, so this is a real constraint
+        // rather than a formality. The output half is `Send` but not `Sync`: an
+        // `mpsc::Receiver` has one consumer by construction.
+        const fn assert_send_sync<T: Send + Sync>() {}
+        const fn assert_send<T: Send>() {}
+        assert_send_sync::<PtySession>();
+        assert_send::<PtyOutput>();
+    }
+
+    #[test]
+    fn dropping_the_consumer_does_not_wedge_shutdown() {
+        // With nobody receiving, a reader that stopped reading would leave the child
+        // blocked in `write` and, on Windows, leave `ClosePseudoConsole` with nowhere to
+        // put its flush. The reader keeps draining and discards instead.
+        let (session, output) = shell();
+        drop(output);
+        let _ = session.write(b"echo nysia-nobody-is-listening\r");
+
+        let start = Instant::now();
+        session.shutdown(Duration::from_secs(2));
+        assert!(
+            start.elapsed() < DEADLINE,
+            "shutdown took {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
