@@ -93,6 +93,7 @@ expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 28); /
 // A multi-line grouped import in a .js file, and a `require()` in a .cjs one. ESLint's ban
 // blocks were {ts,tsx} only, and `no-restricted-imports` never covered `require` at all.
 expectFile(trips, 'no-tauri-outside-desktop', 'apps/web/src/legacy.js');
+expectFile(trips, 'no-tauri-outside-desktop', 'apps/web/src/legacy.cjs');
 
 expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
 process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');

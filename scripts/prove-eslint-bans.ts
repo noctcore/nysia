@@ -84,6 +84,19 @@ const CASES: readonly Case[] = [
     expect: 'error',
   },
   {
+    // Vite 8 resolves .mts by default, so such a file bundles. It was in neither layer.
+    what: 'an .mts file importing Tauri',
+    filePath: 'apps/web/src/legacy.mts',
+    code: "import { Channel } from '@tauri-apps/api/core';\nexport const c = Channel;\n",
+    expect: 'error',
+  },
+  {
+    what: 'a .cts file importing a node builtin',
+    filePath: 'apps/web/src/legacy.cts',
+    code: "import { readFileSync } from 'node:fs';\nexport const r = readFileSync;\n",
+    expect: 'error',
+  },
+  {
     what: 'apps/desktop importing Tauri (its whole job)',
     filePath: 'apps/desktop/src/bridge.ts',
     code: "import { Channel } from '@tauri-apps/api/core';\nexport const c = Channel;\n",
