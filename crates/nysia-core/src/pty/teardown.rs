@@ -13,9 +13,23 @@
 //! attribute list does not expose. A shell cannot start a grandchild that fast in
 //! practice, and the alternative is forking the pty crate.
 //!
-//! **Unix.** `portable-pty` makes the child a session leader with `setsid`, so it is also
-//! the leader of its own process group and `killpg` reaches everything it started.
-//! `SIGTERM` first so a shell can run its exit traps, a short grace period, then `SIGKILL`.
+//! **Unix.** `portable-pty` makes the child a session leader with `setsid`, so `killpg`
+//! reaches everything in the shell's own process group: `SIGTERM` first, so a shell can run
+//! its exit traps, a short grace period, then `SIGKILL`.
+//!
+//! `killpg` alone is not enough, though, and §7.1 already says why: macOS has no
+//! `PR_SET_CHILD_SUBREAPER`, so the answer there is to **sweep by session id**. An
+//! interactive shell with job control puts every `&` job in a process group of its *own*,
+//! so `sleep 300 &` is not in the group `killpg` just signalled — but it is still in the
+//! session the `setsid` created, and a session id is not reused while any member is alive.
+//! The sweep is what actually reclaims it.
+//!
+//! Two consequences worth stating rather than discovering. An interactive `bash` ignores
+//! `SIGTERM`, so on a Unix shell the grace period is normally burned in full before the
+//! `SIGKILL` phase does the work. And enumerating a session needs a process listing, which
+//! exists on Linux (`/proc`) and macOS (`proc_listallpids`) — the two Unix shapes Nysia
+//! cares about — and nowhere else; elsewhere the code falls back to the process-group
+//! check alone.
 
 use std::time::{Duration, Instant};
 
@@ -126,21 +140,27 @@ mod windows_impl {
 }
 
 #[cfg(unix)]
-pub(crate) use unix_impl::{signal_group, tree_is_gone};
+pub(crate) use unix_impl::{SIGKILL, SIGTERM, session_is_gone, signal_group, signal_session};
 
 #[cfg(unix)]
 mod unix_impl {
     use std::io;
 
+    /// `SIGTERM`, re-exported so the session module does not have to name `libc` itself.
+    pub(crate) const SIGTERM: i32 = libc::SIGTERM;
+
+    /// `SIGKILL`, for when the grace period ran out.
+    pub(crate) const SIGKILL: i32 = libc::SIGKILL;
+
     /// Send a signal to the whole process group led by `pgid`.
     ///
     /// The child is a session leader thanks to `portable-pty`'s `setsid`, so its pid is
-    /// also its process-group id and `killpg` reaches every process it started.
+    /// also its process-group id.
     pub(crate) fn signal_group(pgid: u32, signal: i32) -> io::Result<()> {
         let pgid = i32::try_from(pgid)
             .map_err(|_| io::Error::other(format!("{pgid} is not a valid pgid")))?;
-        // SAFETY: `killpg` takes two integers and has no memory effects. A pgid that has
-        // already gone away returns `ESRCH`, which is handled below rather than ignored.
+        // SAFETY: `killpg` takes two integers and has no memory effects. A group that has
+        // already gone away reports `ESRCH`, which is handled below rather than ignored.
         let result = unsafe { libc::killpg(pgid, signal) };
         if result == 0 {
             return Ok(());
@@ -153,11 +173,39 @@ mod unix_impl {
         Err(err)
     }
 
-    /// Whether no process in the group led by `pgid` is left.
+    /// Signal every process in the session led by `sid`, including the jobs an interactive
+    /// shell put into process groups of their own.
     ///
-    /// Signal zero performs the permission and existence checks without delivering
-    /// anything, so this is the cheap way to poll a grace period.
-    pub(crate) fn tree_is_gone(pgid: u32) -> bool {
+    /// Returns how many processes were signalled, which is zero both when the session is
+    /// empty and when this platform cannot enumerate one.
+    pub(crate) fn signal_session(sid: u32, signal: i32) -> usize {
+        let Some(pids) = pids_in_session(sid) else {
+            return 0;
+        };
+        pids.into_iter()
+            .filter(|pid| {
+                // SAFETY: `kill` takes two integers and has no memory effects.
+                unsafe { libc::kill(*pid, signal) == 0 }
+            })
+            .count()
+    }
+
+    /// Whether nothing is left of the session led by `sid`.
+    ///
+    /// Falls back to the process-group check on a platform that cannot list processes, so
+    /// that the grace period still means something there.
+    pub(crate) fn session_is_gone(sid: u32) -> bool {
+        match pids_in_session(sid) {
+            Some(pids) => pids.is_empty(),
+            None => group_is_gone(sid),
+        }
+    }
+
+    /// Whether no process is left in the group led by `pgid`.
+    ///
+    /// Signal zero performs the existence and permission checks without delivering
+    /// anything, which is the cheap way to poll a grace period.
+    fn group_is_gone(pgid: u32) -> bool {
         let Ok(pgid) = i32::try_from(pgid) else {
             return true;
         };
@@ -166,15 +214,77 @@ mod unix_impl {
         result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
     }
 
-    /// `SIGTERM`, exposed so the session does not have to link `libc` itself.
-    pub(crate) const SIGTERM: i32 = libc::SIGTERM;
+    /// Every live pid in session `sid`, or `None` where processes cannot be enumerated.
+    ///
+    /// The calling process is excluded on principle: the daemon is never inside a session
+    /// one of its children created with `setsid`, and a sweep that could reach its own pid
+    /// would be an expensive way to discover otherwise.
+    fn pids_in_session(sid: u32) -> Option<Vec<i32>> {
+        let Ok(sid) = i32::try_from(sid) else {
+            return Some(Vec::new());
+        };
+        // SAFETY: `getpid` takes no arguments and cannot fail.
+        let own = unsafe { libc::getpid() };
+        let members = all_pids()?
+            .into_iter()
+            .filter(|pid| *pid > 0 && *pid != own && session_of(*pid) == Some(sid))
+            .collect();
+        Some(members)
+    }
 
-    /// `SIGKILL`, for when the grace period ran out.
-    pub(crate) const SIGKILL: i32 = libc::SIGKILL;
+    /// The session id of `pid`, or `None` if it has gone away.
+    fn session_of(pid: i32) -> Option<i32> {
+        // SAFETY: `getsid` takes one integer; a dead pid reports `ESRCH` as -1.
+        let sid = unsafe { libc::getsid(pid) };
+        (sid > 0).then_some(sid)
+    }
+
+    /// Every pid on the machine, or `None` where that cannot be asked for.
+    #[cfg(target_os = "linux")]
+    fn all_pids() -> Option<Vec<i32>> {
+        let entries = std::fs::read_dir("/proc").ok()?;
+        Some(
+            entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+                .collect(),
+        )
+    }
+
+    /// Every pid on the machine, or `None` where that cannot be asked for.
+    #[cfg(target_vendor = "apple")]
+    fn all_pids() -> Option<Vec<i32>> {
+        // A first call with a null buffer reports the size needed, in bytes. The count can
+        // grow between the two calls, so the buffer is over-allocated and the result is
+        // truncated to what the second call actually wrote.
+        // SAFETY: a null buffer of length zero is the documented way to ask for the size.
+        let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        if needed <= 0 {
+            return None;
+        }
+        let capacity = usize::try_from(needed).ok()?.saturating_mul(2).max(64);
+        let mut pids = vec![0i32; capacity];
+        let bytes = i32::try_from(capacity.saturating_mul(size_of::<i32>())).ok()?;
+        // SAFETY: the buffer holds `capacity` `i32`s and `bytes` is its size in bytes.
+        let written = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+        if written <= 0 {
+            return None;
+        }
+        let count = usize::try_from(written).ok()?.min(capacity);
+        pids.truncate(count);
+        Some(pids)
+    }
+
+    /// Every pid on the machine, or `None` where that cannot be asked for.
+    ///
+    /// Nysia ships on Windows and macOS; this arm exists so the crate still compiles on
+    /// another Unix, and it deliberately reports "cannot enumerate" rather than "nothing is
+    /// running".
+    #[cfg(all(unix, not(target_os = "linux"), not(target_vendor = "apple")))]
+    fn all_pids() -> Option<Vec<i32>> {
+        None
+    }
 }
-
-#[cfg(unix)]
-pub(crate) use unix_impl::{SIGKILL, SIGTERM};
 
 #[cfg(test)]
 mod tests {
@@ -211,6 +321,22 @@ mod tests {
         // A pgid this high cannot exist; the point is that `ESRCH` reads as success,
         // because "the tree is gone" is what the caller asked for.
         assert!(signal_group(u32::MAX / 2, SIGTERM).is_ok());
-        assert!(tree_is_gone(u32::MAX / 2));
+        assert_eq!(signal_session(u32::MAX / 2, SIGTERM), 0);
+        assert!(session_is_gone(u32::MAX / 2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_live_session_is_enumerable_and_does_not_read_as_gone() {
+        // The sweep is only worth anything if it can see a live session; this process is
+        // in one, so that is the one to check against.
+        // SAFETY: `getsid(0)` asks about the calling process and cannot fail.
+        let own = unsafe { libc::getsid(0) };
+        assert!(own > 0);
+        let sid = u32::try_from(own).expect("a session id is positive");
+        assert!(
+            !session_is_gone(sid),
+            "the caller's own session must not read as empty"
+        );
     }
 }
