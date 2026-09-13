@@ -46,6 +46,12 @@ const OFFENDERS = [
   { kind: 'named-colour', snippet: "style={{ color: failed ? 'red' : undefined }}" },
   // The custom-property case, which hid the one module whose job is writing token values.
   { kind: 'named-colour', snippet: `setProperty('--color-acc', 'red');` },
+  // The comparison case. `ProjectsSidebar` already writes a string-equality ternary, so
+  // this shape is one edit away from being real rather than hypothetical.
+  {
+    kind: 'named-colour',
+    snippet: "style={{ color: status === 'failed' ? 'red' : undefined }}",
+  },
 ] as const;
 
 describe('findColourLiterals', () => {
@@ -130,6 +136,27 @@ describe('findColourLiterals', () => {
         'named-colour',
       );
     }
+  });
+
+  it('finds a colour behind a comparison against a string', () => {
+    // The span crosses a quoted string rather than stopping at it, so a comparison — which
+    // is what a conditional style is usually written around — no longer eats the value. It
+    // used to: the rule read the first literal after the separator, found no colour word in
+    // it, and skipped past the real one. That is a worse failure than a plain boundary,
+    // because it looks like a rule that looked and found nothing.
+    for (const compared of [
+      "style={{ color: status === 'failed' ? 'red' : undefined }}",
+      `style={{ background: kind === "agent" ? "navy" : undefined }}`,
+      "style={{ color: mode === 'dark' ? theme.a : 'gray' }}",
+    ]) {
+      expect(findColourLiterals(compared).map((c) => c.kind), compared).toContain(
+        'named-colour',
+      );
+    }
+  });
+
+  it('still ignores a comparison whose literals are not colours', () => {
+    expect(findColourLiterals("style={{ color: mode === 'dark' ? a : b }}")).toEqual([]);
   });
 
   it('finds a colour inside a template whose interpolation carries quotes', () => {
@@ -307,9 +334,20 @@ describe('the documented residue', () => {
   });
 
   it('misses a value whose own quote appears inside it escaped', () => {
-    // The scanned text carries real backslashes, which is what ends the match early.
-    const escaped = String.raw`style={{ background: 'url(\'a.png\') red' }}`;
-    expect(findColourLiterals(escaped)).toEqual([]);
+    // The scanned text carries real backslashes, which is what ends the match early. The
+    // colour has to sit *before* the escape for this to be a miss: after it, the tail of
+    // the value is what the span ends up capturing and the colour is found by accident.
+    //
+    // This fixture used to be the other way round, and stopped demonstrating anything the
+    // moment the span learned to cross a quoted string — which is the residue test earning
+    // its keep in the direction nobody expects. The entry is still real; the example was
+    // not.
+    expect(
+      findColourLiterals(String.raw`style={{ background: 'red url(\'a.png\')' }}`),
+    ).toEqual([]);
+    expect(
+      findColourLiterals(String.raw`style={{ background: "red url(\"a.png\")" }}`),
+    ).toEqual([]);
   });
 
   it('misses an expression carrying a comma, a semicolon or a brace', () => {
