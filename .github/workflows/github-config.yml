@@ -7,15 +7,21 @@
 #
 # Each script self-tests first and then runs for real, so a rule that has stopped tripping
 # fails here before it is trusted on a pull request.
+#
+# No `paths` filter, deliberately. It is tempting — every step here reads `.github/**` —
+# but the label drift check compares labels.yml against the live repository, and a label
+# renamed in the GitHub UI has nothing to do with which files a pull request touches.
+# Filtered on paths, that drift would surface only on the next pull request that happened
+# to edit `.github/**`, while labels.yml claimed it was checked. The whole job is
+# read-only and runs in about seven seconds, which is a cheaper price than a guarantee
+# that is true only sometimes. `pnpm ts-drift` runs on every CI run for the same reason.
 
 name: github-config
 
 on:
   push:
     branches: [main]
-    paths: ['.github/**']
   pull_request:
-    paths: ['.github/**']
 
 permissions: {}
 
