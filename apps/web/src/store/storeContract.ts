@@ -364,16 +364,30 @@ async function waitForReady(store: Store): Promise<void> {
  *  - `errors`, because a failing command is *supposed* to append to it;
  *  - `status`, because a provider may legitimately flicker through `reconnecting` while a
  *    command is in flight;
- *  - `daemon` and `usage`, because they are telemetry. A real transport streams resident
- *    set, terminal count and quota windows on their own schedule, so requiring them to be
- *    frozen across an unrelated command would fail a provider on `memoryBytes` having
- *    ticked — while everything the assertion actually means, the session and project
- *    state, was untouched. A provider could pass by holding its metrics still between
- *    commands; it should not have to distort its design to satisfy a test.
+ *  - `daemon` and `usage` by *value*, because they are telemetry. A real transport streams
+ *    resident set, terminal count and quota windows on their own schedule, so requiring
+ *    them to be frozen across an unrelated command would fail a provider on `memoryBytes`
+ *    having ticked — while everything the assertion actually means, the session and
+ *    project state, was untouched. A provider could pass by holding its metrics still
+ *    between commands; it should not have to distort its design to satisfy a test.
+ *
+ * Dropping the values entirely gave something up, though, and this gets most of it back:
+ * a provider whose *failing* `selectTab` also wiped the quota list or rewrote the metrics
+ * object was caught before and would not be now. So the two are compared by shape instead
+ * — that `usage` still has entries if it had them, and that `daemon` still has the same
+ * keys. A streaming provider is free to move every number and stays green; one that
+ * empties or reshapes telemetry as a side effect of an unrelated command goes red.
+ *
+ * What that still cannot catch is a value replaced by a wrong value of the same shape —
+ * `memoryBytes` going to zero reads as a tick. That residue is W5's to hold, and it has
+ * been told so.
  */
-type Observable = Omit<StoreSnapshot, 'errors' | 'status' | 'daemon' | 'usage'>;
+export interface Observable extends Omit<StoreSnapshot, 'errors' | 'status' | 'daemon' | 'usage'> {
+  readonly usagePopulated: boolean;
+  readonly daemonKeys: readonly string[];
+}
 
-function observable(snapshot: StoreSnapshot): Observable {
+export function observable(snapshot: StoreSnapshot): Observable {
   return {
     nav: snapshot.nav,
     projects: snapshot.projects,
@@ -381,5 +395,7 @@ function observable(snapshot: StoreSnapshot): Observable {
     tabs: snapshot.tabs,
     activeTab: snapshot.activeTab,
     launchers: snapshot.launchers,
+    usagePopulated: snapshot.usage.length > 0,
+    daemonKeys: Object.keys(snapshot.daemon).sort(),
   };
 }
