@@ -159,8 +159,20 @@ export function blankRustComments(source: string): string {
     return c !== undefined && /[A-Za-z0-9_]/.test(c);
   };
 
-  /** A char literal `'x'` / `'\n'` / `'"'`, as opposed to a lifetime `'a`. */
-  const CHAR_LITERAL = /^'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]{1,6}\}|.)|[^'\\])'/;
+  /**
+   * A char literal `'x'` / `'\n'` / `'"'` / `'🔥'`, as opposed to a lifetime `'a`.
+   *
+   * The surrogate-pair alternative is load-bearing and comes first. `[^'\\]` matches a
+   * single UTF-16 code unit, so an astral char literal was not recognised: the closing
+   * quote paired with whatever followed, the orphaned quote opened a string that ran to the
+   * next one in the file, and every import between them was blanked. `['🔥','"']` and
+   * `matches!(c, '🔥'|'"')` both erased every tauri import below them.
+   *
+   * The `u` flag would express this more neatly but cannot be used here: in unicode mode
+   * the `\{` of the `\u{...}` escape alternative is an invalid identity escape.
+   */
+  const CHAR_LITERAL =
+    /^'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]{1,6}\}|.)|[\uD800-\uDBFF][\uDC00-\uDFFF]|[^'\\])'/;
 
   /**
    * Every string-literal opener Rust has, as one table rather than a chain of `if`s — the
