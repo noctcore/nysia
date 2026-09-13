@@ -167,10 +167,15 @@ enum Inner {
     #[cfg(unix)]
     Unix(tokio::net::UnixListener),
     /// The pipe name and the instance currently waiting for a client.
+    ///
+    /// Never an `Option`. `accept` is polled inside a `select!`, so it can be dropped part
+    /// way through; taking the instance out before awaiting would leave the listener holding
+    /// nothing whenever another branch of that select won, and the endpoint would briefly
+    /// stop existing for reasons that have nothing to do with the endpoint.
     #[cfg(windows)]
     Pipe {
         name: String,
-        pending: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
+        pending: tokio::net::windows::named_pipe::NamedPipeServer,
     },
 }
 
@@ -225,7 +230,7 @@ impl Listener {
                     })?;
                 Inner::Pipe {
                     name: name.clone(),
-                    pending: Some(server),
+                    pending: server,
                 }
             }
             #[cfg(unix)]
@@ -289,11 +294,10 @@ impl Listener {
                 name: pipe,
                 pending,
             } => {
-                let server = match pending.take() {
-                    Some(server) => server,
-                    None => next_instance(pipe)?,
-                };
-                server
+                // Nothing is mutated before this await, which is what makes the accept
+                // cancel-safe: a `select!` that drops this future leaves the instance exactly
+                // where it was, still waiting for a client.
+                pending
                     .connect()
                     .await
                     .map_err(|source| TransportError::Accept {
@@ -304,7 +308,7 @@ impl Listener {
                 // replacement is created *before* the connection is served, so the endpoint
                 // never stops existing — a client dialling in the gap would otherwise get
                 // "file not found" from a daemon that is running perfectly well.
-                *pending = Some(next_instance(pipe)?);
+                let server = std::mem::replace(pending, next_instance(pipe)?);
 
                 let peer = crate::rpc::peer::credentials_of(&server).map_err(|source| {
                     TransportError::Peer {

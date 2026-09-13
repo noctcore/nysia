@@ -58,6 +58,7 @@ pub mod endpoint;
 pub(crate) mod errors;
 pub mod lease;
 pub mod peer;
+pub mod server;
 pub mod session;
 pub mod stream;
 pub mod transport;
@@ -68,6 +69,7 @@ pub use endpoint::{
 };
 pub use lease::{LeaseError, PidRecordFile};
 pub use peer::{CallerSession, PeerCredentials, PeerError, ancestry, parent_of};
+pub use server::{Daemon, DaemonConfig, ServerError};
 pub use session::{OwnedSession, SessionError, SessionRegistry};
 pub use stream::{SendOutcome, StreamRegistry, StreamSink};
 pub use transport::{Connection, ConnectionReader, ConnectionWriter, Listener, TransportError};
