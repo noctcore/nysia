@@ -114,44 +114,56 @@ fn has_separator(program: &OsStr) -> bool {
     text.contains('/') || (cfg!(windows) && text.contains('\\'))
 }
 
-/// Find an explicitly spelled path, trying the Windows extensions when it has none.
+/// Find an explicitly spelled path, preferring a Windows shim sitting beside it.
 fn locate_explicit(path: &Path) -> Option<PathBuf> {
-    if path.is_file() {
-        return Some(path.to_path_buf());
+    for ext in &candidate_extensions() {
+        let candidate = with_appended_extension(path, ext);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
     }
-    if cfg!(windows) && path.extension().is_none() {
-        return windows_extensions()
-            .into_iter()
-            .map(|ext| with_appended_extension(path, &ext))
-            .find(|candidate| candidate.is_file());
-    }
-    None
+    path.is_file().then(|| path.to_path_buf())
 }
 
 /// Walk `PATH`, and on Windows every `PATHEXT` extension within each entry.
 fn search_path(program: &OsStr) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    let extensions = if cfg!(windows) {
-        windows_extensions()
-    } else {
-        Vec::new()
-    };
-    for dir in std::env::split_paths(&path) {
-        if dir.as_os_str().is_empty() {
-            continue;
-        }
+    let dirs: Vec<PathBuf> = std::env::split_paths(&path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect();
+    search_in(program, &dirs, &candidate_extensions())
+}
+
+/// Look for `program` in each of `dirs`, trying `extensions` **before** the bare name.
+///
+/// The order is the whole point. `npm`'s `cmd-shim` writes three files side by side —
+/// `claude` (a `sh` script, for Git Bash), `claude.cmd` and `claude.ps1` — and checking the
+/// bare name first finds the `sh` script, which `CreateProcess` cannot launch and which
+/// this module would then reject as having no launchable extension. Trying `PATHEXT` first
+/// finds `claude.cmd`, which is the file that actually runs.
+fn search_in(program: &OsStr, dirs: &[PathBuf], extensions: &[String]) -> Option<PathBuf> {
+    for dir in dirs {
         let bare = dir.join(program);
-        if bare.is_file() {
-            return Some(bare);
-        }
-        for ext in &extensions {
+        for ext in extensions {
             let candidate = with_appended_extension(&bare, ext);
             if candidate.is_file() {
                 return Some(candidate);
             }
         }
+        if bare.is_file() {
+            return Some(bare);
+        }
     }
     None
+}
+
+/// The extensions to try ahead of a bare name: `PATHEXT` on Windows, none anywhere else.
+fn candidate_extensions() -> Vec<String> {
+    if cfg!(windows) {
+        windows_extensions()
+    } else {
+        Vec::new()
+    }
 }
 
 /// `PATHEXT`, lower-cased and normalised to a leading dot, with a sane default when the
@@ -358,6 +370,42 @@ mod tests {
     }
 
     #[test]
+    fn a_shim_beside_a_bare_name_wins_the_search() {
+        // `npm`'s `cmd-shim` writes `claude`, `claude.cmd` and `claude.ps1` side by side.
+        // Resolving to the extensionless `sh` script is the failure this ordering exists to
+        // prevent: swap the two loops in `search_in` and this trips.
+        let dir = std::env::temp_dir().join("nysia-resolve-shim-order");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("pretend-agent"),
+            "#!/bin/sh
+",
+        )
+        .expect("write sh shim");
+        std::fs::write(
+            dir.join("pretend-agent.cmd"),
+            "@echo off
+",
+        )
+        .expect("write cmd shim");
+
+        let dirs = vec![dir.clone()];
+        let found = search_in(
+            OsStr::new("pretend-agent"),
+            &dirs,
+            &[".cmd".to_owned(), ".exe".to_owned()],
+        )
+        .expect("something must be found");
+        assert_eq!(found, dir.join("pretend-agent.cmd"));
+
+        // With no extensions to try — the Unix case — the bare name is what is found.
+        let bare = search_in(OsStr::new("pretend-agent"), &dirs, &[]).expect("bare");
+        assert_eq!(bare, dir.join("pretend-agent"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     #[cfg(windows)]
     fn a_cmd_shim_is_launched_through_cmd_exe() {
         // The trap: `CreateProcess` cannot launch a `.cmd`, so an npm shim has to go
@@ -376,6 +424,39 @@ mod tests {
         );
         assert_eq!(resolved.leading_args[0], OsString::from("/c"));
         assert_eq!(resolved.leading_args[1], shim.as_os_str());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn an_explicit_extensionless_path_resolves_to_its_shim() {
+        let dir = std::env::temp_dir().join("nysia-resolve-explicit-shim");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("pretend-agent"),
+            "#!/bin/sh
+",
+        )
+        .expect("write sh shim");
+        std::fs::write(
+            dir.join("pretend-agent.cmd"),
+            "@echo off
+",
+        )
+        .expect("write cmd shim");
+
+        let resolved = resolve(dir.join("pretend-agent")).expect("the shim must resolve");
+        assert!(
+            resolved
+                .program
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("cmd.exe"))
+        );
+        assert_eq!(
+            resolved.leading_args.last(),
+            Some(&dir.join("pretend-agent.cmd").into_os_string())
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
