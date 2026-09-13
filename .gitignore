@@ -2,3 +2,10 @@ target/
 node_modules/
 dist/
 .DS_Store
+
+# ts-rs falls back to `<crate>/bindings` when it is invoked without the crate's
+# `.cargo/config.toml` on the lookup path (traps register #1). Never commit those.
+bindings/
+
+# Tauri's generated platform scaffolding.
+apps/desktop/src-tauri/gen/
