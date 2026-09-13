@@ -989,9 +989,11 @@ mod tests {
             session
                 .send(&TerminalSend::line(created.handle.clone(), line))
                 .expect("writes");
-            // One line at a time: `cmd` needs the assignment to have run before it parses the
-            // line that expands it.
-            until(&session, |text| text.contains(TOKEN));
+            // Settle between lines rather than wait for the token: only the *last* line
+            // produces it, so waiting for it after the first would burn the whole budget on a
+            // condition that cannot be true yet. `cmd` also needs the assignment to have run
+            // before it parses the line that expands it.
+            let _ = session.wait(WaitFor::Idle, Some(DEADLINE));
         }
 
         let screen = until(&session, |text| text.contains(TOKEN));
