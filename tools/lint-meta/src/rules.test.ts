@@ -146,8 +146,11 @@ describe('the cargo dependency rules', () => {
     // A quoted key in a `[ dependencies ]` header with whitespace and a trailing comment,
     // and a rename under a quoted table header. The hand-written parser saw neither.
     expect(byRule('no-tauri-in-rust-crates')).toEqual([
+      // Reported for declaring tauri...
       'crates/nysia-proto/Cargo.toml',
       'crates/nysia/Cargo.toml',
+      // ...and this one for being invisible to cargo at all; see the next test.
+      'crates/orphan/Cargo.toml',
     ]);
     expect(violations.some((v) => v.message.includes('package = "tauri"'))).toBe(true);
   });
@@ -157,6 +160,16 @@ describe('the cargo dependency rules', () => {
       (v) => v.rule === 'no-tauri-reaching-core',
     );
     expect(chain?.message).toContain('nysia-core -> nysia-proto -> tauri');
+  });
+
+  it('report a crate cargo does not know about rather than skipping it', () => {
+    // Reading the graph instead of every manifest on disk narrows the rule in exactly one
+    // way, and this is it. A crate outside [workspace] members compiles into nothing today,
+    // but a rule that quietly stops looking is the defect this tool exists to catch.
+    const orphan = runCargoRules(fixture('cargo/violating')).find(
+      (v) => v.file === 'crates/orphan/Cargo.toml',
+    );
+    expect(orphan?.message).toContain('is not a workspace member');
   });
 
   it('stay silent when only apps/desktop links tauri', () => {
