@@ -409,6 +409,10 @@ mod tests {
                 wait_for: crate::terminal::WaitFor::Exit,
                 timeout_ms: None,
             }),
+            RequestPayload::StreamAttach(StreamAttach { handle: handle() }),
+            RequestPayload::StreamDetach(StreamDetach {
+                stream_id: crate::stream::StreamId(3),
+            }),
         ];
         for payload in payloads {
             let envelope = RequestEnvelope::new(payload);
@@ -445,6 +449,46 @@ mod tests {
             })
             .is_mutation()
         );
+
+        // Attaching and detaching change which ids the daemon is routing, so both are
+        // mutations and both carry a receipt. A retried attach that ran twice would leak a
+        // stream id, and ids are never reused — so the leak would be permanent for the life
+        // of the connection.
+        assert!(RequestPayload::StreamAttach(StreamAttach { handle: handle() }).is_mutation());
+        assert!(
+            RequestPayload::StreamDetach(StreamDetach {
+                stream_id: crate::stream::StreamId(3),
+            })
+            .is_mutation()
+        );
+    }
+
+    #[test]
+    fn the_stream_verbs_are_matched_to_their_answers() {
+        let attach = RequestEnvelope::new(RequestPayload::StreamAttach(StreamAttach {
+            handle: handle(),
+        }));
+        assert_eq!(attach.payload.verb(), "stream_attach");
+
+        let attached = ResponseEnvelope::new(
+            attach.request_id.clone(),
+            ResponsePayload::StreamAttach(StreamAttached {
+                handle: handle(),
+                stream_id: crate::stream::StreamId(3),
+            }),
+        );
+        assert!(attached.answers(&attach));
+
+        let detach = RequestEnvelope::new(RequestPayload::StreamDetach(StreamDetach {
+            stream_id: crate::stream::StreamId(3),
+        }));
+        assert_eq!(detach.payload.verb(), "stream_detach");
+        let detached =
+            ResponseEnvelope::new(detach.request_id.clone(), ResponsePayload::StreamDetach);
+        assert!(detached.answers(&detach));
+
+        // An attach answered with a detach is a routing bug, not a valid reply.
+        assert!(!detached.answers(&attach));
     }
 
     #[test]
