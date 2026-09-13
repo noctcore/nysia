@@ -1,5 +1,6 @@
 import type { StoreError } from '../store/errors';
-import { useCommands, useSnapshot } from '../store/hooks';
+import { useCommands, useSnapshot, useUnexpectedFailures } from '../store/hooks';
+import { unexpectedFailures } from '../store/unexpectedFailures';
 import { GLYPH } from '../ui/glyphs';
 
 /**
@@ -13,12 +14,20 @@ import { GLYPH } from '../ui/glyphs';
  * They do not time out. A launch that failed is something the user has to act on — the
  * message carries the daemon's `nextSteps` — and a notice that removes itself while
  * someone is reading it is worse than one they have to dismiss.
+ *
+ * Two lists are merged here, from two places, for one reason. `snapshot.errors` is what a
+ * provider wrapped and recorded. `useUnexpectedFailures()` is what got out unwrapped — a
+ * raw transport error, a provider bug — which the provider by definition did not record,
+ * and which `errors.ts` nonetheless promises will reach the user. They render identically
+ * because to the person reading them they are the same event: something they asked for did
+ * not happen.
  */
 export function CommandErrors() {
   const { errors } = useSnapshot();
+  const escaped = useUnexpectedFailures();
   const commands = useCommands();
 
-  if (errors.length === 0) {
+  if (errors.length === 0 && escaped.length === 0) {
     return null;
   }
 
@@ -34,6 +43,13 @@ export function CommandErrors() {
           key={error.id}
           error={error}
           onDismiss={() => commands.dismissError(error.id)}
+        />
+      ))}
+      {escaped.map((error) => (
+        <Notice
+          key={error.id}
+          error={error}
+          onDismiss={() => unexpectedFailures.dismiss(error.id)}
         />
       ))}
     </div>
