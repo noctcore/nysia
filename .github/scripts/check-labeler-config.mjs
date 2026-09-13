@@ -1,36 +1,45 @@
-// Three invariants over .github/labeler.yml.
+// Four invariants over .github/labeler.yml.
 //
-// (a) A label that combines a positive glob with a negated one must wrap them in `all:`.
-// (b) The labeler may never write a TYPE label — only areas and extras.
-// (c) Every label it writes must exist in .github/labels.yml.
+// (a) A negated glob may not sit under an `any-glob-*` key. Those keys OR their globs,
+//     so a negation there either does nothing or matches everything.
+// (b) A negation in a separate `changed-files` entry from the positive globs must be
+//     wrapped in `- all:`, or the two entries are OR-ed instead of AND-ed.
+// (c) The labeler may never write a TYPE label — only areas and extras.
+// (d) Every label it writes must exist in .github/labels.yml.
 //
-// (b) is the one that bites hardest. `documentation` was applied here from `docs/**`
-// while pr-facets.yml counts it as a type, so any enhancement, bug or chore PR that also
-// touched docs ended up with two types and failed — intermittently, because labels
-// written with GITHUB_TOKEN do not trigger other workflows and the two jobs race. Types
-// are editorial and belong to the author; paths can only decide areas and extras.
+// WHY (a) EXISTS, AND WHY IT IS NOT THE SAME RULE AS (b).
 //
-// (c) catches a label written here that nobody ever created, which the labeler reports
-// as a plain API failure long after the config looked fine in review.
+// (b) came first, from `area:web` being written as two entries without the wrapper. The
+// fix for that shape is the `- all:` wrapper, and there it works. But the rule as first
+// written looked for the literal text `all-globs-to-all-files`, or a block-style `- '!…'`
+// item, so a negation written in flow style —
 //
-// This check exists because the configuration it guards was written wrong the first time.
-// actions/labeler treats a match object with no top-level key as `any`, so
+//     - any-glob-to-any-file: ['crates/agent/**', '!crates/agent/fixtures/**']
 //
-//     'area:web':
-//       - changed-files:
-//           - any-glob-to-any-file: ['apps/web/**']
-//           - all-globs-to-all-files: ['!apps/web/src/generated/**']
+// — was never examined at all, and the file passed with its success line while the real
+// labeler applied that label to a pty-only pull request, a docs-only one, and an empty one.
 //
-// reads as "in apps/web OR not in apps/web/src/generated" — and the second half is true
-// of nearly every pull request in the repository, so the label lands on all of them. The
-// intended meaning needs `- all:` above `changed-files`. The two spellings differ by one
-// line, both are valid YAML, and the wrong one fails by over-labelling silently rather
-// than by erroring, which is the kind of defect nobody notices for months.
+// Worse, the remediation message told the author to wrap it in `- all:`, and doing that
+// changes nothing: `checkIfAnyGlobMatchesAnyFile` ORs the globs inside a single key
+// regardless of any wrapper, and `!crates/agent/fixtures/**` matches every file that is
+// not a fixture — which is almost every file. A check that hands out advice which does not
+// work is worse than one that says nothing, so (a) is its own rule with its own message,
+// naming the key that actually expresses an exclusion.
 //
-// Not a YAML parser: it splits on label keys, which start at column zero in this file,
-// and asks the three structural questions above of each block. That is all these rules
-// need, and each is wrong only in the direction of a false positive a human fixes in one
-// line — never a silent pass.
+// WHERE A NEGATION BELONGS. `all-globs-to-any-file` ANDs its globs against each file in
+// turn, which is a real per-file exclusion:
+//
+//     - all-globs-to-any-file: ['apps/web/**', '!apps/web/src/generated/**']
+//
+// reads "some changed file is under apps/web and is not generated". The `- all:` plus
+// `all-globs-to-all-files` form also excludes correctly, but asks the question of the
+// whole pull request at once, so one generated file suppresses the label for every
+// hand-written file beside it. Both pass; the message recommends the first.
+//
+// Not a YAML parser. It splits on label keys, which start at column zero here, and reads
+// the four glob keys with their lists — block style, flow style and bare scalar — because
+// these rules are about which globs sit under which key, and nothing coarser can see that.
+// It is wrong only in the direction of a false positive a human fixes in one line.
 //
 // Run with `--self-test` for the fixtures, with no arguments to check the real file.
 
@@ -43,11 +52,21 @@ const CONFIG_PATH = '.github/labeler.yml';
 const LABELS_PATH = '.github/labels.yml';
 
 /**
- * Label names declared in labels.yml.
+ * The four glob keys, and whether the key ORs its globs.
  *
- * One regex over `- name: "…"` rather than a parse, for the same reason as below: the
- * question is "which names exist", and a name that this misses shows up as a false
- * positive someone fixes in a line, never as a silent pass.
+ * The `any-glob-*` pair returns true as soon as one glob matches, so a negation beside a
+ * positive glob is never an exclusion there. The `all-globs-*` pair requires every glob,
+ * which is what makes an exclusion mean what it says.
+ */
+const GLOB_KEYS = {
+  'any-glob-to-any-file': { ors: true },
+  'any-glob-to-all-files': { ors: true },
+  'all-globs-to-any-file': { ors: false },
+  'all-globs-to-all-files': { ors: false },
+};
+
+/**
+ * Label names declared in labels.yml.
  *
  * @param {string} text
  * @returns {Set<string>}
@@ -58,22 +77,87 @@ export function declaredLabels(text) {
   return names;
 }
 
-/** A negated glob — the half that makes `any` dangerous. */
-const NEGATED = /^\s*-?\s*['"]?!/m;
+/**
+ * Split a YAML flow sequence — `['a', "b", c]` — into its items.
+ *
+ * @param {string} inline
+ * @returns {string[]}
+ */
+function flowItems(inline) {
+  const body = inline.replace(/^\[/, '').replace(/\]$/, '');
+  const items = [];
+  for (const m of body.matchAll(/'([^']*)'|"([^"]*)"|([^,\s][^,]*)/g)) {
+    const value = m[1] ?? m[2] ?? (m[3] ?? '').trim();
+    if (value !== '') items.push(value);
+  }
+  return items;
+}
+
+/** @param {string} value */
+const unquote = (value) => value.trim().replace(/^['"]|['"]$/g, '');
+
+/**
+ * Every glob key in a label's block, with the globs under it.
+ *
+ * Handles the three spellings the labeler accepts:
+ *
+ *     - key: ['a', '!b']      flow
+ *     - key: 'a'              scalar
+ *     - key:                  block
+ *         - 'a'
+ *         - '!b'
+ *
+ * @param {string[]} lines the block's lines, comments already removed
+ * @returns {{ key: string, globs: string[] }[]}
+ */
+export function parseGlobKeys(lines) {
+  const found = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = /^(\s*)-?\s*(["']?)([a-z-]+)\2\s*:\s*(.*)$/.exec(lines[i]);
+    if (m === null) continue;
+    const [, indent, , key, inline] = m;
+    if (!Object.hasOwn(GLOB_KEYS, key)) continue;
+
+    const rest = inline.trim();
+    if (rest.startsWith('[')) {
+      found.push({ key, globs: flowItems(rest) });
+      continue;
+    }
+    if (rest !== '') {
+      found.push({ key, globs: [unquote(rest)] });
+      continue;
+    }
+
+    // Block style: the more-indented `- …` items that follow.
+    const globs = [];
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const item = /^(\s*)-\s*(.+)$/.exec(lines[j]);
+      if (item === null) {
+        if (lines[j].trim() === '') continue;
+        break;
+      }
+      if (item[1].length <= indent.length) break;
+      globs.push(unquote(item[2]));
+    }
+    found.push({ key, globs });
+  }
+
+  return found;
+}
 
 /**
  * @param {string} text the contents of a labeler config
- * @param {Set<string> | null} known label names from labels.yml, or null to skip (c)
+ * @param {Set<string> | null} known label names from labels.yml, or null to skip (d)
  * @returns {string[]} one message per violation
  */
 export function checkLabelerConfig(text, known = null) {
-  const lines = text.split('\n');
   const problems = [];
 
   /** @type {{ label: string, body: string[] } | null} */
   let current = null;
   const blocks = [];
-  for (const line of lines) {
+  for (const line of text.split('\n')) {
     if (/^[^\s#]/.test(line)) {
       if (current !== null) blocks.push(current);
       current = { label: line.replace(/:\s*$/, '').replace(/^['"]|['"]$/g, ''), body: [] };
@@ -86,14 +170,23 @@ export function checkLabelerConfig(text, known = null) {
   for (const { label, body } of blocks) {
     // Comments inside a block explain these spellings; they are not configuration.
     const code = body.filter((l) => !/^\s*#/.test(l));
-    const text_ = code.join('\n');
-    const hasPositive = /any-glob-to-any-file|all-globs-to-any-file/.test(text_);
-    const hasNegation = NEGATED.test(text_) || /all-globs-to-all-files/.test(text_);
-    const wrapped = /^\s*-\s*all:\s*$/m.test(text_);
+    const keys = parseGlobKeys(code);
+    const wrapped = code.some((l) => /^\s*-\s*all:\s*$/.test(l));
 
-    if (hasPositive && hasNegation && !wrapped) {
+    for (const { key, globs } of keys) {
+      const negated = globs.filter((g) => g.startsWith('!'));
+      if (negated.length > 0 && GLOB_KEYS[key].ors) {
+        problems.push(
+          `${label}: has the negated glob ${negated[0]} under ${key}, which ORs its globs — the negation then matches every file it does not exclude, so the label lands on nearly every pull request. Wrapping this in "- all:" does NOT fix it. Put the positive and negated globs together under all-globs-to-any-file, which ANDs them against each file: all-globs-to-any-file: ['<positive>', '${negated[0]}'].`,
+        );
+      }
+    }
+
+    const negationOnly = keys.filter((k) => k.globs.length > 0 && k.globs.every((g) => g.startsWith('!')));
+    const positiveKeys = keys.filter((k) => k.globs.some((g) => !g.startsWith('!')));
+    if (negationOnly.length > 0 && positiveKeys.length > 0 && !wrapped) {
       problems.push(
-        `${label}: combines a positive glob with a negated one but does not wrap them in "- all:". Without it the conditions are OR-ed (a match object with no top-level key defaults to "any"), and a negated glob is true of almost every pull request, so this label would be applied to nearly all of them.`,
+        `${label}: puts its negated globs in a separate entry (${negationOnly[0].key}) from its positive ones (${positiveKeys[0].key}) without a "- all:" wrapper. Entries are OR-ed by default, so the exclusion becomes an independent branch that matches nearly every pull request. Either wrap both entries in "- all:", or better, merge them into one all-globs-to-any-file list, which excludes per file rather than across the whole pull request.`,
       );
     }
 
@@ -130,28 +223,83 @@ function selfTest() {
   const plain = `'area:pty':\n  - changed-files:\n      - any-glob-to-any-file:\n          - 'crates/nysia-core/src/pty/**'\n`;
   check('a single positive glob passes', checkLabelerConfig(plain).length === 0);
 
-  // The exact shape this file exists to catch — the one that shipped first.
-  const bad = `'area:web':\n  - changed-files:\n      - any-glob-to-any-file:\n          - 'apps/web/**'\n      - all-globs-to-all-files:\n          - '!apps/web/src/generated/**'\n`;
-  const badProblems = checkLabelerConfig(bad);
-  check('an unwrapped exclusion fails', badProblems.length === 1);
-  check('the message names the label', (badProblems[0] ?? '').includes('area:web'));
-  check('the message explains the OR', (badProblems[0] ?? '').includes('OR-ed'));
+  // The parser first, since every rule below rests on it.
+  check(
+    'block style is read',
+    JSON.stringify(parseGlobKeys(['      - any-glob-to-any-file:', "          - 'a/**'", "          - '!b/**'"])) ===
+      JSON.stringify([{ key: 'any-glob-to-any-file', globs: ['a/**', '!b/**'] }]),
+  );
+  check(
+    'flow style is read',
+    JSON.stringify(parseGlobKeys(["      - any-glob-to-any-file: ['a/**', '!b/**']"])) ===
+      JSON.stringify([{ key: 'any-glob-to-any-file', globs: ['a/**', '!b/**'] }]),
+  );
+  check(
+    'a bare scalar is read',
+    JSON.stringify(parseGlobKeys(['      - any-glob-to-any-file: docs/**'])) ===
+      JSON.stringify([{ key: 'any-glob-to-any-file', globs: ['docs/**'] }]),
+  );
+  check(
+    'a double-quoted flow item is read',
+    parseGlobKeys(['      - all-globs-to-any-file: ["a/**", "!b/**"]'])[0].globs[1] === '!b/**',
+  );
+  check(
+    'a following key does not swallow the previous block',
+    parseGlobKeys([
+      '      - any-glob-to-any-file:',
+      "          - 'a/**'",
+      '      - all-globs-to-all-files:',
+      "          - '!b/**'",
+    ]).length === 2,
+  );
 
-  const good = `'area:web':\n  - all:\n      - changed-files:\n          - any-glob-to-any-file:\n              - 'apps/web/**'\n          - all-globs-to-all-files:\n              - '!apps/web/src/generated/**'\n`;
-  check('the same exclusion wrapped in all: passes', checkLabelerConfig(good).length === 0);
+  // (a) A negation under an OR-ing key. This is the exact block that passed the previous
+  // version with its success line while the real labeler applied the label to a pty-only
+  // pull request, a docs-only one, and an empty one.
+  const flowNegation = `'area:agent':\n  - changed-files:\n      - any-glob-to-any-file: ['crates/agent/**', '!crates/agent/fixtures/**']\n`;
+  const flowProblems = checkLabelerConfig(flowNegation);
+  check('a flow-style negation under an any-glob key fails', flowProblems.length === 1);
+  check('the message names the offending glob', (flowProblems[0] ?? '').includes('!crates/agent/fixtures/**'));
+  check('the message names the OR-ing key', (flowProblems[0] ?? '').includes('any-glob-to-any-file'));
+  // The advice the old message gave, which did not work.
+  check('the message says the all: wrapper will not fix it', (flowProblems[0] ?? '').includes('does NOT fix it'));
+  check('the message names the key that does', (flowProblems[0] ?? '').includes('all-globs-to-any-file'));
 
-  // A comment quoting the wrong spelling must not fail the file that explains it — the
-  // same lesson comment stripping taught check-workflow-pins.mjs.
-  const documented = `# Never write all-globs-to-all-files without '- all:' above it.\n${plain}`;
-  check('the dangerous spelling in a comment is not a violation', checkLabelerConfig(documented).length === 0);
+  const blockNegation = `'area:agent':\n  - changed-files:\n      - any-glob-to-any-file:\n          - 'crates/agent/**'\n          - '!crates/agent/fixtures/**'\n`;
+  check('the same mistake in block style fails', checkLabelerConfig(blockNegation).length === 1);
 
-  const both = `${bad}\n${plain}`;
+  // Wrapping the OR-ing key in `all:` must NOT silence the rule — that was the whole bug.
+  const wrappedButWrong = `'area:agent':\n  - all:\n      - changed-files:\n          - any-glob-to-any-file: ['crates/agent/**', '!crates/agent/fixtures/**']\n`;
+  check('an all: wrapper does not excuse a negation under an OR-ing key', checkLabelerConfig(wrappedButWrong).length === 1);
+
+  // The same gap one key over: any-glob-to-all-files ORs its globs as well.
+  const anyToAll = `'area:agent':\n  - changed-files:\n      - any-glob-to-all-files: ['crates/agent/**', '!crates/agent/fixtures/**']\n`;
+  check('a negation under any-glob-to-all-files fails too', checkLabelerConfig(anyToAll).length === 1);
+
+  // The shape the message recommends has to be one this check accepts, or the advice
+  // sends the author into a second failure.
+  const advised = `'area:agent':\n  - changed-files:\n      - all-globs-to-any-file: ['crates/agent/**', '!crates/agent/fixtures/**']\n`;
+  check('the shape the message recommends passes', checkLabelerConfig(advised).length === 0);
+
+  // (b) Split entries without the wrapper.
+  const split = `'area:web':\n  - changed-files:\n      - any-glob-to-any-file:\n          - 'apps/web/**'\n      - all-globs-to-all-files:\n          - '!apps/web/src/generated/**'\n`;
+  const splitProblems = checkLabelerConfig(split);
+  check('split entries without all: fail', splitProblems.length === 1);
+  check('the message explains the OR', (splitProblems[0] ?? '').includes('OR-ed'));
+
+  const splitWrapped = `'area:web':\n  - all:\n      - changed-files:\n          - any-glob-to-any-file:\n              - 'apps/web/**'\n          - all-globs-to-all-files:\n              - '!apps/web/src/generated/**'\n`;
+  check('split entries wrapped in all: pass', checkLabelerConfig(splitWrapped).length === 0);
+
+  // A comment quoting a wrong spelling must not fail the file that explains it.
+  const documented = `# Never write any-glob-to-any-file: ['a/**', '!b/**'].\n${plain}`;
+  check('a dangerous spelling in a comment is not a violation', checkLabelerConfig(documented).length === 0);
+
+  const both = `${flowNegation}\n${plain}`;
   check('a good label beside a bad one is not blamed', checkLabelerConfig(both).length === 1);
 
   check('an empty config fails rather than passing vacuously', checkLabelerConfig('# nothing\n').length === 1);
 
-  // (b) The deadlock. This is the exact block that shipped, and every other type in the
-  // table would behave the same way, so the rule is checked against all of them.
+  // (c) Types.
   const docs = `'documentation':\n  - changed-files:\n      - any-glob-to-any-file:\n          - 'docs/**'\n`;
   const docsProblems = checkLabelerConfig(docs);
   check('a type label written by the labeler fails', docsProblems.length === 1);
@@ -165,7 +313,7 @@ function selfTest() {
     checkLabelerConfig(`'dependencies':\n  - changed-files:\n      - any-glob-to-any-file:\n          - 'Cargo.lock'\n`).length === 0,
   );
 
-  // (c) Cross-check against labels.yml.
+  // (d) Cross-check against labels.yml.
   const known = new Set(['area:pty', 'dependencies']);
   check('a declared label passes the cross-check', checkLabelerConfig(plain, known).length === 0);
   const unknown = `'area:nope':\n  - changed-files:\n      - any-glob-to-any-file:\n          - 'x/**'\n`;
@@ -194,6 +342,6 @@ if (process.argv.includes('--self-test')) {
     process.exit(1);
   }
   process.stdout.write(
-    `${CONFIG_PATH}: exclusions wrapped in "all:", no type labels written, all names declared in ${LABELS_PATH}\n`,
+    `${CONFIG_PATH}: every negation excludes, no type labels written, all names declared in ${LABELS_PATH}\n`,
   );
 }
