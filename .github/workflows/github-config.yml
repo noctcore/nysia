@@ -25,6 +25,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # `gh label list` reads the repository's labels, which live behind the issues
+      # scope. Read-only, and nothing here writes a label.
+      issues: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -46,3 +49,20 @@ jobs:
 
       - name: check the labeler config
         run: node .github/scripts/check-labeler-config.mjs
+
+      - name: self-test the label drift rule
+        run: node .github/scripts/check-labels-drift.mjs --self-test
+
+      # The drift check proper. `yq` is pre-installed on the GitHub-hosted Ubuntu
+      # runners, which is what makes a real parse available here — labels.yml used to
+      # claim a drift check needed a YAML parser the repository does not have, and that
+      # was simply wrong.
+      - name: check labels.yml still describes the repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          yq --version
+          yq -o=json '.' .github/labels.yml > "$RUNNER_TEMP/declared.json"
+          gh label list --limit 200 --json name,description,color > "$RUNNER_TEMP/live.json"
+          node .github/scripts/check-labels-drift.mjs "$RUNNER_TEMP/declared.json" "$RUNNER_TEMP/live.json"

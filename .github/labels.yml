@@ -26,13 +26,14 @@
 # `gh label list` command above and regenerate rather than hand-editing — retyping 33
 # colours is how one of them drifts.
 #
-# WHY THERE IS NO DRIFT CHECK. A job that diffs this file against the live label set was
-# considered and deliberately left out. Reading it needs a YAML parser, and this
-# repository has none in its dependency set — adding one means editing package.json and
-# the lockfile, which belong to the coordinator. The alternative, hand-parsing YAML, is
-# exactly the class of defect lint-meta was rewritten to remove: a parser that silently
-# misreads a spelling and reports success. Since re-applying is idempotent, running the
-# command above *is* the reconciliation, and it costs less than a wrong parser.
+# THIS FILE IS CHECKED AGAINST REALITY. `.github/workflows/github-config.yml` converts
+# it with `yq` and compares it to `gh label list`, so a label created in the UI and never
+# recorded here, or recorded here and never created, fails CI in both directions, naming
+# the colour or description that differs.
+#
+# An earlier version of this header said a drift check was impossible because it would
+# need a YAML parser the repository does not have. That was wrong: yq is pre-installed on
+# the GitHub-hosted Ubuntu runners, which is where the check runs.
 #
 # Colours carry no meaning beyond making the facets separable at a glance: the four
 # priorities run red to green, the areas are distinct hues, the types are muted.
