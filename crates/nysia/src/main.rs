@@ -10,9 +10,10 @@ use std::process::ExitCode;
 
 use crate::cli::{Cli, Mode};
 
-/// Returned when a verb parsed and routed correctly but has no implementation in this
-/// build. Distinct from clap's usage exit (2) so a caller can tell "you typed it wrong"
-/// from "this build cannot do that yet".
+/// Returned when a mode or verb parsed and routed correctly but has no implementation in
+/// this build. Distinct from clap's usage exit (2) so a caller can tell "you typed it
+/// wrong" from "this build cannot do that yet", and never 0, so nothing downstream can
+/// mistake a stub for a working daemon.
 const EXIT_UNIMPLEMENTED: u8 = 3;
 
 fn main() -> ExitCode {
@@ -29,13 +30,18 @@ fn main() -> ExitCode {
         Mode::Daemon => {
             // Wave 2 (W4) replaces this with the real thing: bind the versioned socket,
             // write the pid record, adopt or refuse an existing daemon, then serve.
-            println!(
+            //
+            // Everything goes to stderr and the exit is non-zero. A supervisor that spawns
+            // `nysia --daemon`, waits, and checks the status would otherwise read success
+            // from a process that bound nothing and served nobody — and stdout stays empty
+            // so a caller watching it for a ready line is not fed one either.
+            eprintln!(
                 "nysia {}: would become nysiad here — bind \\\\.\\pipe\\nysiad-v1-<user> (Windows) \
                  or nysiad-v1.sock (macOS), write the pid record, and serve the verb surface.",
                 env!("CARGO_PKG_VERSION")
             );
-            println!("The v0.1 scaffold has no socket server yet; it lands in wave 2 (W4).");
-            ExitCode::SUCCESS
+            eprintln!("The v0.1 scaffold has no socket server yet; it lands in wave 2 (W4).");
+            ExitCode::from(EXIT_UNIMPLEMENTED)
         }
         Mode::Client(unimplemented) => {
             eprintln!("{unimplemented}");
