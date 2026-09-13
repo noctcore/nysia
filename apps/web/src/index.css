@@ -12,6 +12,20 @@
 @import '@fontsource/fira-code/500.css';
 
 /*
+ * Keep the tests out of the content scan.
+ *
+ * `colourGuard.test.ts` carries the offending shapes it hunts for as fixtures, and
+ * Tailwind's scanner does not know they are fixtures — it saw `bg-[rebeccapurple]` and
+ * `[color:red]` and compiled both into the shipped stylesheet, where nothing renders them.
+ * A guard whose own examples ship the thing it forbids is not the worst bug in the world,
+ * but it is a funny one to leave in.
+ *
+ * Excluded by shape rather than by file, so the next test carrying a fixture is covered
+ * without anyone remembering this rule exists.
+ */
+@source not "./**/*.test.ts";
+
+/*
  * The token layer (design-spec.md §1). This file and `src/theme/themes.ts` are the only
  * two places in `apps/web` allowed to carry a colour literal —
  * `src/theme/colourGuard.test.ts` fails the build if a third appears.
