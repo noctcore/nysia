@@ -24,7 +24,7 @@
  * instead of a `findIndex` plus an index access — both forced by this repository's
  * `noUncheckedIndexedAccess`, both noted at the line.
  *
- * Three are deliberate and DO change a result, every one of them in the fail-closed
+ * Five are deliberate and DO change a result, every one of them in the fail-closed
  * direction. Upstream's behaviour in each of these cases is to carry on with a label that
  * can never be applied — a dead rule that reads as working config — and this file throws
  * instead, so a config the action would quietly ignore is a loud error here:
@@ -34,10 +34,23 @@
  *   2. An unrecognised top-level key under a label. Upstream logs it with `core.info` and
  *      continues, leaving the label with no conditions. See `getLabelConfigMapFromObject`.
  *   3. `head-branch` / `base-branch`, which are not transcribed at all. See `toMatchConfig`.
+ *   4. A top-level config that is not a mapping. Upstream iterates a list's indices as if
+ *      they were label names, and throws its own error for a scalar. See
+ *      `getLabelConfigMapFromObject`.
+ *   5. A match entry that is not a mapping. Upstream reaches `in` on it and dies with a
+ *      bare TypeError; this throws a named error naming the entry. See `toMatchConfig`.
  *
- * A reader diffing this against upstream will find those three; they are here so that the
+ * A reader diffing this against upstream will find those five; they are here so that the
  * diff is expected rather than a surprise. None can make this file accept a config the
  * action would reject.
+ *
+ * WHAT THIS FILE STILL CANNOT SEE. Nine spellings leave a declared label silently dead
+ * without diverging from upstream at all — `any:`/`all:` written as a mapping, a scalar or
+ * null, an empty `any: []`/`all: []`, an empty rule list, entries that are only null or an
+ * empty mapping, an empty glob list. Upstream is equally silent on every one, so there is
+ * nothing to fail closed *against*; the transcription is faithful and the label is still
+ * dead. That gap is closed in `labeler.test.ts` by two invariants over the config as a
+ * whole rather than here — see `describe('no declared label is silently dead')`.
  *
  * `PINNED_SHA` below is checked against `.github/workflows/pr-triage.yml` by
  * `labeler.test.ts`. Bumping the action without revisiting this file fails that test,
@@ -188,6 +201,14 @@ function toChangedFilesMatchConfig(config: Unknown): BaseMatchConfig {
  * failure this file exists to prevent.
  */
 function toMatchConfig(config: Unknown): BaseMatchConfig {
+  // `in` on a string or a number is a TypeError, so an entry like `any: ['nonsense']`
+  // used to fail closed by accident with a message naming neither the problem nor this
+  // file. Fail closed on purpose instead.
+  if (!isObject(config)) {
+    throw new UnsupportedLabelerConfig(
+      `A match entry must be a mapping; found ${config === null ? 'null' : typeof config}.`,
+    );
+  }
   if ('head-branch' in config || 'base-branch' in config) {
     throw new UnsupportedLabelerConfig(
       'head-branch / base-branch matching is not transcribed; extend scripts/labeler/upstream.ts before using it.',
@@ -206,7 +227,19 @@ function toMatchConfig(config: Unknown): BaseMatchConfig {
  */
 export function getLabelConfigMapFromObject(configObject: unknown): Map<string, MatchConfig[]> {
   const labelMap = new Map<string, MatchConfig[]>();
-  if (!isObject(configObject)) return labelMap;
+
+  // DEVIATION (fail-closed), deviation 4. Upstream runs `for (const label in configObject)`:
+  // a top-level list iterates its indices and can label a pull request under numeric label
+  // names, and a scalar throws its own "unexpected type" error. This used to return an empty
+  // map for both, which is the loosening direction and was caught only by the size guard
+  // below. A labeler config is a mapping of label to rules; anything else is a mistake.
+  if (!isObject(configObject)) {
+    throw new UnsupportedLabelerConfig(
+      `A labeler config must be a mapping of label name to rules; found ${
+        Array.isArray(configObject) ? 'a list' : configObject === null ? 'null' : typeof configObject
+      }.`,
+    );
+  }
 
   for (const [label, configOptions] of Object.entries(configObject as Unknown)) {
     if (!Array.isArray(configOptions) || !configOptions.every((o) => typeof o === 'object')) {
@@ -260,7 +293,11 @@ export function getLabelConfigMapFromObject(configObject: unknown): Map<string, 
 function checkIfAnyGlobMatchesAnyFile(changedFiles: string[], globs: string[]): boolean {
   const matchers = globs.map((g) => new Minimatch(g, { dot: DOT }));
   for (const matcher of matchers) {
-    if (changedFiles.find((f) => matcher.match(f)) !== undefined) return true;
+    // Upstream's own truthiness test, not `!== undefined`. They differ only when a changed
+    // file is the empty string, which the API cannot return — but mirroring costs nothing
+    // and an exactly-faithful line needs no caveat in the header.
+    const matchedFile = changedFiles.find((f) => matcher.match(f));
+    if (matchedFile) return true;
   }
   return false;
 }
@@ -268,8 +305,8 @@ function checkIfAnyGlobMatchesAnyFile(changedFiles: string[], globs: string[]): 
 function checkIfAllGlobsMatchAnyFile(changedFiles: string[], globs: string[]): boolean {
   const matchers = globs.map((g) => new Minimatch(g, { dot: DOT }));
   for (const changedFile of changedFiles) {
-    const mismatched = matchers.find((m) => !m.match(changedFile));
-    if (mismatched !== undefined) continue;
+    const mismatchedGlob = matchers.find((m) => !m.match(changedFile));
+    if (mismatchedGlob) continue;
     return true;
   }
   return false;
@@ -278,8 +315,8 @@ function checkIfAllGlobsMatchAnyFile(changedFiles: string[], globs: string[]): b
 function checkIfAnyGlobMatchesAllFiles(changedFiles: string[], globs: string[]): boolean {
   const matchers = globs.map((g) => new Minimatch(g, { dot: DOT }));
   for (const matcher of matchers) {
-    const mismatched = changedFiles.find((f) => !matcher.match(f));
-    if (mismatched !== undefined) continue;
+    const mismatchedFile = changedFiles.find((f) => !matcher.match(f));
+    if (mismatchedFile) continue;
     return true;
   }
   return false;
@@ -288,8 +325,8 @@ function checkIfAnyGlobMatchesAllFiles(changedFiles: string[], globs: string[]):
 function checkIfAllGlobsMatchAllFiles(changedFiles: string[], globs: string[]): boolean {
   const matchers = globs.map((g) => new Minimatch(g, { dot: DOT }));
   for (const changedFile of changedFiles) {
-    const mismatched = matchers.find((m) => !m.match(changedFile));
-    if (mismatched !== undefined) return false;
+    const mismatchedGlob = matchers.find((m) => !m.match(changedFile));
+    if (mismatchedGlob) return false;
   }
   return true;
 }
