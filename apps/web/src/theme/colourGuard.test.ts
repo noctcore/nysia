@@ -289,6 +289,54 @@ describe('findColourLiterals', () => {
   });
 });
 
+/*
+ * The residue list from `colourGuard.ts`, one case per entry.
+ *
+ * The doc claims that list is exhaustive, and a reader is told they can trust the rest of
+ * the comment because of it — which only holds if the claim is checked. Twice now an entry
+ * has gone missing while the claim stayed, so it is a test rather than a sentence: widen
+ * the rule without updating the list and one of these goes green where it should be red.
+ */
+describe('the documented residue', () => {
+  it('misses a colour that arrives through a variable', () => {
+    expect(findColourLiterals('style={{ color: chosen }}')).toEqual([]);
+  });
+
+  it('misses a colour name that no painting property introduces', () => {
+    expect(findColourLiterals("const tier = 'gold';")).toEqual([]);
+  });
+
+  it('misses a value whose own quote appears inside it escaped', () => {
+    // The scanned text carries real backslashes, which is what ends the match early.
+    const escaped = String.raw`style={{ background: 'url(\'a.png\') red' }}`;
+    expect(findColourLiterals(escaped)).toEqual([]);
+  });
+
+  it('misses an expression carrying a comma, a semicolon or a brace', () => {
+    expect(findColourLiterals("style={{ color: mix(a, b) ?? 'red' }}")).toEqual([]);
+    expect(findColourLiterals("style={{ color: run({ x: 1 }) ?? 'red' }}")).toEqual([]);
+  });
+
+  it('misses a painting property the list does not name', () => {
+    // A library with its own colour keys — a terminal theme, a chart config — is outside a
+    // rule that knows CSS property names. `selectionBackground` is the sharper half: the
+    // word is in the list, but the boundary guard that stops `fill` matching inside
+    // `autofill` stops `background` matching here too. The two are the same trade.
+    expect(findColourLiterals("{ cursorAccent: 'red' }")).toEqual([]);
+    expect(findColourLiterals("{ selectionBackground: 'navy' }")).toEqual([]);
+  });
+
+  it('does fire on a value that merely contains a colour word', () => {
+    // The other direction, also documented: a false positive, but a loud one. Nothing
+    // silent can ship a pixel.
+    expect(
+      findColourLiterals(`style={{ background: "url('/img/red-banner.png')" }}`).map(
+        (c) => c.kind,
+      ),
+    ).toEqual(['named-colour']);
+  });
+});
+
 describe('hardcoded colour guard', () => {
   it('scans the whole package, so an empty sweep cannot pass vacuously', () => {
     expect(scanned.length).toBeGreaterThan(8);
