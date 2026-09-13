@@ -53,7 +53,21 @@ pub enum ResolveError {
         /// The interpreter that could not be resolved.
         interpreter: String,
     },
+    /// An argument to a batch shim carried a character `cmd.exe` would act on.
+    #[error("{argument:?} cannot be passed to a batch shim safely")]
+    UnsafeArgument {
+        /// The argument that was refused.
+        argument: String,
+    },
 }
+
+/// The characters `cmd.exe` acts on rather than passing through.
+///
+/// `%` expands a variable, `!` expands one again under delayed expansion, `^` escapes the
+/// next character, `&` `|` `<` `>` `(` `)` are the command separators and redirections, and
+/// `"` ends the quoting that is supposed to contain all of them. A newline or carriage
+/// return ends the command line outright.
+const CMD_METACHARACTERS: &[char] = &['%', '!', '^', '&', '|', '<', '>', '(', ')', '"'];
 
 /// A program that has been resolved to something the OS will actually launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +77,8 @@ pub struct ResolvedProgram {
     /// Arguments that must precede the caller's own — how a shim's interpreter is told
     /// which script to run. Empty for a program launched directly.
     pub leading_args: Vec<OsString>,
+    /// Whether the launch goes through `cmd.exe`, which re-parses everything after it.
+    through_cmd: bool,
 }
 
 impl ResolvedProgram {
@@ -71,12 +87,19 @@ impl ResolvedProgram {
         Self {
             program,
             leading_args: Vec::new(),
+            through_cmd: false,
         }
     }
 
     /// The full argument vector for `program` plus the caller's `args`, argv\[0\] first.
-    #[must_use]
-    pub fn argv<I, S>(&self, args: I) -> Vec<OsString>
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResolveError::UnsafeArgument`] when this program is a batch shim and an
+    /// argument carries a character `cmd.exe` would act on. See the type's documentation:
+    /// a batch shim is launched *through a shell*, and that shell parses these arguments
+    /// again after `CreateProcess` has finished with them.
+    pub fn argv<I, S>(&self, args: I) -> Result<Vec<OsString>, ResolveError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -84,9 +107,42 @@ impl ResolvedProgram {
         let mut argv = Vec::with_capacity(1 + self.leading_args.len());
         argv.push(self.program.clone().into_os_string());
         argv.extend(self.leading_args.iter().cloned());
-        argv.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
-        argv
+        for arg in args {
+            let arg = arg.as_ref();
+            if self.through_cmd {
+                check_batch_argument(arg)?;
+            }
+            argv.push(arg.to_owned());
+        }
+        Ok(argv)
     }
+}
+
+/// Refuse an argument that `cmd.exe` would reinterpret.
+///
+/// This is the BatBadBut class, CVE-2024-24576: `CreateProcess` quoting is not `cmd.exe`
+/// quoting, so an argument that survives the first parser intact is parsed a second time by
+/// the shell, where `&` starts another command and `%PATH%` expands. Rust's own
+/// `std::process` grew a special escaping path for `.bat` and `.cmd` targets because of it;
+/// `portable-pty`'s `CommandBuilder` has no such path, and this module is where its output
+/// is composed.
+///
+/// Refusing rather than escaping is deliberate. Correct `cmd.exe` escaping is a small pile
+/// of special cases that is easy to get subtly wrong and hard to test exhaustively, and
+/// nothing in v1 needs these characters: the only batch target is an `npm` shim and the
+/// only arguments are flags, paths and ids. A refusal is a loud, testable failure; a
+/// half-right escape is a quiet one.
+fn check_batch_argument(arg: &OsStr) -> Result<(), ResolveError> {
+    let text = arg.to_string_lossy();
+    let offending = text
+        .chars()
+        .any(|c| c.is_control() || CMD_METACHARACTERS.contains(&c));
+    if offending {
+        return Err(ResolveError::UnsafeArgument {
+            argument: text.into_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Resolve `program` to something launchable, searching `PATH` when it has no separator.
@@ -237,6 +293,7 @@ fn validate_windows(path: &Path) -> Result<ResolvedProgram, ResolveError> {
             Ok(ResolvedProgram {
                 program: shell,
                 leading_args: vec![OsString::from("/c"), path.as_os_str().to_owned()],
+                through_cmd: true,
             })
         }
         // `-File` rather than `-Command`, so the shim's own path is not re-parsed as
@@ -252,6 +309,10 @@ fn validate_windows(path: &Path) -> Result<ResolvedProgram, ResolveError> {
                     OsString::from("-File"),
                     path.as_os_str().to_owned(),
                 ],
+                // `-File` hands the script path and then the remaining arguments to
+                // PowerShell's own parameter binder as literals, so they are not re-parsed
+                // as source the way `cmd.exe /c` re-parses its tail.
+                through_cmd: false,
             })
         }
         _ => Err(ResolveError::UnknownExtension {
@@ -335,8 +396,9 @@ mod tests {
         let resolved = ResolvedProgram {
             program: PathBuf::from("cmd.exe"),
             leading_args: vec![OsString::from("/c"), OsString::from("claude.cmd")],
+            through_cmd: true,
         };
-        let argv = resolved.argv(["--help"]);
+        let argv = resolved.argv(["--help"]).expect("a plain flag is safe");
         assert_eq!(
             argv,
             vec![
@@ -346,6 +408,49 @@ mod tests {
                 OsString::from("--help"),
             ]
         );
+    }
+
+    #[test]
+    fn a_batch_shim_refuses_arguments_cmd_exe_would_act_on() {
+        // BatBadBut, CVE-2024-24576. `cmd.exe /c` parses its tail a second time, after
+        // `CreateProcess` is done with it, so an argument that looks inert to the first
+        // parser can start another command in the second. Nothing reaches this today —
+        // every profile resolves to an `.exe` — but it goes live the moment a caller passes
+        // a task-derived argument to `claude.cmd`.
+        let shim = ResolvedProgram {
+            program: PathBuf::from("cmd.exe"),
+            leading_args: vec![OsString::from("/c"), OsString::from("claude.cmd")],
+            through_cmd: true,
+        };
+        for hostile in [
+            "a&calc",
+            "a|calc",
+            "%PATH%",
+            "!DELAYED!",
+            "a^b",
+            "a>out",
+            "a<in",
+            "(a)",
+            "say \"hi\"",
+            "line\nbreak",
+        ] {
+            assert!(shim.argv([hostile]).is_err(), "{hostile:?} must be refused");
+        }
+        // The arguments that actually occur still go through.
+        for benign in ["--help", "--resume", "3f9a-21", r"C:\work\repo", "a b"] {
+            assert!(shim.argv([benign]).is_ok(), "{benign:?} must be allowed");
+        }
+    }
+
+    #[test]
+    fn a_direct_executable_passes_its_arguments_through_untouched() {
+        // The refusal is specific to the second parser. A real executable gets exactly the
+        // argv the caller asked for, metacharacters and all, because nothing re-reads it.
+        let direct = ResolvedProgram::direct(PathBuf::from("claude.exe"));
+        let argv = direct
+            .argv(["--message", "tests & docs"])
+            .expect("a direct launch has no shell to confuse");
+        assert_eq!(argv.last(), Some(&OsString::from("tests & docs")));
     }
 
     #[test]

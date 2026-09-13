@@ -152,7 +152,12 @@ impl ShellProfile {
             }
         };
 
-        let mut command = CommandBuilder::from_argv(program.argv(args));
+        let mut command = CommandBuilder::from_argv(program.argv(args).map_err(|source| {
+            ProfileError::Unavailable {
+                profile: self.id(),
+                source,
+            }
+        })?);
         super::env::sanitize(&mut command);
         Ok(command)
     }
