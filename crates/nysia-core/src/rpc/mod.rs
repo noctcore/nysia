@@ -53,10 +53,14 @@
 //!    backpressure reaches the process producing the output rather than being absorbed by a
 //!    buffer somewhere in between.
 
+pub mod control;
 pub mod endpoint;
 pub mod lease;
+pub mod transport;
 
+pub use control::{ControlError, ControlReader, ControlWriter, MAX_CONTROL_LINE_BYTES};
 pub use endpoint::{
     ENDPOINT_VAR, Endpoint, EndpointResolveError, EnvSource, Listening, RUNTIME_DIR_VAR,
 };
 pub use lease::{LeaseError, PidRecordFile};
+pub use transport::{Connection, ConnectionReader, ConnectionWriter, Listener, TransportError};
