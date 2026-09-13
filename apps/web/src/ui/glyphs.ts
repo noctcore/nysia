@@ -35,3 +35,6 @@ export const GLYPH = {
 
 /** The Command-K affordance. Spelled with the command glyph on every platform, as designed. */
 export const COMMAND_PALETTE_HINT = '⌘K';
+
+/** Settings has its own search, on its own key (design-spec.md §5). */
+export const SETTINGS_SEARCH_HINT = '⌘F';

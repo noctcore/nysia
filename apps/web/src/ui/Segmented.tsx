@@ -1,10 +1,16 @@
+import type { KeyboardEvent } from 'react';
+
+import { isArrowKey, nextOption } from './roving';
+
 /**
  * The segmented control from design-spec.md §5: a `bg2` track with a `line` border, 3px of
  * padding, and the selected segment filled with `line2`.
  *
- * Implemented as a radio group, which is what it is — arrow keys move the selection, the
- * whole group is one tab stop, and a screen reader reads "2 of 3" instead of three
- * unrelated buttons.
+ * Implemented as a radio group, which is what it is — one tab stop for the whole control,
+ * arrow keys moving the selection, and a screen reader reading "2 of 3" instead of three
+ * unrelated buttons. Roving tabindex without the arrow handler would be worse than a plain
+ * row of buttons: the keyboard could reach the selected option and nothing else, so the
+ * control could not be changed at all without a mouse.
  */
 export function Segmented<T extends string>({
   options,
@@ -18,10 +24,24 @@ export function Segmented<T extends string>({
   readonly label: string;
   readonly onChange: (next: T) => void;
 }) {
+  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (!isArrowKey(event.key)) {
+      return;
+    }
+    // Swallowed even when the selection does not move, so the arrow never scrolls the
+    // settings pane out from under the control the user is operating.
+    event.preventDefault();
+    const next = nextOption(options, value, event.key);
+    if (next !== undefined) {
+      onChange(next);
+    }
+  }
+
   return (
     <div
       role="radiogroup"
       aria-label={label}
+      onKeyDown={onKeyDown}
       className="border-line bg-bg2 flex flex-none rounded-control border p-[3px] text-xs"
     >
       {options.map((option) => {

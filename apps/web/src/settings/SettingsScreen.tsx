@@ -1,7 +1,8 @@
 import { useState } from 'react';
 
+import type { Project } from '../store/types';
 import { useSnapshot } from '../store/useStore';
-import { COMMAND_PALETTE_HINT, GLYPH } from '../ui/glyphs';
+import { GLYPH, SETTINGS_SEARCH_HINT } from '../ui/glyphs';
 import { ComingSoon } from '../ui/ComingSoon';
 import { SectionLabel } from '../ui/SectionLabel';
 import { AppearancePane } from './AppearancePane';
@@ -43,7 +44,7 @@ export function SettingsScreen() {
         <div className="bg-bg2 text-fg3 mb-3 flex items-center gap-2 rounded-control px-3 py-2">
           <span aria-hidden="true">{GLYPH.search}</span>
           Search settings
-          <span className="ml-auto font-mono text-[10px]">{COMMAND_PALETTE_HINT}</span>
+          <span className="ml-auto font-mono text-[10px]">{SETTINGS_SEARCH_HINT}</span>
         </div>
 
         {SETTINGS_TREE.map((group) => (
@@ -77,7 +78,7 @@ export function SettingsScreen() {
       </nav>
 
       <div className="flex max-w-[980px] min-h-0 flex-col gap-3.5 overflow-y-auto px-10 py-[22px]">
-        <SettingsPane selected={selected} projectNames={projects.map((p) => p.name)} />
+        <SettingsPane selected={selected} projects={projects} />
       </div>
     </div>
   );
@@ -85,10 +86,10 @@ export function SettingsScreen() {
 
 function SettingsPane({
   selected,
-  projectNames,
+  projects,
 }: {
   readonly selected: string;
-  readonly projectNames: readonly string[];
+  readonly projects: readonly Project[];
 }) {
   if (selected === 'general') {
     return <GeneralPane />;
@@ -104,11 +105,12 @@ function SettingsPane({
     );
   }
 
-  // A project row. Per-project overrides are v0.4, with the worktree manager.
-  const name = projectNames.find((candidate) => selected.endsWith(candidate)) ?? 'Project';
+  // A project row, matched by id. Per-project overrides are v0.4, with the worktree
+  // manager.
+  const project = projects.find((candidate) => candidate.id === selected);
   return (
     <ComingSoon
-      title={name}
+      title={project?.name ?? 'Project'}
       version="v0.4"
       detail="Per-project overrides arrive with the worktree manager."
     />
