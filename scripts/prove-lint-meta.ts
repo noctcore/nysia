@@ -90,6 +90,14 @@ expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 22); /
 expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 25); // use {tauri, serde};
 expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 28); // the multi-line form
 
+// An astral char literal is two UTF-16 code units, so a pattern matching one leaves its
+// closing quote to pair with the comma and the orphan opens a string that swallows the
+// import below. Each spelling sits alone in its file: a later quote anywhere would close the
+// runaway string early and rescue the import, which is how a first attempt at this fixture
+// passed while the defect was still there.
+expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/astral_char.rs', 10);
+expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/astral_matches.rs', 7);
+
 // A multi-line grouped import in a .js file, and a `require()` in a .cjs one. ESLint's ban
 // blocks were {ts,tsx} only, and `no-restricted-imports` never covered `require` at all.
 expectFile(trips, 'no-tauri-outside-desktop', 'apps/web/src/legacy.js');

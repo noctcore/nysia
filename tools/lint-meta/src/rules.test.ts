@@ -88,6 +88,21 @@ describe('blankRustComments', () => {
     expect(blankRustComments('let s = "tauri::Builder";')).not.toContain('tauri');
   });
 
+  // An astral char literal is two UTF-16 code units. A pattern matching one leaves the
+  // closing quote to pair with whatever follows; the orphaned double quote then opens a
+  // string that runs to the next one in the file, erasing everything between.
+  it.each([
+    ['an array of char literals', `const C: [char; 2] = ['\u{1F525}','"'];`],
+    ['a match pattern', `fn f(c: char) -> bool { matches!(c, '\u{1F525}'|'"') }`],
+    ['a bare astral char literal', `const C: char = '\u{1F525}';`],
+  ])('reads %s as a char literal rather than a lifetime', (_what, literal) => {
+    const source = `${literal}\nuse tauri::Builder;\n`;
+    const blanked = blankRustComments(source);
+
+    expect(blanked).toHaveLength(source.length);
+    expect(blanked).toContain('use tauri::Builder;');
+  });
+
   it('treats a lifetime as code rather than as an unterminated char literal', () => {
     const source = "fn f<'a>(x: &'a str) -> &'a str { x }\nuse tauri::Builder;\n";
     expect(blankRustComments(source)).toContain('use tauri::Builder;');
