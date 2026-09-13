@@ -51,7 +51,6 @@
   /* Fixed colours that are still tokens: the toggle knob and the shadow both need to be
      switchable if a light theme ever lands, and neither belongs to a theme table. */
   --color-knob: #ffffff;
-  --color-emphasis: #ffffff;
   --color-shade: rgb(0 0 0 / 0.6);
 
   /* Type. Space Grotesk for UI, Fira Code for mono, terminal and metrics. Both carry a
