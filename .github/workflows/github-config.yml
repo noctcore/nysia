@@ -1,0 +1,42 @@
+# Checks the checks.
+#
+# The scripts under .github/scripts are the only executable part of this repository that
+# no vitest project covers — `vitest.config.ts` has projects for scripts/, tools/lint-meta
+# and apps/web, and .github is in none of them. Without this workflow they would ship
+# untested, which for a pair of gates is the failure they exist to prevent.
+#
+# Each script self-tests first and then runs for real, so a rule that has stopped tripping
+# fails here before it is trusted on a pull request.
+
+name: github-config
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/**']
+  pull_request:
+    paths: ['.github/**']
+
+permissions: {}
+
+jobs:
+  scripts:
+    name: workflow and label gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: self-test the workflow pin rules
+        run: node .github/scripts/check-workflow-pins.mjs --self-test
+
+      # The real scan. Every action in this directory pinned to a commit SHA, and no
+      # pull_request_target workflow reaching for the pull request head.
+      - name: check every workflow
+        run: node .github/scripts/check-workflow-pins.mjs
+
+      - name: self-test the label rules
+        run: node .github/scripts/require-pr-facets.mjs --self-test
