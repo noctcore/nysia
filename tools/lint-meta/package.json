@@ -1,0 +1,10 @@
+{
+  "name": "@nysia/lint-meta",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node src/cli.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}
