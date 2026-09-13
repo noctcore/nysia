@@ -36,3 +36,16 @@ export function nextOption<T extends string>(
 export function isArrowKey(key: string): boolean {
   return ARROW_STEP[key] !== undefined;
 }
+
+/**
+ * Which option holds the group's single tab stop.
+ *
+ * A roving tabindex derived from `option === current` alone has a hole: a stored value
+ * that is not in the list leaves every option at `-1`, and the whole control drops out of
+ * the tab order with no way back in. Falling back to the first option means the group is
+ * always reachable, and the user's first arrow press then lands them somewhere valid.
+ */
+export function tabbableIndex<T extends string>(options: readonly T[], current: T): number {
+  const index = options.indexOf(current);
+  return index === -1 ? 0 : index;
+}
