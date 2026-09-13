@@ -549,6 +549,17 @@ mod tests {
         }
     }
 
+    /// Wait until the shell has drawn its prompt and gone quiet.
+    ///
+    /// Typing before this reliably loses rather than occasionally: a shell that has not
+    /// finished starting echoes what is typed and then redraws the line when its line editor
+    /// takes over, so the command appears twice and runs zero times. An empty screen means it
+    /// has written nothing yet; quiet alone would be satisfied by the silence before it starts.
+    async fn await_prompt(client: &mut Client, handle: &SessionHandle) {
+        until(client, handle, |text| !text.trim().is_empty()).await;
+        settle(client, handle).await;
+    }
+
     /// Wait for the shell to stop producing output.
     ///
     /// Used between typed lines rather than waiting for the token: only the last line
@@ -615,7 +626,7 @@ mod tests {
             "a session that has just started has not exited"
         );
 
-        until(&mut client, &created.handle, |text| !text.trim().is_empty()).await;
+        await_prompt(&mut client, &created.handle).await;
         client
             .terminal_resize(TerminalResize {
                 handle: created.handle.clone(),
@@ -673,7 +684,7 @@ mod tests {
             .session_create(create_request())
             .await
             .expect("a session is created");
-        until(&mut first, &created.handle, |text| !text.trim().is_empty()).await;
+        await_prompt(&mut first, &created.handle).await;
         for line in shell().1 {
             first
                 .terminal_send(TerminalSend::line(created.handle.clone(), line))
@@ -905,7 +916,7 @@ mod tests {
             .session_create(create_request())
             .await
             .expect("a session is created");
-        until(&mut client, &created.handle, |text| !text.trim().is_empty()).await;
+        await_prompt(&mut client, &created.handle).await;
         attach(&mut client, &created.handle).await;
         client
             .terminal_send(TerminalSend::line(created.handle.clone(), flood()))

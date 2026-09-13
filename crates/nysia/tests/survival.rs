@@ -233,6 +233,34 @@ fn shell() -> (Vec<&'static str>, Vec<&'static str>) {
     (Vec::new(), vec![r#"echo "NYSIA-$((6*7))""#])
 }
 
+/// Wait until the shell has drawn its prompt and gone quiet.
+///
+/// Typing before this is not a race that sometimes loses — it reliably loses. A shell that has
+/// not finished starting echoes what is typed at it and then redraws the line when its line
+/// editor takes over, so the command appears on screen twice and runs zero times. `pwsh` is
+/// slow enough to start that this is the normal outcome rather than the unlucky one.
+///
+/// Two conditions, because neither alone is enough: an empty screen means the shell has
+/// written nothing yet, and quiet on its own would be satisfied by the silence *before* it
+/// starts writing.
+fn await_prompt(daemon: &Nysiad, handle: &str) {
+    let deadline = Instant::now() + STEP_TIMEOUT;
+    loop {
+        let run = daemon.run(&["terminal", "read", handle, "--no-spawn"]);
+        if !run.stdout.trim().is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the shell never painted anything: {}{}",
+            run.stdout,
+            run.stderr
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    settle(daemon, handle);
+}
+
 /// Wait for the shell to stop producing output, through the daemon's own `wait --for idle`.
 fn settle(daemon: &Nysiad, handle: &str) {
     daemon.run(&[
@@ -283,6 +311,7 @@ fn a_session_survives_losing_every_client_and_its_scrollback_replays() {
     create.extend_from_slice(&profile);
     let created = daemon.run(&create).ok("session create");
     let handle = handle_from(&created);
+    await_prompt(&daemon, &handle);
 
     // Every verb below is its own process. By the time each returns, its connection to the
     // daemon is closed — which is the disconnect this test is about, happening over and over.
