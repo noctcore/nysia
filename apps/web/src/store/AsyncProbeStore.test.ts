@@ -18,6 +18,20 @@ import { describeStoreContract } from './storeContract';
  */
 describeStoreContract('AsyncProbeStore', () => new AsyncProbeStore(createSeedSnapshot(), 5));
 
+/*
+ * The same provider, reaching `ready` before it has sampled quota.
+ *
+ * A daemon that polls quota separately from the handshake is an ordinary design, and it is
+ * the shape `emptySnapshot()` already ships. The contract briefly asked whether `usage`
+ * still had entries — which looks structural and is not — and failed this provider on a
+ * field no session assertion touches. Running the whole suite against it is what keeps
+ * that from coming back.
+ */
+describeStoreContract(
+  'AsyncProbeStore with no quota sample yet',
+  () => new AsyncProbeStore({ ...createSeedSnapshot(), usage: [] }, 5),
+);
+
 describe('AsyncProbeStore', () => {
   it('has nothing to show until its first frame arrives', () => {
     const store = new AsyncProbeStore(createSeedSnapshot(), 5);
