@@ -9,5 +9,10 @@
 //! (`pnpm ts-drift`) fails the build when it stops matching what this crate produces.
 
 pub mod identity;
+pub mod version;
 
 pub use identity::{IdentityError, Incarnation, PaneKey, SessionHandle, SessionKind};
+pub use version::{
+    EndpointError, MIN_ATTACHABLE_PROTOCOL_VERSION, PROTOCOL_VERSION, ProtocolRange,
+    ProtocolVersion, endpoint_stem, unix_socket_file_name, windows_pipe_name,
+};
