@@ -1,5 +1,6 @@
 import type { PaneKey } from '../../generated/PaneKey';
 import type { SessionHandle } from '../../generated/SessionHandle';
+import { StoreCommandError, type StoreCommandName, type StoreError } from '../errors';
 import type {
   LauncherId,
   NavSection,
@@ -15,10 +16,11 @@ import { createSeedSnapshot } from './seed';
  * The wave-1 store: the design mock's seed data, plus the state transitions the chrome
  * needs to be operable rather than a screenshot.
  *
- * It deliberately implements the same contract W5's daemon-backed provider will — commands
- * are async, the snapshot is immutable and referentially stable, and no component knows
- * which provider it is talking to. `storeContract.ts` is the executable statement of that
- * contract and both providers run it.
+ * It implements the same contract W5's daemon-backed provider will — commands are async
+ * and can fail, the snapshot is immutable and stable between notifications, and no
+ * component knows which provider it is talking to. `storeContract.ts` is the executable
+ * statement of that contract; this store and `AsyncProbeStore` both run it, and the probe
+ * is the one that proves the contract does not quietly assume this store's shape.
  *
  * Every method is an arrow property: `useSyncExternalStore` receives `subscribe` and
  * `getSnapshot` detached from the object.
@@ -27,6 +29,7 @@ export class MockStore implements Store {
   #snapshot: StoreSnapshot;
   readonly #listeners = new Set<() => void>();
   #nextTab: number;
+  #nextError = 1;
 
   constructor(initial: StoreSnapshot = createSeedSnapshot()) {
     this.#snapshot = initial;
@@ -49,51 +52,62 @@ export class MockStore implements Store {
   };
 
   selectProject = async (id: ProjectId): Promise<void> => {
+    if (!this.#snapshot.projects.some((project) => project.id === id)) {
+      throw this.#fail('selectProject', `No project ${id} is open.`);
+    }
     this.#update((current) =>
-      current.activeProjectId === id || !current.projects.some((p) => p.id === id)
-        ? current
-        : { ...current, activeProjectId: id },
+      current.activeProjectId === id ? current : { ...current, activeProjectId: id },
     );
   };
 
   selectTab = async (paneKey: PaneKey): Promise<void> => {
+    if (!this.#snapshot.tabs.some((tab) => tab.paneKey === paneKey)) {
+      throw this.#fail('selectTab', `Session ${paneKey} is no longer open.`);
+    }
     this.#update((current) =>
-      current.activeTab === paneKey || !current.tabs.some((t) => t.paneKey === paneKey)
-        ? current
-        : { ...current, activeTab: paneKey },
+      current.activeTab === paneKey ? current : { ...current, activeTab: paneKey },
     );
   };
 
   closeTab = async (paneKey: PaneKey): Promise<void> => {
+    if (!this.#snapshot.tabs.some((tab) => tab.paneKey === paneKey)) {
+      throw this.#fail('closeTab', `Session ${paneKey} is no longer open.`);
+    }
     this.#update((current) => {
-      const index = current.tabs.findIndex((t) => t.paneKey === paneKey);
-      if (index === -1) {
-        return current;
-      }
-      const tabs = current.tabs.filter((t) => t.paneKey !== paneKey);
+      const index = current.tabs.findIndex((tab) => tab.paneKey === paneKey);
+      const tabs = current.tabs.filter((tab) => tab.paneKey !== paneKey);
       if (current.activeTab !== paneKey) {
         return { ...current, tabs };
       }
       // Closing the focused tab hands focus to its right-hand neighbour, or to the new
-      // last tab when it was the rightmost — the behaviour every tabbed editor has.
+      // last tab when it was the rightmost — the behaviour every tabbed editor has. This
+      // is *this* store's policy: the contract only requires that whatever ends up active
+      // exists, because a daemon is entitled to choose differently.
       const next = tabs[Math.min(index, tabs.length - 1)];
       return { ...current, tabs, activeTab: next?.paneKey ?? null };
     });
   };
 
   openTab = async (launcher: LauncherId): Promise<void> => {
+    const item = this.#snapshot.launchers
+      .flatMap((group) => group.items)
+      .find((candidate) => candidate.id === launcher);
+    if (!item) {
+      throw this.#fail('openTab', `No launcher ${launcher} is available.`);
+    }
     this.#update((current) => {
-      const item = current.launchers
-        .flatMap((group) => group.items)
-        .find((candidate) => candidate.id === launcher);
-      if (!item) {
-        return current;
-      }
       const paneKey: PaneKey = `tab_${this.#nextTab}:leaf_1`;
       const handle: SessionHandle = `sess_${mockUuid(this.#nextTab)}`;
       this.#nextTab += 1;
       const tab: Tab = { paneKey, handle, kind: item.kind, title: item.label };
       return { ...current, tabs: [...current.tabs, tab], activeTab: paneKey };
+    });
+  };
+
+  dismissError = async (id: string): Promise<void> => {
+    this.#update((current) => {
+      const errors = current.errors.filter((error) => error.id !== id);
+      return errors.length === current.errors.length ? current : { ...current, errors };
     });
   };
 
@@ -109,6 +123,22 @@ export class MockStore implements Store {
     toggleMaximize: async () => {},
     close: async () => {},
   };
+
+  /**
+   * Record the failure, then hand back the rejection to throw.
+   *
+   * Recording first is the contract: by the time a caller sees the rejection, the notice
+   * is already in the snapshot. A provider that rejected first and recorded on the next
+   * frame would leave a window in which the UI knows something failed and has nothing to
+   * show for it.
+   */
+  #fail(command: StoreCommandName, message: string): StoreCommandError {
+    const id = `err_${this.#nextError}`;
+    this.#nextError += 1;
+    const error: StoreError = { id, command, message, at: Date.now() };
+    this.#update((current) => ({ ...current, errors: [...current.errors, error] }));
+    return new StoreCommandError(command, message, id);
+  }
 
   #update(next: (current: StoreSnapshot) => StoreSnapshot): void {
     const updated = next(this.#snapshot);

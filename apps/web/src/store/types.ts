@@ -1,6 +1,7 @@
 import type { PaneKey } from '../generated/PaneKey';
 import type { SessionHandle } from '../generated/SessionHandle';
 import type { SessionKind } from '../generated/SessionKind';
+import type { StoreError } from './errors';
 
 /**
  * The one boundary between the chrome and whatever is behind it.
@@ -21,6 +22,10 @@ import type { SessionKind } from '../generated/SessionKind';
  *  - **`subscribe` and `getSnapshot` are bound.** `useSyncExternalStore` is handed them
  *    detached, so an implementation that reads `this` through them breaks on the first
  *    render. The contract suite checks it.
+ *  - **There is always a snapshot.** A socket-backed provider has nothing to show until
+ *    its first frame arrives, so the empty snapshot is a real state with a name
+ *    (`status: 'connecting'`) rather than a null the chrome has to guard.
+ *  - **A command that cannot be satisfied rejects *and* records.** See `./errors`.
  */
 
 /**
@@ -102,14 +107,31 @@ export interface LauncherGroup {
   readonly items: readonly Launcher[];
 }
 
-/** The right-hand side of the status bar. */
-export interface DaemonStatus {
-  readonly connected: boolean;
+/**
+ * The four figures on the right of the status bar.
+ *
+ * Whether the daemon is reachable is deliberately **not** here: that is `StoreSnapshot.status`,
+ * which distinguishes a first connection from a reconnect from a give-up. Carrying a second
+ * `connected` boolean beside it would be two answers to one question, and the two would
+ * disagree the first time a reconnect half-succeeded.
+ */
+export interface DaemonMetrics {
   /** Resident set of the daemon, in bytes. Formatted at the edge, like every other metric. */
   readonly memoryBytes: number;
   readonly terminalCount: number;
   readonly worktreeCount: number;
 }
+
+/**
+ * Where the connection to the daemon stands.
+ *
+ * `connecting` is the first attempt and the state every provider starts in; `reconnecting`
+ * is a re-attempt with a snapshot already on screen, which the chrome renders as stale
+ * rather than blank; `failed` is a provider that has given up and needs the user to do
+ * something. Under D-1/D-2 the daemon outlives the window, so these three are the only
+ * thing the window can honestly say about it.
+ */
+export type StoreStatus = 'connecting' | 'ready' | 'reconnecting' | 'failed';
 
 /**
  * One quota window, for the status bar summary only.
@@ -123,14 +145,46 @@ export interface UsageWindow {
 }
 
 export interface StoreSnapshot {
+  readonly status: StoreStatus;
+  /**
+   * Failed commands, oldest first, until the user dismisses them.
+   *
+   * A list rather than one `lastError` slot: two shells can fail to launch before anyone
+   * looks at the screen, and the second overwriting the first is how a user learns to
+   * distrust the notice.
+   */
+  readonly errors: readonly StoreError[];
   readonly nav: NavSection;
   readonly projects: readonly Project[];
   readonly activeProjectId: ProjectId | null;
   readonly tabs: readonly Tab[];
   readonly activeTab: PaneKey | null;
   readonly launchers: readonly LauncherGroup[];
-  readonly daemon: DaemonStatus;
+  readonly daemon: DaemonMetrics;
   readonly usage: readonly UsageWindow[];
+}
+
+/**
+ * The snapshot every provider starts from, before it has heard anything.
+ *
+ * Shipped beside the interface rather than left to each provider so that "the chrome
+ * renders on an empty snapshot" stays true by construction: the mock, the async probe and
+ * W5's daemon-backed provider all begin here, and a field added to `StoreSnapshot` cannot
+ * be forgotten in three places.
+ */
+export function emptySnapshot(status: StoreStatus = 'connecting'): StoreSnapshot {
+  return {
+    status,
+    errors: [],
+    nav: 'session',
+    projects: [],
+    activeProjectId: null,
+    tabs: [],
+    activeTab: null,
+    launchers: [],
+    daemon: { memoryBytes: 0, terminalCount: 0, worktreeCount: 0 },
+    usage: [],
+  };
 }
 
 /**
@@ -146,8 +200,17 @@ export interface WindowControls {
   close(): Promise<void>;
 }
 
+/**
+ * The provider behind the chrome.
+ *
+ * Every command resolves once the store has converged on the result, and rejects with a
+ * `StoreCommandError` when it could not — having already appended the matching entry to
+ * `snapshot.errors`. Components never call one bare: `runCommand` in `./runCommand` is the
+ * only call site shape, because a bare call is an unhandled rejection waiting for the
+ * first missing shell binary.
+ */
 export interface Store {
-  /** Referentially stable until a command mutates it. */
+  /** Never null, and referentially stable between notifications. */
   getSnapshot(): StoreSnapshot;
   /** Returns the unsubscribe function, as `useSyncExternalStore` expects. */
   subscribe(listener: () => void): () => void;
@@ -157,6 +220,8 @@ export interface Store {
   selectTab(paneKey: PaneKey): Promise<void>;
   closeTab(paneKey: PaneKey): Promise<void>;
   openTab(launcher: LauncherId): Promise<void>;
+  /** Drops one recorded failure. Unknown ids are not an error — dismissal is idempotent. */
+  dismissError(id: string): Promise<void>;
 
   readonly window: WindowControls;
 }

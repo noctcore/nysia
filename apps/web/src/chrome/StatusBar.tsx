@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 
 import { formatMemory, formatUsageWindow } from '../format';
+import type { StoreStatus } from '../store/types';
 import { useSnapshot } from '../store/useStore';
 import { GLYPH } from '../ui/glyphs';
 import { useDismiss } from '../ui/useDismiss';
@@ -19,7 +20,7 @@ import { useDismiss } from '../ui/useDismiss';
  * here so the status bar does not have to change when it lands.
  */
 export function StatusBar() {
-  const { usage, daemon } = useSnapshot();
+  const { usage, daemon, status } = useSnapshot();
   const [open, setOpen] = useState(false);
   const container = useRef<HTMLDivElement>(null);
   const close = useCallback(() => setOpen(false), []);
@@ -61,14 +62,11 @@ export function StatusBar() {
       </div>
 
       <div className="ml-auto flex gap-4">
-        <span title={daemon.connected ? 'Daemon running' : 'Daemon unreachable'}>
-          <span
-            aria-hidden="true"
-            className={daemon.connected ? 'text-status-running' : 'text-status-failed'}
-          >
+        <span title={DAEMON_STATE[status].title}>
+          <span aria-hidden="true" className={DAEMON_STATE[status].tone}>
             {GLYPH.dot}
           </span>{' '}
-          {daemon.connected ? 'On' : 'Off'}
+          {DAEMON_STATE[status].label}
         </span>
         <span title="Daemon memory">{formatMemory(daemon.memoryBytes)}</span>
         <span title="Open terminals">
@@ -104,6 +102,26 @@ function UsagePlaceholder() {
     </div>
   );
 }
+
+/**
+ * The four things the window can honestly say about the daemon.
+ *
+ * `Reconnecting` is the one that matters under D-1/D-2: the daemon outlives this window,
+ * so a dropped socket is not a dead session, and a dot that went straight to `Off` would
+ * tell the user their work had stopped when it had not.
+ */
+const DAEMON_STATE: Readonly<
+  Record<StoreStatus, { readonly label: string; readonly title: string; readonly tone: string }>
+> = {
+  connecting: { label: 'Connecting', title: 'Connecting to the daemon', tone: 'text-status-queued' },
+  ready: { label: 'On', title: 'Daemon running', tone: 'text-status-running' },
+  reconnecting: {
+    label: 'Reconnecting',
+    title: 'Lost the daemon connection, retrying — sessions keep running',
+    tone: 'text-status-needs-input',
+  },
+  failed: { label: 'Off', title: 'Daemon unreachable', tone: 'text-status-failed' },
+};
 
 function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, value));
