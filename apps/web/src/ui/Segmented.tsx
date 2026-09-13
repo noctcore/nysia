@@ -1,16 +1,23 @@
-import type { KeyboardEvent } from 'react';
+import { useEffect, useRef, type KeyboardEvent } from 'react';
 
-import { isArrowKey, nextOption } from './roving';
+import { isArrowKey, nextOption, tabbableIndex } from './roving';
 
 /**
  * The segmented control from design-spec.md §5: a `bg2` track with a `line` border, 3px of
  * padding, and the selected segment filled with `line2`.
  *
- * Implemented as a radio group, which is what it is — one tab stop for the whole control,
- * arrow keys moving the selection, and a screen reader reading "2 of 3" instead of three
- * unrelated buttons. Roving tabindex without the arrow handler would be worse than a plain
- * row of buttons: the keyboard could reach the selected option and nothing else, so the
- * control could not be changed at all without a mouse.
+ * A radio group, which is what it is — one tab stop for the whole control, arrow keys
+ * moving the selection, and a screen reader reading "2 of 3" instead of three unrelated
+ * buttons. Two details of the APG pattern are easy to leave out and both break it:
+ *
+ *  - **Arrow moves focus as well as checking.** Changing `value` alone leaves the focus
+ *    ring sitting on a segment that is now unselected, and a screen reader announces the
+ *    state of the wrong one. Focus has to follow the check, which means after the parent
+ *    has re-rendered — hence the pending ref rather than a `focus()` in the handler.
+ *  - **Exactly one segment is tabbable, always.** Deriving that from `option === value`
+ *    alone means a stored value outside the option list — a preference written by a build
+ *    that spelled something differently — leaves every radio at `tabIndex={-1}` and the
+ *    whole control unreachable from the keyboard. The fallback is the first segment.
  */
 export function Segmented<T extends string>({
   options,
@@ -24,6 +31,18 @@ export function Segmented<T extends string>({
   readonly label: string;
   readonly onChange: (next: T) => void;
 }) {
+  const buttons = useRef(new Map<T, HTMLButtonElement>());
+  const pendingFocus = useRef<T | null>(null);
+
+  useEffect(() => {
+    const target = pendingFocus.current;
+    if (target === null) {
+      return;
+    }
+    pendingFocus.current = null;
+    buttons.current.get(target)?.focus();
+  });
+
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (!isArrowKey(event.key)) {
       return;
@@ -33,9 +52,12 @@ export function Segmented<T extends string>({
     event.preventDefault();
     const next = nextOption(options, value, event.key);
     if (next !== undefined) {
+      pendingFocus.current = next;
       onChange(next);
     }
   }
+
+  const tabbable = tabbableIndex(options, value);
 
   return (
     <div
@@ -44,15 +66,22 @@ export function Segmented<T extends string>({
       onKeyDown={onKeyDown}
       className="border-line bg-bg2 flex flex-none rounded-control border p-[3px] text-xs"
     >
-      {options.map((option) => {
+      {options.map((option, index) => {
         const selected = option === value;
         return (
           <button
             key={option}
+            ref={(node) => {
+              if (node) {
+                buttons.current.set(option, node);
+              } else {
+                buttons.current.delete(option);
+              }
+            }}
             type="button"
             role="radio"
             aria-checked={selected}
-            tabIndex={selected ? 0 : -1}
+            tabIndex={index === tabbable ? 0 : -1}
             onClick={() => onChange(option)}
             className={`cursor-pointer rounded-chip border-0 px-3 py-1 focus-visible:shadow-focus focus-visible:outline-none ${
               selected ? 'bg-line2 text-fg' : 'text-fg2 bg-transparent'
