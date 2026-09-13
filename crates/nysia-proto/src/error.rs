@@ -64,6 +64,28 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// Every code this build knows, excluding [`ErrorCode::Other`].
+    ///
+    /// The anchor for `the_exported_typescript_union_lists_every_known_code`. The exported
+    /// TypeScript union is a hand-written string in a `#[ts(type = …)]` attribute — ts-rs
+    /// cannot derive it, because `Other(String)` would otherwise widen the whole union to
+    /// `string` and throw away the autocomplete that makes the closed codes useful. Nothing
+    /// in the compiler ties that attribute to [`as_str`](Self::as_str), so this list plus
+    /// that test is what stops a new variant shipping with a TypeScript union that has
+    /// never heard of it.
+    #[must_use]
+    pub fn known() -> [Self; 7] {
+        [
+            Self::UnknownSession,
+            Self::InvalidRequest,
+            Self::Unsupported,
+            Self::PathRefused,
+            Self::SpawnFailed,
+            Self::SessionBusy,
+            Self::Internal,
+        ]
+    }
+
     /// The wire spelling.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -386,17 +408,50 @@ mod tests {
     }
 
     #[test]
+    fn the_exported_typescript_union_lists_every_known_code() {
+        // `ErrorCode`'s TypeScript type is a hand-written string in a `#[ts(type = …)]`
+        // attribute, and the compiler ties it to nothing. Without this test, adding a
+        // variant and forgetting the attribute passes every gate and ships a union that has
+        // never heard of the new code — the same D-13 hole the generated frame-kind bytes
+        // closed, in a smaller shape. `inline` hands back exactly what ts-rs will write.
+        let exported = <ErrorCode as ts_rs::TS>::inline(&ts_rs::Config::default());
+
+        for code in ErrorCode::known() {
+            assert!(
+                exported.contains(&format!("\"{}\"", code.as_str())),
+                "{code} is missing from the exported union:\n  {exported}"
+            );
+        }
+
+        // Every known code being present is only half of it: a renamed or deleted variant
+        // leaves a literal behind that no `as_str` produces, and a client would keep
+        // autocompleting a code the daemon can no longer send. The union's only quoted
+        // strings are the codes — the open tail carries none — so counting them is exact.
+        let quotes = exported.matches('"').count();
+        assert_eq!(quotes % 2, 0, "unbalanced quotes in:\n  {exported}");
+        assert_eq!(
+            quotes / 2,
+            ErrorCode::known().len(),
+            "the exported union has {} literal(s) but this build knows {} code(s):\n  {exported}",
+            quotes / 2,
+            ErrorCode::known().len()
+        );
+
+        // And the tail that keeps the union open. Dropping it would turn `Other` into a
+        // type error on the TypeScript side, so a newer daemon's code could not be handled
+        // at all — the exact strictness this type exists to avoid.
+        assert!(
+            exported.contains("(string & {})"),
+            "the exported union is closed, so `ErrorCode::Other` has no TypeScript form:\n  {exported}"
+        );
+    }
+
+    #[test]
     fn every_known_code_round_trips_through_its_wire_spelling() {
-        for code in [
-            ErrorCode::UnknownSession,
-            ErrorCode::InvalidRequest,
-            ErrorCode::Unsupported,
-            ErrorCode::PathRefused,
-            ErrorCode::SpawnFailed,
-            ErrorCode::SessionBusy,
-            ErrorCode::Internal,
-            ErrorCode::Other("worktree_locked".to_owned()),
-        ] {
+        let codes = ErrorCode::known()
+            .into_iter()
+            .chain([ErrorCode::Other("worktree_locked".to_owned())]);
+        for code in codes {
             assert_eq!(ErrorCode::from_wire(code.as_str()), code);
             assert_eq!(code.to_string().parse::<ErrorCode>().unwrap(), code);
             let text = serde_json::to_string(&code).unwrap();
