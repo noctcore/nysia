@@ -1,0 +1,30 @@
+[package]
+name = "nysia-core"
+description = "The Nysia runtime: PTYs, terminal state, store, git, worktrees and the socket server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+nysia-proto = { workspace = true }
+
+alacritty_terminal = { workspace = true }
+anyhow = { workspace = true }
+portable-pty = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+# ConPTY has no signals, so a tree-kill needs a Job Object with
+# JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (traps register #7).
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
