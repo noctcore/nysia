@@ -11,8 +11,8 @@ members = [
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
-license = "MIT"
-repository = "https://github.com/Shironex/nysia"
+repository = "https://github.com/noctcore/nysia"
+publish = false
 
 # Every dependency v0.1 will need is declared here by the scaffold wave, so that both
 # lockfiles are fully populated and no later wave has to touch a shared file. Adding a
@@ -45,13 +45,20 @@ uuid = { version = "1.26", features = ["v4", "serde"] }
 tauri = { version = "2.11", features = [] }
 tauri-build = { version = "2.6", features = [] }
 
-# Job Objects with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` are the only way to tree-kill a
-# ConPTY child on Windows, which has no signals (traps register #7).
+# The Win32 surface v0.1 needs, declared up front so wave 2 never edits this table:
+# Job Objects with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` for tree-kill, because ConPTY has
+# no signals (traps register #7); Pipes for `GetNamedPipeClientProcessId`, which is how the
+# daemon learns a caller's pid from the kernel rather than from an echoed token; Security
+# for the owner-only ACL on the token file beside the socket; ToolHelp for walking a
+# caller's pid up to a session the daemon owns.
 [workspace.dependencies.windows]
 version = "0.62"
 features = [
   "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_JobObjects",
+  "Win32_System_Pipes",
   "Win32_System_Threading",
 ]
 
