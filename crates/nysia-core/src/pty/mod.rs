@@ -23,3 +23,7 @@
 //! `NotFound` against the `.cmd`/`.ps1` shims npm installs.
 //!
 //! Owned by wave 1 (W2).
+
+mod resolve;
+
+pub use resolve::{ResolveError, ResolvedProgram, resolve};
