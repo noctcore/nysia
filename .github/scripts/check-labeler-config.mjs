@@ -28,8 +28,9 @@
 // than by erroring, which is the kind of defect nobody notices for months.
 //
 // Not a YAML parser: it splits on label keys, which start at column zero in this file,
-// and asks a single structural question of each block. That is all the rule needs, and a
-// parser this file does not have cannot misread it.
+// and asks the three structural questions above of each block. That is all these rules
+// need, and each is wrong only in the direction of a false positive a human fixes in one
+// line — never a silent pass.
 //
 // Run with `--self-test` for the fixtures, with no arguments to check the real file.
 
