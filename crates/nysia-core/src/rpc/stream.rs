@@ -224,6 +224,14 @@ struct Inner {
     hubs: HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>,
     /// Every live sink, by stream id, so an ack can find the one it belongs to.
     sinks: HashMap<u32, Arc<StreamSink>>,
+    /// Which streams belong to which client, so a disconnect closes exactly its own.
+    ///
+    /// Kept rather than inferred from whether a sink's channel has closed: that inference is
+    /// true only *eventually*, because the receiver is dropped when the connection's write
+    /// task is actually cancelled rather than when the cancellation is requested. A session
+    /// stalled on a sink nobody will ever ack is the failure D-1 promises not to have, so it
+    /// is not left to a race.
+    owned: HashMap<String, Vec<u32>>,
     /// The next id to assign. Never reused within a daemon's life.
     next_id: StreamId,
 }
@@ -236,6 +244,7 @@ impl StreamRegistry {
             inner: Mutex::new(Inner {
                 hubs: HashMap::new(),
                 sinks: HashMap::new(),
+                owned: HashMap::new(),
                 next_id: StreamId::FIRST,
             }),
         }
@@ -256,17 +265,14 @@ impl StreamRegistry {
     pub fn unbind(&self, client: &ClientId) {
         let mut inner = self.lock();
         inner.hubs.remove(client.as_str());
-        // The sinks go too. A sink whose connection is gone can never be acked, so leaving
-        // it attached would stall the session it feeds for as long as the daemon lives —
-        // which is precisely the failure D-1 promises not to have.
-        inner.sinks.retain(|_, sink| {
-            if sink.is_closed() {
+        // This client's sinks go with it, named rather than guessed at. A sink whose
+        // connection is gone can never be acked, so one left attached spends its allowance
+        // and stalls the session it feeds for as long as the daemon lives.
+        for stream_id in inner.owned.remove(client.as_str()).unwrap_or_default() {
+            if let Some(sink) = inner.sinks.remove(&stream_id) {
                 sink.close();
-                false
-            } else {
-                true
             }
-        });
+        }
     }
 
     /// Open a stream for `client`, or `None` when it has no stream connection bound.
@@ -282,12 +288,21 @@ impl StreamRegistry {
         inner.next_id = stream_id.next()?;
         let sink = Arc::new(StreamSink::new(stream_id, frames, CreditWindow::DEFAULT));
         inner.sinks.insert(stream_id.get(), Arc::clone(&sink));
+        inner
+            .owned
+            .entry(client.as_str().to_owned())
+            .or_default()
+            .push(stream_id.get());
         Some(sink)
     }
 
     /// Close and forget a stream, reporting whether it was there.
     pub fn detach(&self, stream_id: StreamId) -> bool {
-        match self.lock().sinks.remove(&stream_id.get()) {
+        let mut inner = self.lock();
+        for streams in inner.owned.values_mut() {
+            streams.retain(|owned| *owned != stream_id.get());
+        }
+        match inner.sinks.remove(&stream_id.get()) {
             Some(sink) => {
                 sink.close();
                 true
@@ -419,6 +434,33 @@ mod tests {
         drop(rx);
         assert_eq!(sink.send(&output(StreamId::FIRST, 8)), SendOutcome::Closed);
         assert!(sink.is_closed());
+    }
+
+    #[tokio::test]
+    async fn a_client_that_disconnects_takes_its_own_streams_and_nobody_else_s() {
+        // The sink of a client that has gone can never be acked, so leaving it attached would
+        // spend its allowance and stall the session it feeds for the daemon's whole life.
+        let registry = StreamRegistry::new();
+        let mine = client("mine");
+        let theirs = client("theirs");
+        let _my_outbox = registry.bind(&mine);
+        let _their_outbox = registry.bind(&theirs);
+
+        let my_sink = registry.attach(&mine).expect("attaches");
+        let their_sink = registry.attach(&theirs).expect("attaches");
+        assert_eq!(registry.len(), 2);
+
+        registry.unbind(&mine);
+        assert!(my_sink.is_closed(), "my stream should have gone with me");
+        assert!(
+            !their_sink.is_closed(),
+            "somebody else's stream must not go with me"
+        );
+        assert_eq!(registry.len(), 1);
+        assert!(
+            registry.attach(&mine).is_none(),
+            "and my hub should be gone too"
+        );
     }
 
     #[tokio::test]
