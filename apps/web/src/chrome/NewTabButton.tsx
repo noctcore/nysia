@@ -28,6 +28,7 @@ export function NewTabButton() {
     <div ref={container} className="relative">
       <button
         type="button"
+        data-new-session
         aria-label="New session"
         aria-haspopup="menu"
         aria-expanded={open}

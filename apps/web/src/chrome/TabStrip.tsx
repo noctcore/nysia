@@ -1,7 +1,10 @@
+import { useRef, type KeyboardEvent, type RefObject } from 'react';
+
 import { runCommand } from '../store/runCommand';
-import { useSnapshot, useStore } from '../store/useStore';
 import type { Tab } from '../store/types';
+import { useSnapshot, useStore } from '../store/useStore';
 import { GLYPH } from '../ui/glyphs';
+import { isArrowKey, nextOption, tabbableIndex } from '../ui/roving';
 import { NewTabButton } from './NewTabButton';
 import { SessionGlyph } from './SessionGlyph';
 
@@ -13,51 +16,138 @@ import { SessionGlyph } from './SessionGlyph';
  * and 34px tall, so the active one reaches the body: it fills `bg1`, takes a 1px `line`
  * border rounded `8px 8px 0 0`, and then paints its *bottom* border `bg1` as well and
  * drops a pixel, which is what makes it merge into the pane instead of sitting on a seam.
+ *
+ * The roles are the APG tabs pattern, properly this time. The strip used to be a
+ * `role="tablist"` that also contained a `+` button and, inside each tab, a separately
+ * focusable close button — so the list was full of things that were not tabs, and there
+ * was no arrow-key movement at all, which is the behaviour the role promises a screen
+ * reader user. Now the tablist holds nothing but tabs, `+` is its sibling, and:
+ *
+ *  - the tab itself is the focusable element, with one tab stop for the whole strip;
+ *  - Left and Right move focus and select, which is what every terminal and editor does
+ *    and what APG calls automatic activation;
+ *  - the close button is `tabIndex={-1}` — still clickable, still reachable in a screen
+ *    reader's browse mode — and Delete or Backspace on the focused tab closes it, which is
+ *    APG's pattern for a deletable tab.
  */
 export function TabStrip() {
   const { tabs, activeTab } = useSnapshot();
+  const store = useStore();
+  const paneKeys = tabs.map((tab) => tab.paneKey);
+  const tabbable = tabbableIndex(paneKeys, activeTab ?? '');
+
+  // A ref map rather than a query: a `PaneKey` is `<tabId>:<leafId>`, and a colon is a
+  // combinator in a CSS selector. Holding the nodes avoids having to escape data at all.
+  const tabNodes = useRef(new Map<string, HTMLDivElement>());
+
+  function focusTab(paneKey: string): void {
+    tabNodes.current.get(paneKey)?.focus();
+  }
+
+  /**
+   * Move DOM focus to whatever the store decided is active, once it has decided.
+   *
+   * Not to a neighbour computed here: which tab a provider activates after a close is its
+   * own decision — a daemon may well pick the most recently used — and guessing would let
+   * DOM focus and `activeTab` disagree. The surviving tabs are keyed by `PaneKey` and were
+   * never unmounted, so this is a plain `focus()` and needs no effect.
+   */
+  function focusAfterClose(): void {
+    const next = store.getSnapshot().activeTab;
+    if (next === null) {
+      document.querySelector<HTMLElement>('[data-new-session]')?.focus();
+      return;
+    }
+    focusTab(next);
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLDivElement>, tab: Tab) {
+    if (isArrowKey(event.key)) {
+      event.preventDefault();
+      const next = nextOption(paneKeys, tab.paneKey, event.key);
+      if (next !== undefined) {
+        focusTab(next);
+        runCommand(store.selectTab(next));
+      }
+      return;
+    }
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      event.preventDefault();
+      runCommand(store.closeTab(tab.paneKey), focusAfterClose);
+    }
+  }
 
   return (
-    <div
-      data-tauri-drag-region
-      className="relative flex h-titlebar flex-1 items-end gap-1"
-      role="tablist"
-      aria-label="Sessions"
-    >
-      {tabs.map((tab) => (
-        <TabButton key={tab.paneKey} tab={tab} active={tab.paneKey === activeTab} />
-      ))}
+    <div data-tauri-drag-region className="relative flex h-titlebar flex-1 items-end gap-1">
+      <div role="tablist" aria-label="Sessions" className="flex items-end gap-1">
+        {tabs.map((tab, index) => (
+          <TabButton
+            key={tab.paneKey}
+            tab={tab}
+            active={tab.paneKey === activeTab}
+            tabbable={index === tabbable}
+            nodes={tabNodes}
+            onKeyDown={onKeyDown}
+            onClose={focusAfterClose}
+          />
+        ))}
+      </div>
       <NewTabButton />
     </div>
   );
 }
 
-function TabButton({ tab, active }: { readonly tab: Tab; readonly active: boolean }) {
+function TabButton({
+  tab,
+  active,
+  tabbable,
+  nodes,
+  onKeyDown,
+  onClose,
+}: {
+  readonly tab: Tab;
+  readonly active: boolean;
+  readonly tabbable: boolean;
+  readonly nodes: RefObject<Map<string, HTMLDivElement>>;
+  readonly onKeyDown: (event: KeyboardEvent<HTMLDivElement>, tab: Tab) => void;
+  readonly onClose: () => void;
+}) {
   const store = useStore();
 
   return (
+    // The tab is the focusable element, so the whole 34px chip takes the focus ring rather
+    // than a word inside it.
     <div
-      className={`flex h-tab items-center gap-2 whitespace-nowrap px-3.5 ${
+      role="tab"
+      ref={(node) => {
+        if (node) {
+          nodes.current.set(tab.paneKey, node);
+        } else {
+          nodes.current.delete(tab.paneKey);
+        }
+      }}
+      aria-selected={active}
+      tabIndex={tabbable ? 0 : -1}
+      onClick={() => runCommand(store.selectTab(tab.paneKey))}
+      onKeyDown={(event) => onKeyDown(event, tab)}
+      className={`flex h-tab cursor-pointer items-center gap-2 whitespace-nowrap px-3.5 focus-visible:shadow-focus focus-visible:outline-none ${
         active
           ? 'border-line bg-bg1 text-fg -mb-px rounded-t-control border border-b-bg1'
           : 'text-fg2'
       }`}
     >
       <SessionGlyph kind={tab.kind} />
+      <span className="max-w-[240px] truncate">{tab.title}</span>
       <button
         type="button"
-        role="tab"
-        aria-selected={active}
-        onClick={() => runCommand(store.selectTab(tab.paneKey))}
-        className="max-w-[240px] cursor-pointer truncate border-0 bg-transparent p-0 focus-visible:shadow-focus focus-visible:outline-none"
-      >
-        {tab.title}
-      </button>
-      <button
-        type="button"
+        tabIndex={-1}
         aria-label={`Close ${tab.title}`}
-        onClick={() => runCommand(store.closeTab(tab.paneKey))}
-        className="text-fg3 hover:text-fg ml-1.5 cursor-pointer border-0 bg-transparent p-0 focus-visible:shadow-focus focus-visible:outline-none"
+        onClick={(event) => {
+          // Otherwise the click bubbles to the tab and selects what it is about to close.
+          event.stopPropagation();
+          runCommand(store.closeTab(tab.paneKey), onClose);
+        }}
+        className="text-fg3 hover:text-fg ml-1.5 cursor-pointer border-0 bg-transparent p-0"
       >
         {GLYPH.close}
       </button>

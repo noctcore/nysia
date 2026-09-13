@@ -71,6 +71,25 @@ describe('the window', () => {
     expect(app).toContain('border-b-bg1');
   });
 
+  it('puts nothing but tabs inside the tablist', () => {
+    // The role promises a screen reader that every child is a tab. The `+` button and the
+    // close buttons used to live in here, which made that a lie.
+    const tablist = between(app, 'role="tablist"', '</div></div>');
+    expect(tablist).not.toContain('New session');
+    expect(tablist.match(/role="tab"/g)).toHaveLength(4);
+  });
+
+  it('gives the strip one tab stop and reaches the rest with arrows', () => {
+    // Exactly one roving tab stop, and the close buttons out of the tab order — they are
+    // reachable by mouse and by Delete on the focused tab (APG's deletable-tab pattern).
+    const tabs = [...app.matchAll(/<div role="tab"[^>]*>/g)].map((match) => match[0]);
+    expect(tabs).toHaveLength(4);
+    expect(tabs.filter((tag) => tag.includes('tabindex="0"'))).toHaveLength(1);
+    for (const close of [...app.matchAll(/<button[^>]*aria-label="Close [^"]*"[^>]*>/g)]) {
+      expect(close[0]).toContain('tabindex="-1"');
+    }
+  });
+
   it('pushes Settings and Help below the three rail destinations', () => {
     for (const label of ['Session', 'Tasks', 'History', 'Settings', 'Help']) {
       expect(app, label).toContain(`aria-label="${label}"`);
@@ -130,3 +149,10 @@ describe('settings', () => {
     expect(general).toContain('role="radiogroup"');
   });
 });
+
+/** The slice between a marker and the first following terminator. */
+function between(source: string, from: string, to: string): string {
+  const start = source.indexOf(from);
+  const end = source.indexOf(to, start);
+  return source.slice(start, end === -1 ? undefined : end);
+}
