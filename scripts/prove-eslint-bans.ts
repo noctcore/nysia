@@ -62,6 +62,28 @@ const CASES: readonly Case[] = [
     expect: 'error',
   },
   {
+    // Every ban block used to be `{ts,tsx}` only, so a plain .js file under apps/web was
+    // linted by neither this rule nor lint-meta's line-anchored regex.
+    what: 'a .js file in the webview importing Tauri',
+    filePath: 'apps/web/src/legacy.js',
+    code: "import { Channel } from '@tauri-apps/api/core';\nexport const c = Channel;\n",
+    expect: 'error',
+  },
+  {
+    // The spelling that slipped past both layers: the specifier is not on the `import` line,
+    // so a line-anchored regex sees nothing and the ban block did not cover .jsx at all.
+    what: 'a .jsx file importing Tauri across several lines',
+    filePath: 'apps/web/src/Legacy.jsx',
+    code: "import {\n  Channel,\n} from '@tauri-apps/api/core';\nexport const c = Channel;\n",
+    expect: 'error',
+  },
+  {
+    what: 'a .js file in the webview importing a node builtin',
+    filePath: 'apps/web/src/legacy.js',
+    code: "import { readFileSync } from 'node:fs';\nexport const r = readFileSync;\n",
+    expect: 'error',
+  },
+  {
     what: 'apps/desktop importing Tauri (its whole job)',
     filePath: 'apps/desktop/src/bridge.ts',
     code: "import { Channel } from '@tauri-apps/api/core';\nexport const c = Channel;\n",

@@ -10,6 +10,30 @@
  * Each ships a fixture proving it trips — `pnpm prove:lint-meta`. A check that passes
  * without exercising anything is worse than no check (traps register #13).
  *
+ * # Where the boundary actually is
+ *
+ * These rules are greps over text, not a compiler, and the honest thing is to say what they
+ * still cannot see rather than let the next reader assume they are airtight. Each of these
+ * is a deliberate limit, not an oversight:
+ *
+ * - **A `tauri::` inside a Rust string literal is reported.** Comments are blanked before
+ *   the scan but strings are not. This is a false *positive*, so it fails towards noticing;
+ *   the fix if it ever bites is `#[allow]`-style suppression, not a weaker rule.
+ * - **A dependency renamed in `Cargo.lock` rather than in a manifest is invisible.** The
+ *   manifest scan resolves `ui = { package = "tauri" }`, but a path or git dependency whose
+ *   own manifest renames itself again would need the lock graph, which is out of scope for
+ *   a text rule. `cargo tree -i tauri` is the check that would catch it.
+ * - **`include!` and macro-generated paths are invisible**, because nothing here expands
+ *   macros.
+ * - **A file ESLint's `ignores` excludes is covered only by rule (a)'s line-based scan**,
+ *   which is weaker than ESLint's AST. The two layers are deliberately different: ESLint
+ *   owns the TypeScript and JavaScript boundary properly, lint-meta is the backstop for
+ *   Rust and for anything ESLint does not reach.
+ *
+ * The allowlist itself is duplicated in `eslint.config.js`, and the two must stay in
+ * agreement — if they disagree, a later wave fails a gate it cannot fix without editing
+ * coordinator-owned config.
+ *
  * Usage: `node tools/lint-meta/src/cli.ts [root]`
  */
 import { resolve } from 'node:path';

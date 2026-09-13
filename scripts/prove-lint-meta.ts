@@ -75,6 +75,13 @@ expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 4); //
 expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 7); // use {tauri, serde};
 expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 10); // the multi-line form
 
+// A multi-line grouped import in a .js file. ESLint's ban blocks were {ts,tsx} only and
+// the regex was line-anchored, so this spelling was covered by neither layer.
+expectFile(trips, 'no-tauri-outside-desktop', 'apps/web/src/legacy.js');
+
+// A renamed dependency pulls the same crate under another key; reading keys alone missed it.
+expectMessage(trips, 'no-tauri-in-rust-crates', 'package = "tauri"');
+
 // The transitive branch has its own fixture: nysia-core is clean and the violation arrives
 // through nysia-proto. Without it, that branch is code nobody has watched fail.
 const transitive = runRules(fixture('trips-transitive'));
