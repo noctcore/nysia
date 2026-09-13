@@ -15,22 +15,12 @@
 import { Buffer } from 'node:buffer';
 import process from 'node:process';
 
-/** Exactly one of these. The kind of change, which a diff cannot infer. */
-export const TYPE_LABELS = [
-  'bug',
-  'enhancement',
-  'chore',
-  'refactor',
-  'performance',
-  'security',
-  'dx',
-  'documentation',
-  'test',
-  'dependencies',
-];
+import { PRIORITY_LABELS, TYPE_LABELS } from './facets.mjs';
 
-/** Exactly one of these. How soon it matters, which is a call, not a fact. */
-export const PRIORITY_LABELS = ['P0-critical', 'P1-high', 'P2-medium', 'P3-low'];
+// The facet lists live in facets.mjs so that check-labeler-config.mjs can read them
+// without importing this file and running its main(). Re-exported for callers that
+// already import them from here.
+export { TYPE_LABELS, PRIORITY_LABELS } from './facets.mjs';
 
 /**
  * Check one label set.
@@ -109,6 +99,16 @@ function selfTest() {
 
   const twoPriorities = checkFacets(['test', 'P0-critical', 'P3-low']);
   check('two priority labels fail', !twoPriorities.ok);
+
+  // The exact set CLAUDE.md section 1 mandates for a feature that also bumps a lockfile.
+  // `dependencies` was in TYPE_LABELS until main moved it to Extra, and while it was,
+  // this combination failed with "carries 2 type labels" — the automation rejecting the
+  // labelling the documentation requires. Regression guard, not a hypothetical.
+  check('dependencies is not a type', !TYPE_LABELS.includes('dependencies'));
+  const extras = checkFacets(['enhancement', 'dependencies', 'P2-medium', 'area:web']);
+  check('a type beside the dependencies extra passes', extras.ok);
+  const everyExtra = checkFacets(['chore', 'dependencies', 'gate', 'design-system', 'P3-low']);
+  check('all three extras beside one type pass', everyExtra.ok);
 
   // Substring matches would make `P1-high` satisfy a search for `P1`, and `dx` appears
   // inside no other name only by luck. Names must match whole.
