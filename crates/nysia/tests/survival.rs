@@ -418,10 +418,43 @@ fn a_verb_starts_a_daemon_when_none_is_listening_and_still_returns() {
     // A second verb must find the daemon that is already there rather than starting another.
     Run::capture(&runtime_dir, &["session", "close", &handle]).ok("session close");
 
-    // Tidy up: the daemon this test started is not a child it can kill by handle, so it is
-    // asked to go instead — no sessions, no clients, and `--no-idle-retire` was never passed,
-    // so it retires on its own. The directory goes with the next run either way.
+    // The daemon this test started is not a child it can kill by handle, so it is found the
+    // way any other tool would find it: the lease beside the endpoint. Leaving it to retire on
+    // its own would keep the log file open for minutes, and a `remove_dir_all` against an open
+    // file fails silently on Windows — which is how a later run inherits a directory it
+    // thought was fresh.
+    stop_daemon(&runtime_dir);
     let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+/// Kill the daemon described by the lease in `runtime_dir`, if one is there.
+fn stop_daemon(runtime_dir: &Path) {
+    let Ok(text) = std::fs::read_to_string(runtime_dir.join("nysiad-v1.pid.json")) else {
+        return;
+    };
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let Some(pid) = record.get("pid").and_then(serde_json::Value::as_u64) else {
+        return;
+    };
+    let pid = pid.to_string();
+    let killed = if cfg!(windows) {
+        Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+    } else {
+        Command::new("kill")
+            .args(["-TERM", &pid])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+    };
+    let _ = killed;
+    // Give the kernel a moment to release the log file before the directory is removed.
+    std::thread::sleep(Duration::from_millis(300));
 }
 
 #[test]
