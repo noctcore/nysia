@@ -31,7 +31,7 @@ pub use frame::{
 };
 pub use handshake::{
     ClientId, ClientRole, DaemonIdentity, HandshakeError, HelloAccepted, HelloRejected,
-    HelloRequest, HelloResponse, LaunchNonce, OkFalse, OkTrue, PidRecord, RejectReason,
+    HelloRequest, HelloResponse, HelloTag, LaunchNonce, OkFalse, OkTrue, PidRecord, RejectReason,
 };
 pub use identity::{IdentityError, Incarnation, PaneKey, SessionHandle, SessionKind};
 pub use session::{
