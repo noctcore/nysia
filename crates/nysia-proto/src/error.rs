@@ -16,7 +16,9 @@
 //! command to run next, the error carries its argv so the caller runs it rather than
 //! reconstructing it from prose.
 
+use std::convert::Infallible;
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize, Serializer};
 use ts_rs::TS;
@@ -99,6 +101,17 @@ impl ErrorCode {
 impl fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ErrorCode {
+    /// Reading a code cannot fail — an unrecognised one is [`ErrorCode::Other`], not an
+    /// error. The `FromStr` impl exists so a code parses like every other string-shaped
+    /// value on this wire, not because there is a failure mode to report.
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from_wire(s))
     }
 }
 
@@ -385,6 +398,7 @@ mod tests {
             ErrorCode::Other("worktree_locked".to_owned()),
         ] {
             assert_eq!(ErrorCode::from_wire(code.as_str()), code);
+            assert_eq!(code.to_string().parse::<ErrorCode>().unwrap(), code);
             let text = serde_json::to_string(&code).unwrap();
             assert_eq!(serde_json::from_str::<ErrorCode>(&text).unwrap(), code);
         }
