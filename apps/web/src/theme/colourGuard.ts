@@ -100,8 +100,10 @@ const PALETTE_CLASS = new RegExp(
  *
  *  - a colour that reaches CSS through a variable rather than a literal. Needs types.
  *  - a colour name in a string that no painting property introduces. Needs types.
- *  - a value whose own quote character appears inside it escaped, which ends the match
- *    early. Needs a parser.
+ *  - a value whose own quote character appears inside it escaped, when the colour word
+ *    sits before the escape. After it the colour is caught, but by accident rather than by
+ *    understanding — the span treats the escaped quote as a boundary and the tail happens
+ *    to become the captured value. Needs a parser to be right either way.
  *  - an expression between the property and the literal that contains a semicolon, a comma
  *    or a brace, or that runs past the length cap. Those are what stop the span crossing
  *    out of the value it belongs to, and the price is a call with more than one argument.
@@ -163,13 +165,24 @@ const PROPERTY_INTRO =
  * one line. Stopping at a line end meant the guard saw the conditional style only when it
  * happened to fit on one, which is a coin toss rather than a rule.
  *
- * What bounds it instead is punctuation that means "this is a different thing": a quote,
- * a semicolon, a comma — which separates one object property from the next — and a brace.
- * Between them a span cannot reach out of the value it belongs to and into a sibling. The
- * length cap is the backstop for anything those miss. The comma costs the rule an
- * expression like a call with two arguments, which is in the residue above.
+ * What bounds it is punctuation that means "this is a different thing": a semicolon, a
+ * comma — which separates one object property from the next — and a brace. Between them a
+ * span cannot reach out of the value it belongs to and into a sibling. The length cap is
+ * the backstop for anything those miss. The comma costs the rule an expression like a call
+ * with two arguments, which is in the residue above.
+ *
+ * A quote does **not** bound it, and the comment used to say it did — which was not just
+ * wrong but backwards. A quoted string in the expression, which is what a comparison like
+ * `status === 'failed' ? …` is made of, was taken as the value: the rule read the first
+ * literal after the separator, found no colour word in it, and skipped past the real one.
+ * So the span swallows a complete quoted string as a unit and the greedy quantifier hands
+ * back the *last* literal in range, which is the one the property is actually set to. The
+ * alternation is ordered quote-first so a literal is consumed whole rather than a character
+ * at a time; both branches are anchored on different characters, so there is no ambiguity
+ * for the engine to backtrack through.
  */
-const BEFORE_VALUE = `[^'"\`;,{}]{0,120}`;
+const QUOTED_CHUNK = `'[^'\\n]*'|"[^"\\n]*"`;
+const BEFORE_VALUE = `(?:${QUOTED_CHUNK}|[^'"\`;,{}]){0,120}`;
 
 /**
  * One pattern per quote character rather than one with a backreference, so a value may
