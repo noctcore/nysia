@@ -1,0 +1,39 @@
+@import 'tailwindcss';
+
+/*
+ * Ember, the default theme (design-spec §1). Every colour in the app is a token: there is
+ * a runtime theme switcher, so a hardcoded hex is a bug. Graphite, the accent picker and
+ * the derived --acc14 / --acc35 land with the chrome in wave 1 (W3).
+ *
+ * Status colours are deliberately absent from the accent chain — accent is identity,
+ * status is semantics, and the accent picker must never recolour them.
+ */
+@theme {
+  --color-bg0: #090b10;
+  --color-bg1: #0c0f15;
+  --color-bg2: #11151d;
+  --color-bg3: #161b25;
+  --color-line: #1f2532;
+  --color-line2: #2a3140;
+  --color-fg: #dfe3ea;
+  --color-fg2: #8b94a6;
+  --color-fg3: #5c6577;
+  --color-acc: #f2b35b;
+
+  --color-status-running: oklch(78% 0.12 180);
+  --color-status-needs-input: oklch(80% 0.15 70);
+  --color-status-queued: #7c7c84;
+  --color-status-failed: oklch(70% 0.15 25);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg1);
+  color: var(--color-fg);
+}
