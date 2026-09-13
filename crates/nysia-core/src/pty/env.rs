@@ -44,8 +44,13 @@ pub const FORCED_COLORTERM: &str = "truecolor";
 
 /// Scrub the inherited environment and force the terminal description.
 ///
-/// Applied to every session, agent or shell, before any caller-supplied override — so a
-/// caller that deliberately sets one of these still wins.
+/// Applied to every session, agent or shell, **after** any caller-supplied override, so
+/// that layering cannot undo it. A scrub a caller can reintroduce a variable through is not
+/// a scrub, it is a default — and three of these decide whether a launched `claude` is
+/// treated as somebody's child session while two are a credential and an endpoint.
+///
+/// `SessionSpec::with_env_overriding_the_scrub` is the one deliberate way past this, and it
+/// is named so the call site is greppable.
 pub fn sanitize(command: &mut CommandBuilder) {
     for name in SCRUBBED_VARS {
         command.env_remove(name);
