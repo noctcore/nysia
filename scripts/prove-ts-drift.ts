@@ -19,6 +19,14 @@
  * Failures are raised as exceptions rather than `process.exit`, because `exit` terminates
  * without unwinding and would leave `identity.rs` mutated on disk. Everything that can
  * fail runs inside a `try` whose `finally` writes the original bytes back.
+ *
+ * What that does *not* cover, deliberately: a hard kill between the mutation and the
+ * restore — Ctrl-C at the wrong moment, a `SIGKILL`, the machine losing power — still
+ * leaves `identity.rs` modified. No `finally` can defend against that, and installing
+ * signal handlers to narrow the window would buy a smaller race rather than remove one. The
+ * backstop is CI's clean-tree step, which fails the run if any gate leaves the working tree
+ * dirty; locally the probe block is labelled so `git diff` says what happened and how to fix
+ * it. If you are reading this because you found that block committed, delete it.
  */
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
