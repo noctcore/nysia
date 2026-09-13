@@ -32,6 +32,14 @@ The product shape is taken from Orca, which the author uses daily. The engineeri
 | D-8 | **Usage: statusline shim by default, OAuth path behind an off-by-default flag.** | §7.6. |
 | D-9 | **Browser tab deferred past v1.** | WKWebView has no CDP; revisit when `tauri-runtime-cef` matures. |
 | D-10 | **No Voice.** | Design mock only. |
+| D-11 | **Two artifacts**: one Rust binary `nysia` that is both daemon and CLI (mode by argv), plus the Tauri GUI. The CLI ships in the app bundle and symlinks onto PATH. | Orca's shape. Lets the daemon and GUI run different versions, which is what surviving an upgrade requires. |
+| D-12 | **SQLite (WAL) for state, JSON for settings.** | Orchestration needs indexes and transactions; settings need to be hand-editable. |
+| D-13 | **ts-rs one-way, Rust → TS.** No zod→Rust generator. | With no sidecar, TypeScript never produces wire messages. Rust is the sole authority. Drops ~2,400 lines of generator. |
+| D-14 | **Minimal gates + architecture rules from day one.** | Ratchets and layer rules are cheap now and a migration later. Coverage floors and the full 22-rule set wait. |
+| D-15 | **The daemon owns all git**, and pushes status/diff to clients rather than answering polls. | One isolation chokepoint; the UI never blocks on git. |
+| D-16 | **Hooks reach the daemon via `nysia hook`** writing to the socket. No HTTP server, no port, no token file. | §5.3. Simpler than Orca's HTTP listener, and identical on both platforms. |
+| D-17 | **WSL is a plain shell in v1** — `wsl.exe -d <distro>` in a ConPTY. No path translation, no worktrees, no agents inside WSL. | Covers the design's menu entry honestly at near-zero cost. |
+| D-18 | **pnpm + Vite + React 19 + Tailwind 4, vitest node-only.** No Bun, no Storybook, no browser-mode tests in v1. | pnpm is safer on Windows-primary development; browser-mode is the slowest CI job for a UI that is mostly a terminal. |
 
 ---
 
@@ -42,19 +50,36 @@ nysiad  ─ long-lived, detached, survives every UI restart and upgrade
 │
 ├── PTY layer          portable-pty; one blocking reader thread per session
 ├── VT layer           alacritty_terminal grid + raw replay ring, per session
-├── Store              SQLite (WAL): sessions, projects, worktrees,
-│                      orchestration, agent status, scrollback index
-├── Hook endpoint      localhost HTTP; receives Claude Code hook payloads
-├── Git / worktree     all git spawns funnelled through one hardened chokepoint
+├── Store              SQLite (WAL): sessions, worktrees, orchestration,
+│                      agent status, scrollback index
+│                      JSON: settings, projects (hand-editable)
+├── Git / worktree     all git spawns through one hardened chokepoint;
+│                      repo watcher pushes status/diff to clients
 └── RPC server         versioned NDJSON over named pipe (Windows) /
-                       Unix socket (macOS), token + peer-credential auth
-        ▲                    ▲                       ▲
-        │                    │                       │
-   Nysia.app            nysia CLI              (future) relay
-   (Tauri window)   (what agents call)         (mobile approvals)
+                       Unix socket (macOS), peer-credential auth
+        ▲                    ▲                ▲              ▲
+        │                    │                │              │
+   Nysia.app            nysia <verb>     nysia hook    (future) relay
+   (Tauri GUI)      (what agents call)  (status in)  (mobile approvals)
 ```
 
 Every consumer is a client of the same socket and the same verb surface. The window has no privileged path.
+
+### 3.0 Binaries
+
+```
+Nysia.app/
+  Contents/MacOS/Nysia          <- Tauri GUI
+  Contents/Resources/bin/nysia  <- daemon + CLI (one Rust binary)
+                    |
+  /usr/local/bin/nysia ---------+   (symlink; %LOCALAPPDATA%\Nysia\bin on Windows)
+
+nysia --daemon        -> becomes nysiad
+nysia terminal read   -> CLI client
+nysia hook            -> status ingest (stdin -> socket)
+```
+
+Two build artifacts, two signing targets. The GUI and the daemon are deliberately allowed to run different versions — that is what an in-place upgrade requires, and the versioned socket handshake is what makes it safe.
 
 ### 3.1 Socket protocol
 
@@ -169,11 +194,29 @@ State mapping:
 
 ### 5.3 Nysia's version
 
-Same hooks, same event mapping, but POST to **the daemon's** endpoint. Then:
+Same 12 hook events, same state mapping — but the hook command is **`nysia hook`**, not a shell script wrapping `curl`.
+
+```
+Orca:   hook -> sh script -> curl POST 127.0.0.1:<port>
+                             reads endpoint.env (port+token, rewritten every app boot)
+                             spools to JSONL on failure
+                             Windows needs a .cmd + PowerShell EncodedCommand fallback
+
+Nysia:  hook -> nysia hook -> named pipe / unix socket
+                             endpoint stable for the daemon's life
+                             peer-credential auth, no token
+                             identical on Windows and macOS
+```
+
+`nysia hook` reads the payload on stdin, prints `{}` first so it can never block or influence the agent, and writes to the socket. What this removes, relative to Orca: the HTTP server, the port, the token file, the endpoint-indirection file, and the whole Windows script-dialect problem. All of it existed because Orca's listener dies with its UI (§4).
+
+Then:
 
 - the endpoint survives UI restarts, so agents never lose status
 - authority is proven by peer credentials + process tree (§3.2), not by token echo
 - status is one more table in the daemon's SQLite, readable by the window, the CLI, and later the phone through the identical RPC
+
+Keep the **disk spool** anyway, for the rarer case of a daemon restart: append to a per-pane JSONL, drain on daemon start. It is cheap insurance and Orca proves the shape.
 
 Durability, copied from Orca: cap history at ~20 states per agent; treat a status older than 30 minutes as stale (a "working" dot decays to "active"); mark rows rehydrated from disk as `restoredUnconfirmed` and never count them as fresh until a live hook arrives.
 
@@ -391,8 +434,33 @@ Each of these cost someone a day already.
 
 ## 12. Open questions
 
-1. **Does the daemon own git, or does the UI?** §4 says the daemon. Cost: `git.exec` is Orca's hot path — 2,557 spans per 3,000 trace events over 10 days. If git lives in the daemon, its latency is on the RPC path.
-2. **Windows confinement.** Lexical gates only in v1 (§7.5). Is there an acceptable OS-level story later — AppContainer, a restricted token, or WSL-only agent sessions?
-3. **Scrollback persistence budget.** Orca: 5k rows default, 512 KiB replay, 5 MiB store, up to 200 MB history checkpoints. What is Nysia's ceiling, and does it survive a daemon crash or only a clean restart?
-4. **Does the `nysia` CLI ship inside the app bundle or install separately?** Orca re-invokes its own Electron binary with `ELECTRON_RUN_AS_NODE=1`. A Rust CLI could be a second binary in the same bundle, or the same binary behind a flag — nightcore already does the latter for its terminal daemon.
-5. **Memory expectations.** Orca on this machine: app 1.1 GB, 356–817 MB *per worktree*, PTY daemon 88 MB for 5 terminals. The agent processes are the entire cost. Tauri saves the Electron renderer, not the expensive part — so what is the honest performance claim?
+1. **Windows confinement.** Lexical gates only in v1 (§7.5). Is there an acceptable OS-level story later — AppContainer, a restricted token, or WSL-only agent sessions?
+2. **Scrollback persistence budget.** Orca: 5k rows default, 512 KiB replay, 5 MiB store, up to 200 MB history checkpoints. What is Nysia's ceiling, and does it survive a daemon crash or only a clean restart?
+3. **Memory expectations.** Orca on this machine: app 1.1 GB, 356–817 MB *per worktree*, PTY daemon 88 MB for 5 terminals. The agent processes are the entire cost. Tauri saves the Electron renderer, not the expensive part — so what is the honest performance claim?
+4. **Daemon crash blast radius.** Under D-2 the daemon owns more than Orca's does. SQLite WAL and atomic JSON cover state, but what supervises the daemon itself, and does a crash kill the PTYs it owns? (It does — the children are in its process tree. Orca accepts the same.)
+5. **How does the GUI discover and start the daemon?** Spawn-if-absent on app launch is obvious, but two clients racing to spawn needs a lock, and a stale socket file from a killed daemon needs to be distinguishable from a live one. Orca uses a pid-record with `startedAtMs` + `launchNonce`.
+
+---
+
+## 13. Repo layout
+
+```
+nysia/
+  crates/
+    nysia/          bin: daemon + CLI (D-11)
+    nysia-core/     PTY, VT state, store, git, worktree, orchestration
+    nysia-proto/    wire types; ts-rs export lives here
+  apps/
+    desktop/        Tauri GUI (src-tauri + thin Rust shell)
+    web/            React 19 + Vite + Tailwind 4
+  tools/
+    lint-meta/      architecture rules (D-14)
+  docs/
+```
+
+Cargo workspace + pnpm workspace side by side. `nysia-core` is the library both the daemon
+and the Tauri shell link; the GUI's Rust side stays thin because it is a client, not an owner.
+
+Gates for v1 (D-14): `cargo clippy -D warnings`, `cargo fmt --check`, `tsc`, `vitest`,
+the ts-rs drift guard with its prove-it-trips script, the pre-push ⇄ CI parity manifest,
+plus lint-meta's `layer-rank`, `rust-module-shape` and the file-size ratchet.
