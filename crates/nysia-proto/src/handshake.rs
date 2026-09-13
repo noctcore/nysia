@@ -44,6 +44,9 @@ pub enum HandshakeError {
     /// A launch nonce was not a bare hyphenated uuid.
     #[error("a launch nonce is a hyphenated uuid, got {0:?}")]
     LaunchNonceShape(String),
+    /// A client role was not one of the two wire spellings.
+    #[error("a client role is `control` or `stream`, got {0:?}")]
+    ClientRoleShape(String),
 }
 
 /// A client id may not exceed this, so a hostile peer cannot make the daemon's logs
@@ -173,6 +176,18 @@ impl ClientRole {
 impl fmt::Display for ClientRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ClientRole {
+    type Err = HandshakeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "control" => Ok(Self::Control),
+            "stream" => Ok(Self::Stream),
+            other => Err(HandshakeError::ClientRoleShape(other.to_owned())),
+        }
     }
 }
 
@@ -677,7 +692,24 @@ mod tests {
     fn roles_round_trip_in_their_wire_spelling() {
         for role in [ClientRole::Control, ClientRole::Stream] {
             assert_eq!(serde_json::to_string(&role).unwrap(), format!("\"{role}\""));
+            assert_eq!(role.to_string().parse::<ClientRole>().unwrap(), role);
         }
         assert!(serde_json::from_str::<ClientRole>("\"Control\"").is_err());
+        assert!("Control".parse::<ClientRole>().is_err());
+        assert!("".parse::<ClientRole>().is_err());
+    }
+
+    #[test]
+    fn the_string_shaped_handshake_values_survive_display_and_back() {
+        let client_id: ClientId = "nysia-cli".parse().unwrap();
+        assert_eq!(
+            client_id.to_string().parse::<ClientId>().unwrap(),
+            client_id
+        );
+        assert_eq!(client_id.as_str(), "nysia-cli");
+
+        let nonce = LaunchNonce::generate();
+        assert_eq!(nonce.to_string().parse::<LaunchNonce>().unwrap(), nonce);
+        assert_eq!(nonce.as_str(), nonce.to_string());
     }
 }
