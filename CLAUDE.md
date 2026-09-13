@@ -22,10 +22,10 @@ here. A commit or PR carrying one of those lines is rejected.
 
 | Facet | Pick | Values |
 |---|---|---|
-| Type | exactly one | `bug` `enhancement` `chore` `refactor` `performance` `security` `dx` `documentation` `test` `dependencies` |
+| Type | exactly one | `bug` `enhancement` `chore` `refactor` `performance` `security` `dx` `documentation` `test` |
 | Priority | exactly one | `P0-critical` `P1-high` `P2-medium` `P3-low` |
 | Area | one or more | `area:daemon` `area:pty` `area:vt` `area:proto` `area:desktop` `area:web` `area:build` `area:git` `area:agent` `area:tasks` `area:orchestration` |
-| Extra | when it applies | `gate` for anything touching a CI gate or its prove-it-trips proof; `design-system` for design spec adoption |
+| Extra | any that apply | `dependencies` when a manifest or lockfile changes; `gate` for anything touching a CI gate or its prove-it-trips proof; `design-system` for design spec adoption |
 
 Run `gh label list` if you are unsure; never invent a label, and never open a PR with none.
 
