@@ -19,6 +19,7 @@ export function TabStrip() {
 
   return (
     <div
+      data-tauri-drag-region
       className="relative flex h-titlebar flex-1 items-end gap-1"
       role="tablist"
       aria-label="Sessions"

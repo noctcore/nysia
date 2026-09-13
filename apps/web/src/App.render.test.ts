@@ -42,11 +42,27 @@ describe('the window', () => {
   });
 
   it('draws custom chrome, never native decorations', () => {
-    expect(app).toContain('data-tauri-drag-region');
     for (const control of ['Minimise', 'Maximise', 'Close']) {
       expect(app, control).toContain(`aria-label="${control}"`);
     }
     expect(app).toContain('⌘K');
+  });
+
+  it('makes the wordmark itself draggable, not just the bar behind it', () => {
+    // Tauri checks the element the pointer landed on, not its ancestors. With the
+    // attribute on the titlebar root alone the effective drag area was a 14px pad and a
+    // couple of gap seams, because the strip and the controls fill the bar's height.
+    const wordmark = app.slice(app.indexOf('w-wordmark') - 200, app.indexOf('nysia<'));
+    expect(wordmark.match(/data-tauri-drag-region/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(app.match(/data-tauri-drag-region/g)?.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('keeps the drag region off every button', () => {
+    // A drag region over a control swallows its clicks, which is how a titlebar ends up
+    // with buttons that look live and do nothing.
+    for (const tag of app.matchAll(/<button[^>]*>/g)) {
+      expect(tag[0]).not.toContain('data-tauri-drag-region');
+    }
   });
 
   it('renders one tab per seeded session, with the active one merged into the pane', () => {

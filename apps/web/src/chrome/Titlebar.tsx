@@ -12,8 +12,11 @@ import { Wordmark } from './Wordmark';
  * appears to change size or lose its buttons.
  *
  * `data-tauri-drag-region` is a plain DOM attribute the shell reads, not an import, so the
- * titlebar can be draggable without `apps/web` touching Tauri (D-1, D-2). It goes on the
- * bar and on the wordmark slot only: a drag region over a button swallows its clicks.
+ * titlebar can be draggable without `apps/web` touching Tauri (D-1, D-2). Tauri checks the
+ * element the pointer landed on rather than its ancestors, so it has to be repeated on
+ * every surface that should drag — the bar, the wordmark and its text, the empty part of
+ * the tab strip, and the chip row. It stays off every button: a drag region over one
+ * swallows its clicks.
  */
 export function Titlebar({
   settingsOpen,
@@ -29,7 +32,7 @@ export function Titlebar({
     >
       <Wordmark />
       {settingsOpen ? (
-        <div className="flex flex-1 items-center gap-2">
+        <div data-tauri-drag-region className="flex flex-1 items-center gap-2">
           <button
             type="button"
             onClick={onCloseSettings}
@@ -41,8 +44,11 @@ export function Titlebar({
       ) : (
         <TabStrip />
       )}
-      <div className="text-fg2 flex items-center gap-2 text-xs">
-        <span className="bg-bg2 rounded-chip px-2.5 py-[5px] font-mono">
+      <div data-tauri-drag-region className="text-fg2 flex items-center gap-2 text-xs">
+        <span
+          data-tauri-drag-region
+          className="bg-bg2 rounded-chip px-2.5 py-[5px] font-mono"
+        >
           {COMMAND_PALETTE_HINT}
         </span>
       </div>
