@@ -8,6 +8,7 @@
 //! The generated TypeScript is committed under `apps/web/src/generated/` and a drift guard
 //! (`pnpm ts-drift`) fails the build when it stops matching what this crate produces.
 
+pub mod frame;
 pub mod handshake;
 pub mod identity;
 mod newtype;
@@ -15,6 +16,10 @@ pub mod session;
 pub mod terminal;
 pub mod version;
 
+pub use frame::{
+    FRAME_HEADER_BYTES, Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_PAYLOAD_BYTES,
+    decode, encode, encode_into,
+};
 pub use handshake::{
     ClientId, ClientRole, DaemonIdentity, HandshakeError, HelloAccepted, HelloRejected,
     HelloRequest, HelloResponse, LaunchNonce, OkFalse, OkTrue, PidRecord, RejectReason,
