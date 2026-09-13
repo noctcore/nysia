@@ -1,0 +1,148 @@
+# The label set of this repository, as code.
+#
+# Captured verbatim from the live repository with:
+#
+#     gh label list --repo noctcore/nysia --limit 200 --json name,description,color
+#
+# CLAUDE.md section 1 asks every pull request for exactly one type, exactly one priority
+# and at least one area. Those three facets are the first three sections below.
+# .github/labeler.yml applies the areas from the paths a pull request touches, and
+# .github/workflows/pr-facets.yml fails a pull request missing a type or a priority.
+#
+# TO CHANGE A LABEL: edit it here, then apply that one entry. `--force` turns create
+# into update when the label already exists, so the command is safe to re-run:
+#
+#     gh label create "area:pty" --repo noctcore/nysia \
+#       --color 0052cc --description "PTY, ConPTY, process spawn and teardown" --force
+#
+# TO RE-CREATE THE WHOLE SET on a fresh fork, from this file (bash, needs `yq`):
+#
+#     yq -r '.[] | [.name, .color, .description] | @tsv' .github/labels.yml \
+#       | while IFS=$'\t' read -r name color desc; do \
+#           gh label create "$name" --color "$color" --description "$desc" --force; \
+#         done
+#
+# TO RE-CAPTURE THIS FILE after changing labels in the GitHub UI, re-run the
+# `gh label list` command above and regenerate rather than hand-editing — retyping 33
+# colours is how one of them drifts.
+#
+# WHY THERE IS NO DRIFT CHECK. A job that diffs this file against the live label set was
+# considered and deliberately left out. Reading it needs a YAML parser, and this
+# repository has none in its dependency set — adding one means editing package.json and
+# the lockfile, which belong to the coordinator. The alternative, hand-parsing YAML, is
+# exactly the class of defect lint-meta was rewritten to remove: a parser that silently
+# misreads a spelling and reports success. Since re-applying is idempotent, running the
+# command above *is* the reconciliation, and it costs less than a wrong parser.
+#
+# Colours carry no meaning beyond making the facets separable at a glance: the four
+# priorities run red to green, the areas are distinct hues, the types are muted.
+
+# Type — exactly one per pull request.
+- name: "bug"
+  color: "d73a4a"
+  description: "Something isn't working"
+- name: "enhancement"
+  color: "a2eeef"
+  description: "New feature or request"
+- name: "chore"
+  color: "c2c2c2"
+  description: "Maintenance, tooling and housekeeping"
+- name: "refactor"
+  color: "f97316"
+  description: "Code refactoring and cleanup"
+- name: "performance"
+  color: "0e8a16"
+  description: "Performance improvements and optimizations"
+- name: "security"
+  color: "e11d48"
+  description: "Security vulnerabilities or hardening"
+- name: "dx"
+  color: "bfdadc"
+  description: "Developer experience improvements"
+- name: "documentation"
+  color: "0075ca"
+  description: "Improvements or additions to documentation"
+- name: "test"
+  color: "bfd4f2"
+  description: "Tests, fixtures and coverage"
+- name: "dependencies"
+  color: "0366d6"
+  description: "Pull requests that update a dependency file"
+
+# Priority — exactly one per pull request.
+- name: "P0-critical"
+  color: "b60205"
+  description: "Must fix immediately"
+- name: "P1-high"
+  color: "d93f0b"
+  description: "Fix before next release"
+- name: "P2-medium"
+  color: "fbca04"
+  description: "Fix soon"
+- name: "P3-low"
+  color: "c5f015"
+  description: "Nice to have"
+
+# Area — at least one per pull request. Applied automatically from the paths a
+# pull request touches; see .github/labeler.yml.
+- name: "area:agent"
+  color: "f9d0c4"
+  description: "Claude sessions, hooks, agent status"
+- name: "area:build"
+  color: "006b75"
+  description: "Build tooling, CI, lint-meta, packaging"
+- name: "area:daemon"
+  color: "1d76db"
+  description: "nysiad, socket protocol, RPC, session ownership"
+- name: "area:desktop"
+  color: "7c3aed"
+  description: "Tauri shell, Channel transport, xterm rendering"
+- name: "area:git"
+  color: "795548"
+  description: "Git chokepoint, worktrees, confinement"
+- name: "area:orchestration"
+  color: "d4c5f9"
+  description: "Run, task and dispatch verb surface"
+- name: "area:proto"
+  color: "5319e7"
+  description: "Wire types and the ts-rs pipeline"
+- name: "area:pty"
+  color: "0052cc"
+  description: "PTY, ConPTY, process spawn and teardown"
+- name: "area:tasks"
+  color: "c5def5"
+  description: "GitHub Issues integration"
+- name: "area:vt"
+  color: "0e7490"
+  description: "Terminal state, grid, scrollback, OSC handling"
+- name: "area:web"
+  color: "6f42c1"
+  description: "React UI, themes, chrome, settings"
+
+# Extra — when it applies. Also applied automatically by the labeler.
+- name: "design-system"
+  color: "e99695"
+  description: "Design spec adoption: tokens, chrome, screens"
+- name: "gate"
+  color: "fef2c0"
+  description: "CI gates and their prove-it-trips proofs"
+
+# Triage — issue-side only, and GitHub created most of these with the repository.
+- name: "duplicate"
+  color: "cfd3d7"
+  description: "This issue or pull request already exists"
+- name: "good first issue"
+  color: "7057ff"
+  description: "Good for newcomers"
+- name: "help wanted"
+  color: "008672"
+  description: "Extra attention is needed"
+- name: "invalid"
+  color: "e4e669"
+  description: "This doesn't seem right"
+- name: "question"
+  color: "d876e3"
+  description: "Further information is requested"
+- name: "wontfix"
+  color: "ffffff"
+  description: "This will not be worked on"
