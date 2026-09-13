@@ -566,6 +566,21 @@ mod tests {
         }
     }
 
+    /// Wait for the shell to stop producing output.
+    ///
+    /// Used between typed lines rather than waiting for the token: only the last line
+    /// produces it, so waiting for it after the first would burn the whole budget on a
+    /// condition that cannot be true yet.
+    async fn settle(client: &mut Client, handle: &SessionHandle) {
+        let _ = client
+            .terminal_wait(TerminalWait {
+                handle: handle.clone(),
+                wait_for: WaitFor::Idle,
+                timeout_ms: Some(DEADLINE_MS),
+            })
+            .await;
+    }
+
     /// Read the screen until `predicate` holds, or until the deadline.
     async fn until(
         client: &mut Client,
@@ -632,7 +647,7 @@ mod tests {
                 .terminal_send(TerminalSend::line(created.handle.clone(), line))
                 .await
                 .expect("input is written");
-            until(&mut client, &created.handle, |text| text.contains(TOKEN)).await;
+            settle(&mut client, &created.handle).await;
         }
         let screen = until(&mut client, &created.handle, |text| text.contains(TOKEN)).await;
         assert!(screen.contains(TOKEN), "got {screen:?}");
@@ -681,7 +696,7 @@ mod tests {
                 .terminal_send(TerminalSend::line(created.handle.clone(), line))
                 .await
                 .expect("input is written");
-            until(&mut first, &created.handle, |text| text.contains(TOKEN)).await;
+            settle(&mut first, &created.handle).await;
         }
 
         // The window dies. Every connection it held goes with it.

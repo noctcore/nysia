@@ -3,48 +3,79 @@
 //! The GUI and the daemon are deliberately allowed to run different versions, because that
 //! is what an in-place upgrade requires; the versioned socket handshake is what makes it
 //! safe. This binary ships inside the app bundle and is symlinked onto `PATH`.
+//!
+//! # Exit codes
+//!
+//! | Code | Meaning |
+//! |---|---|
+//! | 0 | the process did what was asked |
+//! | 1 | it was asked for something valid and could not do it |
+//! | 2 | clap's usage error — you typed it wrong |
+//! | 3 | parsed and routed, but this build has no implementation |
+//!
+//! Three and one are kept apart on purpose. "This build cannot do that" is a fact about the
+//! build that no retry will change; "that did not work" is a fact about this attempt, and
+//! the error envelope that comes with it says whether retrying would help.
 
 mod cli;
+mod daemon;
+mod verbs;
 
+use std::io::Write;
 use std::process::ExitCode;
 
 use crate::cli::{Cli, Mode};
 
-/// Returned when a mode or verb parsed and routed correctly but has no implementation in
-/// this build. Distinct from clap's usage exit (2) so a caller can tell "you typed it
-/// wrong" from "this build cannot do that yet", and never 0, so nothing downstream can
-/// mistake a stub for a working daemon.
+/// The verb was asked for something valid and it did not work. The error envelope on stderr
+/// says what and what to do about it.
+const EXIT_FAILED: u8 = 1;
+
+/// The verb parsed and routed correctly but has no implementation in this build.
 const EXIT_UNIMPLEMENTED: u8 = 3;
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("NYSIA_LOG")
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        // Logs never go to stdout. Stdout is the verb's result, and a log line in the middle
+        // of it is a parse error for whoever is reading.
         .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse_from_argv(std::env::args_os()).unwrap_or_else(|err| err.exit());
-    match cli.mode() {
-        Mode::Daemon => {
-            // Wave 2 (W4) replaces this with the real thing: bind the versioned socket,
-            // write the pid record, adopt or refuse an existing daemon, then serve.
-            //
-            // Everything goes to stderr and the exit is non-zero. A supervisor that spawns
-            // `nysia --daemon`, waits, and checks the status would otherwise read success
-            // from a process that bound nothing and served nobody — and stdout stays empty
-            // so a caller watching it for a ready line is not fed one either.
-            eprintln!(
-                "nysia {}: would become nysiad here — bind \\\\.\\pipe\\nysiad-v1-<user> (Windows) \
-                 or nysiad-v1.sock (macOS), write the pid record, and serve the verb surface.",
-                env!("CARGO_PKG_VERSION")
-            );
-            eprintln!("The v0.1 scaffold has no socket server yet; it lands in wave 2 (W4).");
-            ExitCode::from(EXIT_UNIMPLEMENTED)
+    let no_spawn = cli.no_spawn;
+    match cli.into_mode() {
+        Mode::Daemon { never_retire } => match daemon::run(never_retire).await {
+            Ok(daemon::Outcome::Retired) => ExitCode::SUCCESS,
+            Ok(daemon::Outcome::AlreadyRunning { endpoint }) => {
+                // Losing the race is not a failure. What this process was started to
+                // guarantee — that a daemon is listening there — is true.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "a daemon is already listening on {endpoint}; leaving it alone"
+                );
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                let _ = writeln!(std::io::stderr(), "nysiad could not start: {err}");
+                ExitCode::from(EXIT_FAILED)
+            }
+        },
+        Mode::Client(verb) => {
+            let json = verb.json();
+            match verbs::run(*verb, no_spawn).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    verbs::print_error(&err, json);
+                    ExitCode::from(EXIT_FAILED)
+                }
+            }
         }
-        Mode::Client(unimplemented) => {
-            eprintln!("{unimplemented}");
+        Mode::Unimplemented(err) => {
+            let _ = writeln!(std::io::stderr(), "{err}");
             ExitCode::from(EXIT_UNIMPLEMENTED)
         }
     }

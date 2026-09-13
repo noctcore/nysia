@@ -282,12 +282,49 @@ fn spawn_daemon(program: &std::path::Path, endpoint: &Endpoint) -> std::io::Resu
         command.process_group(0);
     }
 
+    // Windows inherits *every* inheritable handle when any stdio is redirected, not only the
+    // three that were named. That includes the write end of whatever pipe this process's own
+    // stdout happens to be — so a daemon spawned from inside `H=$(nysia session create)` holds
+    // that pipe open for its whole life, and the shell waits for an answer it already has.
+    // Detaching the parent's own handles first is what stops it; on Unix the redirections
+    // replace fds 0, 1 and 2 outright and nothing else is inherited, so there is nothing to do.
+    #[cfg(windows)]
+    detach_parent_stdio();
+
     let child = command.spawn()?;
     // The handle is dropped on purpose. Waiting on the daemon is precisely what a client must
     // not do; on Unix that leaves a zombie until this process exits, which is a few hundred
     // bytes of process table for the life of one CLI invocation.
     drop(child);
     Ok(())
+}
+
+/// Stop this process's stdio handles from being inherited by anything it spawns.
+///
+/// Best effort, and harmless to this process: clearing the inherit flag does not affect the
+/// current process's own use of the handle, only whether a child receives a copy.
+#[cfg(windows)]
+fn detach_parent_stdio() {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{
+        HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation,
+    };
+
+    let handles = [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ];
+    for handle in handles {
+        if handle.is_null() {
+            continue;
+        }
+        // SAFETY: the handle is this process's own standard handle, borrowed for the call.
+        // `SetHandleInformation` only changes the flag bits named by the mask and writes
+        // nothing through a pointer.
+        let _ =
+            unsafe { SetHandleInformation(HANDLE(handle), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) };
+    }
 }
 
 /// The spawn lock, held by the operating system for as long as the process lives.
