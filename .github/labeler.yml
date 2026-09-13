@@ -1,8 +1,21 @@
 # Path -> area label, read by actions/labeler in .github/workflows/pr-triage.yml.
 #
-# These are *area* labels only. Type and priority are judgement calls a path cannot
-# make, so nothing here applies them; .github/workflows/pr-facets.yml fails a PR that
-# is missing either one. The full label set lives in .github/labels.yml.
+# THIS FILE MAY NEVER WRITE A TYPE LABEL. Areas are mechanical — a path determines them
+# — and the Extras (`dependencies`, `gate`, `design-system`) are facts about the diff.
+# Types are editorial: only the author knows whether a change is a `bug` or a `chore`,
+# and a PR that happens to touch a doc file is not a `documentation` PR.
+#
+# This is not only a style rule, it is a deadlock. `documentation` used to be applied
+# here from `docs/**` while pr-facets.yml counts it as a type, so any enhancement, bug or
+# chore PR that also touched docs ended up with two types and failed. Worse, it failed
+# *intermittently*: labels written with GITHUB_TOKEN never trigger other workflows, so
+# the labeler cannot re-run the facet check, and on `opened` and `synchronize` the two
+# start concurrently — the check reads the labels either before or after the write
+# depending on timing. Green on one push, red on the next, and a label removed by hand
+# comes straight back on the next synchronize because the labeler is add-only.
+#
+# .github/scripts/check-labeler-config.mjs fails CI if a type label appears as a key
+# here. The full label set, and which facet each label belongs to, is .github/labels.yml.
 #
 # The labeler runs with `sync-labels` off (the default), so it only ever adds. A label
 # a human put on a PR is never removed by automation.
@@ -86,10 +99,20 @@
           - 'pnpm-workspace.yaml'
           - 'rust-toolchain.toml'
 
-'documentation':
+# `dependencies` is an Extra, not a type: a manifest change is a fact about the diff, so
+# a path can decide it. A PR can be an `enhancement` that also bumps a lockfile.
+'dependencies':
   - changed-files:
       - any-glob-to-any-file:
-          - 'docs/**'
+          - 'Cargo.toml'
+          - 'Cargo.lock'
+          - 'crates/*/Cargo.toml'
+          - 'apps/desktop/src-tauri/Cargo.toml'
+          - 'package.json'
+          - 'apps/*/package.json'
+          - 'tools/*/package.json'
+          - 'pnpm-lock.yaml'
+          - 'pnpm-workspace.yaml'
 
 # Trap 12: a gate that passes without exercising anything is worse than no gate. The
 # prove scripts and lint-meta are where that rule is enforced, so touching them is
