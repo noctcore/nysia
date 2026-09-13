@@ -1,0 +1,70 @@
+# Applies area labels from the paths a PR touches, and assigns the PR if nobody has.
+#
+# SECURITY INVARIANT — read before editing.
+#
+# This workflow runs on `pull_request_target`, so its token is writable even when the
+# PR comes from a fork. That is the only way to label a fork PR at all: a `pull_request`
+# run from a fork gets a read-only token and can do nothing here.
+#
+# The price is that `pull_request_target` checks out the *base* branch by default and
+# runs with the base repository's secrets. Therefore:
+#
+#   This workflow must never check out, build, or execute anything from the PR head.
+#
+# There is no `actions/checkout` step below and there must never be one. actions/labeler
+# reads .github/labeler.yml over the API at `github.sha` — which under this trigger is
+# the base commit, not the PR's — so the configuration an attacker can edit is never the
+# configuration that runs. Adding a checkout of `github.event.pull_request.head.sha`
+# would hand a fork's code a token that can write to this repository.
+#
+# .github/scripts/check-workflow-pins.mjs fails CI if that invariant is broken here, and
+# if any `uses:` in this directory is pinned to a mutable tag instead of a commit SHA.
+
+name: pr-triage
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+# Deliberately not `labeled`/`unlabeled`: this workflow writes labels, and those types
+# would make it re-trigger itself.
+
+permissions: {}
+
+concurrency:
+  group: pr-triage-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    name: apply area labels
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # Bootstrap. actions/labeler resolves its configuration from the base commit, so
+      # on the very PR that introduces .github/labeler.yml the file does not exist yet
+      # and the action exits non-zero. The ask was that this behave on a PR it cannot
+      # label rather than fail loudly, and the same applies to a PR opened against a
+      # branch that predates the config.
+      - name: check the base branch carries a labeler config
+        id: config
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if gh api "repos/${{ github.repository }}/contents/.github/labeler.yml?ref=$BASE_SHA" --silent 2>/dev/null; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+            echo "::notice::No .github/labeler.yml on the base commit $BASE_SHA; skipping area labels. This is expected on the pull request that adds it."
+          fi
+
+      - name: apply area labels
+        if: steps.config.outputs.present == 'true'
+        uses: actions/labeler@8558fd74291d67161a8a78ce36a881fa63b766a9 # v5.0.0
+        with:
+          repo-token: ${{ github.token }}
+          # Add only. A label a reviewer applied by hand is never removed by this run.
+          sync-labels: false
