@@ -179,6 +179,7 @@ fn exchange(
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Read, Write};
+    use std::time::Duration;
 
     use nysia_proto::error::{ErrorCode, ErrorEnvelope, NextSteps};
     use nysia_proto::session::SessionList;
@@ -193,6 +194,12 @@ mod tests {
     impl Read for Replay {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             self.answers.read(buf)
+        }
+    }
+
+    impl Socket for Replay {
+        fn set_read_timeout(&self, _timeout: Option<Duration>) -> std::io::Result<()> {
+            Ok(())
         }
     }
 

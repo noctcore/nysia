@@ -7,9 +7,9 @@
 //! happen, rather than one per session with thirty windows to keep in step.
 //!
 //! Frames from all sessions share the channel and are told apart by the stream id in each
-//! header ([`framing`]). They are packed until the window closes ([`coalesce`]), and the
-//! daemon is only allowed to produce them as fast as the webview renders them
-//! ([`credit`]).
+//! header, which `nysia-proto` defines and both ends read from the same generated table
+//! (D-13). They are packed until the window closes ([`coalesce`]), and the daemon is only
+//! allowed to produce them as fast as the webview renders them ([`credit`]).
 //!
 //! ## The seam
 //!
@@ -20,14 +20,13 @@
 
 pub mod coalesce;
 pub mod credit;
-pub mod framing;
 
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use coalesce::Coalescer;
-use framing::ChannelFrame;
+use nysia_proto::frame::Frame;
 
 /// Where a closed coalescing window goes.
 ///
@@ -54,7 +53,7 @@ impl FrameSink for tauri::ipc::Channel<tauri::ipc::InvokeResponseBody> {
 /// What the driver thread is asked to do.
 enum Command {
     /// Pack a frame into the current window.
-    Frame(Box<ChannelFrame>),
+    Frame(Box<Frame>),
     /// Deliver whatever is held and stop.
     Shutdown,
 }
@@ -88,7 +87,7 @@ impl Dispatcher {
     /// Returns `false` once the driver has stopped — the webview is gone, or the dispatcher
     /// was shut down. Callers treat that as "stop reading this session", not as an error to
     /// report: it is the normal end of a window's life.
-    pub fn send(&self, frame: ChannelFrame) -> bool {
+    pub fn send(&self, frame: Frame) -> bool {
         self.commands.send(Command::Frame(Box::new(frame))).is_ok()
     }
 
@@ -178,10 +177,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use nysia_proto::frame::FrameKind;
-
-    use super::framing::FrameDecoder;
     use super::*;
+    use nysia_proto::frame::{FrameDecoder, FrameKind};
+    use nysia_proto::stream::StreamId;
 
     /// A sink that remembers every window it was handed.
     #[derive(Clone, Default)]
@@ -191,7 +189,7 @@ mod tests {
 
     impl Recorder {
         /// Every frame delivered so far, in order, across every window.
-        fn frames(&self) -> Vec<ChannelFrame> {
+        fn frames(&self) -> Vec<Frame> {
             let windows = self
                 .windows
                 .lock()
@@ -242,9 +240,9 @@ mod tests {
         let dispatcher = Dispatcher::spawn(recorder.clone());
 
         for stream in [3, 4, 3, 5] {
-            assert!(dispatcher.send(ChannelFrame::new(
+            assert!(dispatcher.send(Frame::new(
                 FrameKind::Output,
-                stream,
+                StreamId(stream),
                 b"tick".as_slice()
             )));
         }
@@ -253,8 +251,8 @@ mod tests {
             eventually(|| recorder.frames().len() == 4),
             "the window should have closed"
         );
-        let streams: Vec<u32> = recorder.frames().iter().map(|frame| frame.stream).collect();
-        assert_eq!(streams, vec![3, 4, 3, 5]);
+        let streams: Vec<StreamId> = recorder.frames().iter().map(|f| f.stream).collect();
+        assert_eq!(streams, [3, 4, 3, 5].map(StreamId));
     }
 
     #[test]
@@ -263,12 +261,12 @@ mod tests {
         // silence must not sit in the buffer forever.
         let recorder = Recorder::default();
         let dispatcher = Dispatcher::spawn(recorder.clone());
-        dispatcher.send(ChannelFrame::new(FrameKind::Bell, 1, Vec::new()));
+        dispatcher.send(Frame::new(FrameKind::Bell, StreamId(1), Vec::new()));
 
         assert!(eventually(|| recorder.window_count() == 1));
         assert_eq!(
             recorder.frames(),
-            vec![ChannelFrame::new(FrameKind::Bell, 1, Vec::new())]
+            vec![Frame::new(FrameKind::Bell, StreamId(1), Vec::new())]
         );
     }
 
@@ -276,17 +274,25 @@ mod tests {
     fn shutdown_delivers_what_the_window_still_holds() {
         let recorder = Recorder::default();
         let mut dispatcher = Dispatcher::spawn(recorder.clone());
-        dispatcher.send(ChannelFrame::new(FrameKind::Output, 1, b"tail".as_slice()));
+        dispatcher.send(Frame::new(
+            FrameKind::Output,
+            StreamId(1),
+            b"tail".as_slice(),
+        ));
         dispatcher.shutdown();
 
         assert_eq!(
             recorder.frames(),
-            vec![ChannelFrame::new(FrameKind::Output, 1, b"tail".as_slice())],
+            vec![Frame::new(
+                FrameKind::Output,
+                StreamId(1),
+                b"tail".as_slice()
+            )],
             "a dispatcher that stops must flush, not discard"
         );
         // Shutting down twice is not an error, because Drop calls it again.
         dispatcher.shutdown();
-        assert!(!dispatcher.send(ChannelFrame::new(FrameKind::Bell, 1, Vec::new())));
+        assert!(!dispatcher.send(Frame::new(FrameKind::Bell, StreamId(1), Vec::new())));
     }
 
     #[test]
@@ -294,7 +300,11 @@ mod tests {
         let recorder = Recorder::default();
         {
             let dispatcher = Dispatcher::spawn(recorder.clone());
-            dispatcher.send(ChannelFrame::new(FrameKind::Output, 2, b"bye".as_slice()));
+            dispatcher.send(Frame::new(
+                FrameKind::Output,
+                StreamId(2),
+                b"bye".as_slice(),
+            ));
         }
         assert_eq!(recorder.frames().len(), 1);
     }

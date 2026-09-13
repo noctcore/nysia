@@ -11,6 +11,7 @@
 //! the daemon or be authoritative about anything it says.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::time::Duration;
 
 use nysia_proto::handshake::{
     ClientId, ClientRole, DaemonIdentity, HelloRequest, HelloResponse, RejectReason,
@@ -25,8 +26,41 @@ use super::DaemonError;
 /// a named pipe opened as a file on Windows, a `UnixStream` elsewhere — and every layer
 /// above only ever reads and writes. Making the whole client generic over the socket would
 /// spread `#[cfg]` through code that has no platform opinion.
-pub trait Socket: Read + Write + Send {}
-impl<T: Read + Write + Send> Socket for T {}
+pub trait Socket: Read + Write + Send {
+    /// Ask that a read give up after `timeout` instead of blocking indefinitely.
+    ///
+    /// The output reader owns the only handle to its socket, so nothing outside can
+    /// interrupt a read in progress; a deadline is what lets it notice a stop signal against
+    /// a peer that has gone silent without closing.
+    ///
+    /// **Best effort, and honestly so.** A Win32 named pipe opened as a file has no
+    /// equivalent of `SO_RCVTIMEO` — the timeouts in `CreateNamedPipe` belong to the server
+    /// end — so the Windows implementation accepts the request and does nothing. Correctness
+    /// does not rest on it: the reader ends on EOF when the daemon goes, and nothing waits
+    /// for that thread. See `daemon::stream`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the platform said, for a socket that supports deadlines and refused one.
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()>;
+}
+
+#[cfg(windows)]
+impl Socket for std::fs::File {
+    fn set_read_timeout(&self, _timeout: Option<Duration>) -> std::io::Result<()> {
+        // Deliberately a no-op — see the trait docs. Reporting success for something not
+        // done is the lesser evil against an error the caller could only ignore, and the
+        // reader is written not to need it.
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+impl Socket for std::os::unix::net::UnixStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        std::os::unix::net::UnixStream::set_read_timeout(self, timeout)
+    }
+}
 
 /// Where this build expects to find the daemon.
 ///
@@ -71,6 +105,36 @@ pub fn endpoint() -> Result<String, DaemonError> {
     }
 }
 
+/// Cap what a pipe server may do with this process's identity: check it, never wear it.
+///
+/// `SecurityIdentification` shifted into the flag position `CreateFile` wants, as
+/// `winbase.h` defines `SECURITY_IDENTIFICATION`. Spelled here rather than imported because
+/// the `windows` crate in `[workspace.dependencies]` does not enable the feature that
+/// carries it, and adding one would be an edit to a coordinator-owned file for a single
+/// `u32`.
+///
+/// ## Why it is set
+///
+/// Rust's own documentation for `OpenOptionsExt::security_qos_flags` says it "should be
+/// specified when opening a named pipe, to control to which degree a server process can act
+/// on behalf of a client process", and that without it "a malicious program can gain the
+/// elevated privileges of a privileged Rust process ... by tricking it into opening a named
+/// pipe". That is not hypothetical here: the daemon's endpoint is a **fixed, predictable
+/// name**, and any local process may create a pipe of that name *before* the real daemon
+/// does. The owner-only ACL §3.1 puts on the daemon's pipe protects the daemon's pipe — it
+/// cannot protect a name nobody has claimed yet.
+///
+/// With the default flags a squatter that wins that race gets `SecurityImpersonation` when
+/// this process connects, and can then act with this user's token. With
+/// `SecurityIdentification` it can learn who connected and nothing more. The connection
+/// still fails — the handshake refuses a peer that cannot speak the protocol — but it fails
+/// without having handed anything away first.
+///
+/// `security_qos_flags` sets `SECURITY_SQOS_PRESENT` itself, so the level below is the whole
+/// declaration.
+#[cfg(windows)]
+const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
+
 /// Open a socket to the daemon at `path`.
 ///
 /// # Errors
@@ -80,11 +144,14 @@ pub fn endpoint() -> Result<String, DaemonError> {
 pub fn open(path: &str) -> Result<Box<dyn Socket>, DaemonError> {
     #[cfg(windows)]
     {
+        use std::os::windows::fs::OpenOptionsExt;
+
         // A Win32 named pipe is opened like a file. `read(true).write(true)` is what makes
         // it the duplex handle the protocol needs rather than a one-way reader.
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
+            .security_qos_flags(SECURITY_IDENTIFICATION)
             .open(path)
             .map(|pipe| Box::new(pipe) as Box<dyn Socket>)
             .map_err(|error| DaemonError::Unreachable {
@@ -237,6 +304,12 @@ mod tests {
     impl Read for Scripted {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             self.incoming.read(buf)
+        }
+    }
+
+    impl Socket for Scripted {
+        fn set_read_timeout(&self, _timeout: Option<Duration>) -> std::io::Result<()> {
+            Ok(())
         }
     }
 
