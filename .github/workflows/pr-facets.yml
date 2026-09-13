@@ -29,7 +29,12 @@ jobs:
     name: type and priority
     runs-on: ubuntu-latest
     # Dependabot labels its own PRs and cannot be asked to pick a priority.
-    if: github.actor != 'dependabot[bot]'
+    #
+    # `pull_request.user.login`, deliberately not `github.actor`. This workflow triggers
+    # on `labeled`, and on that event `github.actor` is whoever applied the label — so a
+    # maintainer touching a label on a Dependabot PR would make the actor a human and the
+    # exemption would silently stop exempting. The author is the field that means author.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     permissions:
       contents: read
       pull-requests: read
