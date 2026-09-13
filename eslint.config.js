@@ -15,6 +15,11 @@ import tseslint from 'typescript-eslint';
  * `no-restricted-imports` lists the full set it means to enforce, including the ones it
  * inherited in spirit. `pnpm prove:eslint-bans` lints virtual files through this config and
  * fails if a carve-out block has dropped a ban.
+ *
+ * Every block matches JavaScript as well as TypeScript. They used to be `{ts,tsx}` only,
+ * which left a `.js` or `.jsx` file under `apps/web` covered by neither ESLint's ban nor
+ * lint-meta's line-anchored regex — a multi-line grouped import slipped through both.
+ * ESLint parses the module properly, so it is the right layer to close that at.
  */
 
 /**
@@ -79,7 +84,7 @@ export default tseslint.config(
   // apps/web — the browser bundle. Full ban set.
   // ---------------------------------------------------------------------------------
   {
-    files: ['apps/web/**/*.{ts,tsx}'],
+    files: ['apps/web/**/*.{ts,tsx,js,jsx,mjs,cjs}'],
     languageOptions: {
       globals: globals.browser,
       parserOptions: { ecmaFeatures: { jsx: true } },
@@ -106,7 +111,7 @@ export default tseslint.config(
   // into the bundle.
   // ---------------------------------------------------------------------------------
   {
-    files: ['apps/web/src/transport/**/*.{ts,tsx}'],
+    files: ['apps/web/src/transport/**/*.{ts,tsx,js,jsx,mjs,cjs}'],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -120,7 +125,12 @@ export default tseslint.config(
   // Tauri ban is repeated, because trap 10 means it would otherwise be gone.
   // ---------------------------------------------------------------------------------
   {
-    files: ['tools/**/*.ts', 'scripts/**/*.ts', '*.config.ts'],
+    files: [
+      'tools/**/*.{ts,js,mjs,cjs}',
+      'scripts/**/*.{ts,js,mjs,cjs}',
+      '*.config.{ts,js,mjs,cjs}',
+      'eslint.config.js',
+    ],
     languageOptions: {
       globals: globals.node,
     },
@@ -134,7 +144,7 @@ export default tseslint.config(
   // apps/desktop — the shell itself. Tauri is its whole job, so no import ban applies.
   // ---------------------------------------------------------------------------------
   {
-    files: ['apps/desktop/**/*.{ts,tsx}'],
+    files: ['apps/desktop/**/*.{ts,tsx,js,jsx,mjs,cjs}'],
     languageOptions: {
       globals: globals.browser,
     },
