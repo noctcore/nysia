@@ -51,10 +51,14 @@ export function ProjectsSidebar() {
               className="flex items-center px-2.5 py-1.5 font-medium"
             >
               {group}
+              {/* Registering a repository is daemon work that does not exist yet, so
+                  this says so rather than looking live and swallowing the click. */}
               <button
                 type="button"
+                disabled
                 aria-label={`Add a project to ${group}`}
-                className="text-fg3 hover:text-fg ml-auto cursor-pointer border-0 bg-transparent p-0 text-sm tracking-normal focus-visible:shadow-focus focus-visible:outline-none"
+                title="Adding a project arrives with the worktree manager in v0.4"
+                className="text-fg3 ml-auto cursor-not-allowed border-0 bg-transparent p-0 text-sm tracking-normal"
               >
                 {GLYPH.add}
               </button>

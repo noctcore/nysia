@@ -45,7 +45,15 @@ export function IconRail({ onOpenSettings }: { readonly onOpenSettings: () => vo
         className="mt-auto"
         onClick={onOpenSettings}
       />
-      <RailButton label="Help" glyph={GLYPH.help} active={false} onClick={() => {}} />
+      {/* Not built. The settings nav names a release for every entry it does not have
+          yet; a rail item that looks live and swallows the click is the same lie with
+          less text, so this one is disabled and its tooltip says when. */}
+      <RailButton
+        label="Help"
+        glyph={GLYPH.help}
+        active={false}
+        unavailable="Help arrives in a later version"
+      />
     </nav>
   );
 }
@@ -55,23 +63,31 @@ function RailButton({
   glyph,
   active,
   className = '',
+  unavailable,
   onClick,
 }: {
   readonly label: string;
   readonly glyph: string;
   readonly active: boolean;
   readonly className?: string;
-  readonly onClick: () => void;
+  /** When set, the item is not built yet; the text names the release that brings it. */
+  readonly unavailable?: string;
+  readonly onClick?: () => void;
 }) {
+  const disabled = unavailable !== undefined;
   return (
     <button
       type="button"
       aria-label={label}
-      title={label}
+      title={unavailable ?? label}
+      disabled={disabled}
       aria-current={active ? 'page' : undefined}
       onClick={onClick}
-      className={`grid size-8 cursor-pointer place-items-center rounded-control border-0 focus-visible:shadow-focus focus-visible:outline-none ${
-        active ? 'bg-acc14 text-acc' : 'text-fg2 hover:text-fg bg-transparent'
+      className={`grid size-8 place-items-center rounded-control border-0 focus-visible:shadow-focus focus-visible:outline-none ${
+        disabled
+          ? 'text-fg3 cursor-not-allowed bg-transparent'
+          : 'cursor-pointer ' +
+            (active ? 'bg-acc14 text-acc' : 'text-fg2 hover:text-fg bg-transparent')
       } ${className}`}
     >
       <span aria-hidden="true">{glyph}</span>

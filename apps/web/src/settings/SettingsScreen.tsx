@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import type { Project } from '../store/types';
 import { useSnapshot } from '../store/useStore';
@@ -13,6 +13,7 @@ import {
   type SettingsEntry,
   type SettingsEntryId,
 } from './nav';
+import { matches, matchingGroups } from './search';
 
 /**
  * Settings as a full-window mode (design-spec.md §5): 270px of nav, then content at
@@ -34,6 +35,21 @@ export function SettingsScreen() {
   const [selected, setSelected] = useState<SettingsEntryId | string>(
     DEFAULT_SETTINGS_ENTRY,
   );
+  const [query, setQuery] = useState('');
+
+  /*
+   * The search box used to be a `<div>` styled as an input — a control that looked live
+   * and was not. The nav beside it names a release for every entry it has not built, and
+   * the same standard applies here; the difference is that this one can simply be built,
+   * because the tree it filters is already in memory. Nothing about it is a daemon round
+   * trip, so there is nothing to defer.
+   */
+  const groups = useMemo(() => matchingGroups(query), [query]);
+  const matchedProjects = useMemo(
+    () => projects.filter((project) => matches(project.name, query)),
+    [projects, query],
+  );
+  const empty = groups.length === 0 && matchedProjects.length === 0;
 
   return (
     <div className="grid min-h-0 grid-cols-[var(--spacing-wordmark)_1fr]">
@@ -41,13 +57,24 @@ export function SettingsScreen() {
         aria-label="Settings"
         className="border-line bg-bg0 flex flex-col gap-0.5 overflow-y-auto border-r px-3 py-3.5"
       >
-        <div className="bg-bg2 text-fg3 mb-3 flex items-center gap-2 rounded-control px-3 py-2">
-          <span aria-hidden="true">{GLYPH.search}</span>
-          Search settings
-          <span className="ml-auto font-mono text-[10px]">{SETTINGS_SEARCH_HINT}</span>
-        </div>
+        <label className="bg-bg2 mb-3 flex items-center gap-2 rounded-control px-3 py-2 focus-within:shadow-focus">
+          <span aria-hidden="true" className="text-fg3">
+            {GLYPH.search}
+          </span>
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search settings"
+            aria-label="Search settings"
+            className="text-fg placeholder:text-fg3 w-full min-w-0 border-0 bg-transparent outline-none"
+          />
+          <span aria-hidden="true" className="text-fg3 font-mono text-[10px]">
+            {SETTINGS_SEARCH_HINT}
+          </span>
+        </label>
 
-        {SETTINGS_TREE.map((group) => (
+        {groups.map((group) => (
           <div key={group.label} className="contents">
             <SectionLabel tracking="nav" className="px-3 pt-3 pb-1.5">
               {group.label}
@@ -64,17 +91,25 @@ export function SettingsScreen() {
           </div>
         ))}
 
-        <SectionLabel tracking="nav" className="px-3 pt-3 pb-1.5">
-          Projects
-        </SectionLabel>
-        {projects.map((project) => (
-          <NavItem
-            key={project.id}
-            label={project.name}
-            selected={selected === project.id}
-            onSelect={() => setSelected(project.id)}
-          />
-        ))}
+        {matchedProjects.length === 0 ? null : (
+          <>
+            <SectionLabel tracking="nav" className="px-3 pt-3 pb-1.5">
+              Projects
+            </SectionLabel>
+            {matchedProjects.map((project) => (
+              <NavItem
+                key={project.id}
+                label={project.name}
+                selected={selected === project.id}
+                onSelect={() => setSelected(project.id)}
+              />
+            ))}
+          </>
+        )}
+
+        {empty ? (
+          <p className="text-fg3 px-3 py-2 text-xs">No settings match “{query}”.</p>
+        ) : null}
       </nav>
 
       <div className="flex max-w-[980px] min-h-0 flex-col gap-3.5 overflow-y-auto px-10 py-[22px]">
