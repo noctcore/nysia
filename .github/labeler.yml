@@ -94,19 +94,19 @@
 # The web app proper: everything under apps/web that is not generated bindings or the
 # transport, both of which are labelled above.
 #
-# Caveat worth knowing: the exclusion is evaluated over *all* the PR's files, so a PR
-# that touches App.tsx and a generated binding together gets `area:proto` and not
-# `area:web`. minimatch has no per-file AND to express this more tightly. Under-firing
-# on a mixed PR beats mislabelling every proto PR as web, and a human can add the
-# label — the labeler will not take it away again.
+# `all-globs-to-any-file` ANDs its globs against each file in turn, so this reads "some
+# changed file is under apps/web and is neither generated nor transport". That is a
+# per-file exclusion, and it is why this no longer carries the caveat it used to: the
+# earlier `- all:` plus `all-globs-to-all-files` form asked the question of the whole
+# pull request at once, so a single generated binding suppressed `area:web` for every
+# hand-written file beside it. A comment here once claimed minimatch had no way to
+# express a per-file AND. It does, and this is it.
 'area:web':
-  - all:
-      - changed-files:
-          - any-glob-to-any-file:
-              - 'apps/web/**'
-          - all-globs-to-all-files:
-              - '!apps/web/src/generated/**'
-              - '!apps/web/src/transport/**'
+  - changed-files:
+      - all-globs-to-any-file:
+          - 'apps/web/**'
+          - '!apps/web/src/generated/**'
+          - '!apps/web/src/transport/**'
 
 'area:build':
   - changed-files:
