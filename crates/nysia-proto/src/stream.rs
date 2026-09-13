@@ -30,28 +30,50 @@
 //!   and will each have their own id for it, and neither id means anything on the other's
 //!   connection. An id is a routing label, never an identity — that is what
 //!   [`SessionHandle`] and [`PaneKey`](crate::PaneKey) are for.
-//! - **Not reused while live.** The daemon does not hand out an id that is currently
-//!   attached. After a [`StreamDetach`] it may reuse one, which is the usual reason to
-//!   detach before attaching the same session again rather than relying on the id to change.
+//! - **Monotonic, and never reused.** The daemon hands out [`StreamId::FIRST`] and counts
+//!   up. A detached id is retired, not recycled. A `u32` gives four billion attaches for the
+//!   life of one connection, which nobody will exhaust, and reuse buys nothing but ambiguity
+//!   — see below, where not reusing is what makes the routing rules decidable at all.
 //! - **Never [`StreamId::RESERVED`].** Zero is not assigned, so a zero-filled header is
 //!   refused by the codec itself rather than routed somewhere.
 //!
-//! # A frame for an id that is not attached
+//! # A frame whose id has no live entry
 //!
-//! **Drop the connection.** Exactly what a malformed frame gets, and deliberately not
-//! something softer.
+//! Control and stream are separate sockets with no ordering between them, so a detach always
+//! races output already in flight: the daemon's last chunk tagged 7 can be on the wire while
+//! the client is processing the detach ack that removed 7 from its table. The race is
+//! unavoidable, which means the protocol has to say what the loser does — and "drop the
+//! connection" would punish thirty other sessions for one routine detach.
 //!
-//! The tempting alternative is to skip the frame and carry on, and it is wrong. The frame
-//! was still consumed from a length-prefixed stream, so the bytes after it are only in the
-//! right place if the length was right — and a peer that got the id wrong has already shown
-//! it disagrees about what is on this connection. Worse, a detach races against output
-//! already in flight, so "unknown id" would be a *routine* event under a skip policy and a
-//! genuine desynchronisation would hide inside the noise. Dropping the connection makes a
-//! disagreement loud and recoverable: the client reattaches and knows what it has.
+//! Because ids are never reused, the two cases are **distinguishable**, and that is the whole
+//! reason the no-reuse rule is worth its cost:
 //!
-//! The codec cannot enforce this — [`decode`](crate::frame::decode) is pure and holds no
-//! session table — so the router does. The rule lives here because it is a property of the
-//! protocol rather than of one implementation.
+//! | The id is | What it means | What to do |
+//! |---|---|---|
+//! | live in the router's table | a normal frame | route it |
+//! | below the next id to assign, with no live entry | it was assigned and has since been detached — provably the detach race | **discard the frame** |
+//! | at or beyond the next id to assign | never handed out on this connection — provably a desync or a protocol violation | **drop the connection** |
+//!
+//! [`StreamId::classify_unattached`] is that table as a function, so a router does not have
+//! to re-derive it. The discard case is bounded by the in-flight window — at most what §7.3
+//! allows unacknowledged — so it cannot run away; a peer that keeps sending on a retired id
+//! is spending its own credit and will stop when the window closes.
+//!
+//! An earlier draft of this module discarded *every* unroutable frame and worried, correctly,
+//! that doing so would hide a real desynchronisation inside the routine noise. That objection
+//! was fatal while ids could be recycled, because then a stale frame and a bogus one could
+//! carry the same number. With ids retired on detach the ambiguity is gone: the watermark
+//! separates them exactly, so one case can be tolerated and the other can be fatal.
+//!
+//! **The same three rules apply in the other direction.** A [`FrameKind::Credit`](crate::FrameKind::Credit) frame
+//! travelling daemon-ward carries a stream id in the same header and gets the same treatment
+//! — a grant for a freshly detached id is discarded, a grant for an id never assigned drops
+//! the connection. Flow control is not a special case, and a rule that held in only one
+//! direction would be one the two ends could disagree about.
+//!
+//! The codec cannot enforce any of this — [`decode`](crate::frame::decode) is pure and holds
+//! no router table or watermark — so the router does. The rules live here because they are
+//! properties of the protocol rather than of one implementation.
 
 use std::fmt;
 
@@ -79,11 +101,78 @@ impl StreamId {
     /// reader would reject.
     pub const RESERVED: Self = Self(0);
 
+    /// The first id a stream connection hands out.
+    ///
+    /// One, not zero, because zero is [`RESERVED`](Self::RESERVED). Ids count up from here
+    /// and are never reused, so this is also the watermark a fresh connection starts at:
+    /// every id is "never assigned" until something is.
+    pub const FIRST: Self = Self(1);
+
     /// The id as the bare number it is in the header.
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0
     }
+
+    /// The next id to hand out after this one, or `None` at the ceiling.
+    ///
+    /// `None` rather than wrapping: wrapping would silently reuse ids and collapse the
+    /// distinction the whole routing policy rests on. A connection that has attached four
+    /// billion sessions should be made to reconnect, which costs one handshake and restores
+    /// a watermark that means something.
+    #[must_use]
+    pub const fn next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(next) => Some(Self(next)),
+            None => None,
+        }
+    }
+
+    /// Whether this id was ever handed out on a connection whose next id is `next_to_assign`.
+    ///
+    /// Sound only because ids are never reused. With recycling this comparison would be
+    /// meaningless, which is the practical reason retirement is worth a monotonic counter.
+    #[must_use]
+    pub const fn was_assigned(self, next_to_assign: Self) -> bool {
+        self.0 < next_to_assign.0
+    }
+
+    /// What to do with a frame whose id the router has **no live entry** for.
+    ///
+    /// Check the router's table first; this answers only the miss. `next_to_assign` is the
+    /// id this connection would hand out next, which is the watermark that separates a
+    /// retired id from one that never existed.
+    #[must_use]
+    pub const fn classify_unattached(self, next_to_assign: Self) -> UnattachedFrame {
+        if self.was_assigned(next_to_assign) {
+            UnattachedFrame::Discard
+        } else {
+            UnattachedFrame::DropConnection
+        }
+    }
+}
+
+/// What a router does with a frame whose stream id has no live entry.
+///
+/// Two answers rather than one, and the difference is the point: a detach races output
+/// already in flight on a separate socket, so one of these is routine and bounded while the
+/// other means the two ends disagree about what is on the connection. See the module docs
+/// for why never reusing an id is what makes them tellable apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum UnattachedFrame {
+    /// The id was assigned and has since been detached. Drop the frame, keep the connection.
+    ///
+    /// Routine, and bounded by the in-flight window: a peer still sending on a retired id is
+    /// spending credit it will not get back, so the noise stops on its own.
+    Discard,
+    /// The id was never handed out here. Drop the connection.
+    ///
+    /// Not a race — there is no sequence of events in which a well-behaved peer names an id
+    /// the daemon has not yet minted — so it is the same class of failure as a malformed
+    /// frame and gets the same answer.
+    DropConnection,
 }
 
 impl fmt::Display for StreamId {
@@ -147,9 +236,77 @@ mod tests {
     }
 
     #[test]
-    fn zero_is_reserved_and_named_as_such() {
+    fn zero_is_reserved_and_allocation_starts_above_it() {
         assert_eq!(StreamId::RESERVED, StreamId(0));
         assert_eq!(StreamId::RESERVED.get(), 0);
+        assert_eq!(StreamId::FIRST, StreamId(1));
+        assert_ne!(StreamId::FIRST, StreamId::RESERVED);
+    }
+
+    #[test]
+    fn ids_count_up_and_stop_rather_than_wrapping() {
+        assert_eq!(StreamId::FIRST.next(), Some(StreamId(2)));
+        assert_eq!(StreamId(41).next(), Some(StreamId(42)));
+        // Wrapping would silently recycle ids and collapse the distinction every routing
+        // rule below rests on, so the ceiling is a hard stop.
+        assert_eq!(StreamId(u32::MAX).next(), None);
+    }
+
+    #[test]
+    fn a_retired_id_is_discarded_and_an_unminted_one_is_fatal() {
+        // The connection has handed out 1..=6 and would hand out 7 next.
+        let next = StreamId(7);
+
+        // The detach race: 3 was assigned, has been detached, and a frame for it is still in
+        // flight. Dropping the connection here would punish every other session on it.
+        assert_eq!(
+            StreamId(3).classify_unattached(next),
+            UnattachedFrame::Discard
+        );
+        assert_eq!(
+            StreamId(6).classify_unattached(next),
+            UnattachedFrame::Discard
+        );
+
+        // 7 has not been minted yet, so no well-behaved peer can name it. That is a desync,
+        // and it gets the malformed-frame answer.
+        assert_eq!(
+            StreamId(7).classify_unattached(next),
+            UnattachedFrame::DropConnection
+        );
+        assert_eq!(
+            StreamId(4_000_000_000).classify_unattached(next),
+            UnattachedFrame::DropConnection
+        );
+
+        assert!(StreamId(6).was_assigned(next));
+        assert!(!StreamId(7).was_assigned(next));
+    }
+
+    #[test]
+    fn a_fresh_connection_has_assigned_nothing() {
+        // Before the first attach the watermark is FIRST, so every id is "never minted" —
+        // including FIRST itself. A frame arriving before any attach is a desync, not a race.
+        let next = StreamId::FIRST;
+        assert!(!StreamId::FIRST.was_assigned(next));
+        assert_eq!(
+            StreamId::FIRST.classify_unattached(next),
+            UnattachedFrame::DropConnection
+        );
+    }
+
+    #[test]
+    fn the_routing_decision_names_itself_on_the_wire() {
+        // Exported so a client can log or report the decision in the daemon's own words
+        // rather than inventing a second vocabulary for it.
+        assert_eq!(
+            serde_json::to_string(&UnattachedFrame::Discard).unwrap(),
+            "\"discard\""
+        );
+        assert_eq!(
+            serde_json::to_string(&UnattachedFrame::DropConnection).unwrap(),
+            "\"drop_connection\""
+        );
     }
 
     #[test]
