@@ -3,10 +3,10 @@
 /**
  * What went wrong, in a form a caller can branch on.
  *
- * Open rather than closed. A client that meets a code a newer daemon added must still be
- * able to read the rest of the envelope — the message and the next steps are the parts
- * that actually help — so an unrecognised code lands in [`ErrorCode::Other`] instead of
- * failing the whole frame. An error that cannot be parsed is the worst possible place to
- * be strict.
+ * Open rather than closed. A client that meets a code a newer daemon added must
+ * still be able to read the rest of the envelope — the message and the next steps
+ * are the parts that actually help — so an unrecognised code lands in
+ * [`ErrorCode::Other`] instead of failing the whole frame. An error that cannot be
+ * parsed is the worst possible place to be strict.
  */
 export type ErrorCode = "unknown_session" | "invalid_request" | "unsupported" | "path_refused" | "spawn_failed" | "session_busy" | "internal" | (string & {});

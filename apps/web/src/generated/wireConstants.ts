@@ -5,6 +5,7 @@
 // Regenerate with: cd crates/nysia-proto && cargo test export_bindings
 import type { CreditWindow } from "./CreditWindow";
 import type { FrameKind } from "./FrameKind";
+import type { RejectReason } from "./RejectReason";
 
 /**
  * The protocol version this build speaks and sends in its `hello`.
@@ -84,3 +85,17 @@ export const CREDIT_WINDOW_DEFAULT = {
   ackBatch: 196608,
   chunk: 49152,
 } as const satisfies CreditWindow;
+
+/**
+ * A `RejectReason` as it may *arrive*, rather than as this build writes it.
+ *
+ * Rust absorbs an unrecognised `kind` into `RejectReason::Unknown`, so the union ts-rs
+ * exports is closed — it describes what this build produces. A daemon newer than this one
+ * can send a kind that is in neither list, and an exhaustive `switch` over the closed type
+ * with an `assertNever` default would compile and then throw the first time that happened.
+ *
+ * Use this wherever a reason came from a peer. The open tail makes the default branch a
+ * type error until it is handled, which is the whole point: the failure moves from runtime
+ * to the compiler.
+ */
+export type OpenRejectReason = RejectReason | { "kind": string & {} };

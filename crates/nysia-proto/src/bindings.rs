@@ -1,9 +1,13 @@
-//! The value half of the TypeScript bindings.
+//! The half of the TypeScript bindings ts-rs cannot express.
 //!
-//! ts-rs exports *types*. It has no mechanism for exporting a *value*, and parts of this
-//! wire are numeric: the frame kind bytes, the header size, the payload ceiling, the
-//! protocol version, the credit-window defaults. A TypeScript decoder needs those numbers
-//! at runtime.
+//! Two things live here. Most of it is **values**: ts-rs exports *types*, and it has no
+//! mechanism for exporting a value, but parts of this wire are numeric — the frame kind
+//! bytes, the header size, the payload ceiling, the protocol version, the credit-window
+//! defaults. A TypeScript decoder needs those numbers at runtime.
+//!
+//! The other thing is **[`OPEN_REJECT_REASON`]**, a type rather than a value, and it is
+//! here for the same reason: ts-rs cannot widen a tagged enum. See that constant for the
+//! five routes that were tried and why each one is a dead end.
 //!
 //! The alternatives are both worse. Hand-writing them in the transport layer is five magic
 //! numbers copied across a language boundary — exactly the drift D-13 exists to prevent,
@@ -11,9 +15,9 @@
 //! of failing to compile. Sending them over the wire cannot work for the frame kinds at
 //! all: you need the kind byte to read the frame that would have carried it.
 //!
-//! So this module renders the constants the rest of the crate already defines into one
-//! TypeScript module, and a test writes it beside the ts-rs output. Three things make that
-//! a single source of truth rather than a second one:
+//! So this module renders both — the constants the rest of the crate already defines, and
+//! the one union ts-rs cannot widen — into one TypeScript module, and a test writes it
+//! beside the ts-rs output. Three things make that a single source of truth, not a second:
 //!
 //! - Every number comes from the same Rust definition the daemon uses. Nothing here
 //!   restates a value.
@@ -53,6 +57,31 @@ const CREDIT_WINDOW_FIELDS: [(&str, u32); 7] = [
 /// in the directory listing and in an import.
 pub const CONSTANTS_FILE_NAME: &str = "wireConstants.ts";
 
+/// The open form of `RejectReason`, appended to the generated module.
+///
+/// `RejectReason` is open in Rust — [`crate::RejectReason::Unknown`] absorbs any `kind` a
+/// newer daemon sends — but the union ts-rs exports is closed, which is the TypeScript twin
+/// of the bug that valve fixed. A web client that writes an exhaustive `switch` with an
+/// `assertNever` default compiles today and throws at runtime the first time a daemon it
+/// does not recognise refuses it.
+///
+/// It is here rather than on `RejectReason` itself because ts-rs 12 cannot widen a tagged
+/// enum, and every route was tried:
+///
+/// - a container `#[ts(type = …)]` is rejected outright — both `tag` and `rename_all` are
+///   "not compatible with `type`", and an internally tagged enum needs both;
+/// - a variant-level `#[ts(type = …)]` is parsed and then silently ignored;
+/// - an extra open variant marked `#[serde(skip)]` is honoured by ts-rs and omitted;
+/// - a field-level override on `HelloRejected::reason` compiles but drops the `import type`
+///   for `RejectReason`, so the file it writes does not typecheck;
+/// - `concat!` in the attribute fails with "expected literal", so the union cannot be
+///   assembled from the variant list either.
+///
+/// So the closed union stays, describing exactly what *this build writes*, and the open one
+/// is generated beside it describing what *may arrive*. Read a reason that came from a peer
+/// through this; the closed type is right for one this build constructed itself.
+const OPEN_REJECT_REASON: &str = "OpenRejectReason";
+
 /// Render the numeric wire constants as a TypeScript module.
 ///
 /// Pure: it returns the text and writes nothing. The test below is what puts it on disk,
@@ -81,6 +110,7 @@ pub fn typescript_constants() -> String {
 // Regenerate with: cd crates/nysia-proto && cargo test export_bindings
 import type {{ CreditWindow }} from \"./CreditWindow\";
 import type {{ FrameKind }} from \"./FrameKind\";
+import type {{ RejectReason }} from \"./RejectReason\";
 
 /**
  * The protocol version this build speaks and sends in its `hello`.
@@ -143,11 +173,26 @@ export const MAX_FRAME_PAYLOAD_BYTES = {max_frame_payload_bytes};
  */
 export const CREDIT_WINDOW_DEFAULT = {{
 {window}}} as const satisfies CreditWindow;
+
+/**
+ * A `RejectReason` as it may *arrive*, rather than as this build writes it.
+ *
+ * Rust absorbs an unrecognised `kind` into `RejectReason::Unknown`, so the union ts-rs
+ * exports is closed — it describes what this build produces. A daemon newer than this one
+ * can send a kind that is in neither list, and an exhaustive `switch` over the closed type
+ * with an `assertNever` default would compile and then throw the first time that happened.
+ *
+ * Use this wherever a reason came from a peer. The open tail makes the default branch a
+ * type error until it is handled, which is the whole point: the failure moves from runtime
+ * to the compiler.
+ */
+export type {open} = RejectReason | {{ \"kind\": string & {{}} }};
 ",
         protocol_version = PROTOCOL_VERSION.get(),
         min_attachable = MIN_ATTACHABLE_PROTOCOL_VERSION.get(),
         frame_header_bytes = FRAME_HEADER_BYTES,
         max_frame_payload_bytes = MAX_FRAME_PAYLOAD_BYTES,
+        open = OPEN_REJECT_REASON,
     )
 }
 
@@ -213,6 +258,27 @@ mod tests {
         // zero-based table would compile, typecheck, and misroute every frame.
         assert!(!generated.contains("\"output\": 0,"));
         assert!(generated.contains("\"output\": 1,"));
+    }
+
+    #[test]
+    fn the_generated_module_opens_the_reject_reason_union() {
+        // The TypeScript twin of the `RejectReason::Unknown` valve. Rust absorbs an
+        // unrecognised kind; the exported union cannot, so a web client's exhaustive switch
+        // would compile and then throw the first time a newer daemon refused it.
+        let generated = typescript_constants();
+        assert!(
+            generated.contains(&format!(
+                "export type {OPEN_REJECT_REASON} = RejectReason | {{ \"kind\": string & {{}} }};"
+            )),
+            "the open reject reason is missing from the generated module"
+        );
+        // It is a type alias over the ts-rs type, not a copy of it, so the variant shapes
+        // and their doc comments stay derived and cannot drift from the Rust enum.
+        assert!(generated.contains("import type { RejectReason } from \"./RejectReason\";"));
+        assert!(
+            !generated.contains("\"kind\": \"unauthorized\""),
+            "the open form must alias RejectReason, never restate its variants"
+        );
     }
 
     #[test]
