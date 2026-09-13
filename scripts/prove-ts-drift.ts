@@ -11,6 +11,11 @@
  * exhaustive `match` in its `Display` impl and turn a drift proof into a compile-error
  * proof.
  *
+ * The probe exports to a **subdirectory**. ts-rs lets any type pick its own path with
+ * `#[ts(export_to = "...")]`, and a guard that only lists the top level would stop
+ * comparing every nested binding in both directions without saying so. Exporting the probe
+ * to `drift_probe/` means this proof fails unless the guard actually recurses.
+ *
  * Failures are raised as exceptions rather than `process.exit`, because `exit` terminates
  * without unwinding and would leave `identity.rs` mutated on disk. Everything that can
  * fail runs inside a `try` whose `finally` writes the original bytes back.
@@ -27,6 +32,14 @@ const identity = join(repoRoot, 'crates', 'nysia-proto', 'src', 'identity.rs');
 const driftGuard = join(repoRoot, 'scripts', 'ts-drift.ts');
 
 /**
+ * The nested path the probe must appear at, as the guard reports it.
+ *
+ * Not exported: importing this module would run the proof. The restore test spawns the
+ * script as a child process and keeps its own copy of this string.
+ */
+const PROBE_BINDING = 'drift_probe/DriftProbe.ts';
+
+/**
  * A test seam, read by `scripts/prove-ts-drift.restore.test.ts`.
  *
  * Set to `after-mutation` to make the proof fail on purpose immediately after it writes
@@ -39,7 +52,7 @@ const PROBE = `
 /// Temporary type appended by \`pnpm prove:ts-drift\`. If you are reading this in a commit,
 /// the proof script died between mutating the file and restoring it — delete this block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
-#[ts(export)]
+#[ts(export, export_to = "drift_probe/")]
 pub struct DriftProbe {
     /// Present only so the exported type has a field.
     pub probe: u32,
@@ -104,6 +117,12 @@ try {
         'which would make this proof pass for the wrong reason.',
     );
   }
+  if (!after.output.includes(PROBE_BINDING)) {
+    fail(
+      `the guard tripped but never named ${PROBE_BINDING}. It is comparing the top level ` +
+        'only, so every nested binding is silently outside the diff.',
+    );
+  }
 } catch (error) {
   if (!(error instanceof ProofFailure)) throw error;
   failure = error.message;
@@ -125,4 +144,7 @@ if (restored.status !== 0) {
   process.exit(1);
 }
 
-process.stdout.write('prove:ts-drift OK — the guard trips on drift and clears when fixed\n');
+process.stdout.write(
+  `prove:ts-drift OK — the guard trips on drift, sees ${PROBE_BINDING} nested, and clears ` +
+    'when fixed\n',
+);
