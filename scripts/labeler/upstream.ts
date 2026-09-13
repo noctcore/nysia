@@ -11,9 +11,33 @@
  * `@actions/github` for logging and API access, neither of which this repository has or
  * wants. Only the pure decision logic is reproduced, and it is reproduced structurally —
  * the same functions, the same order of checks, the same early returns — so that a reader
- * can diff it against upstream. `js-yaml` and `minimatch` are pinned to the versions the
- * action itself depends on (`js-yaml@4.1.0`, `minimatch@9.0.5`, from its package.json at
- * the same commit), because the parse and the glob semantics are the behaviour under test.
+ * can diff it against upstream.
+ *
+ * `js-yaml@4.1.0` and `minimatch@9.0.3` are pinned to the versions the action's own
+ * **lockfile** resolves at this commit, which is what its bundle ships. Its `package.json`
+ * declares a caret range for minimatch, so the manifest alone does not pin it; the lockfile
+ * is the thing to check this against. The parse and the glob semantics are the behaviour
+ * under test, so these two are pinned exactly and not by range.
+ *
+ * DEVIATIONS FROM UPSTREAM. Two are cosmetic and cannot change a result:
+ * `m.toUpperCase().charAt(1)` for `m.toUpperCase()[1]`, and a `find` bound to a local
+ * instead of a `findIndex` plus an index access — both forced by this repository's
+ * `noUncheckedIndexedAccess`, both noted at the line.
+ *
+ * Three are deliberate and DO change a result, every one of them in the fail-closed
+ * direction. Upstream's behaviour in each of these cases is to carry on with a label that
+ * can never be applied — a dead rule that reads as working config — and this file throws
+ * instead, so a config the action would quietly ignore is a loud error here:
+ *
+ *   1. `changed-files:` that upstream would swallow (a mapping, an empty list, a scalar
+ *      with no length). Upstream returns an empty match config. See below.
+ *   2. An unrecognised top-level key under a label. Upstream logs it with `core.info` and
+ *      continues, leaving the label with no conditions. See `getLabelConfigMapFromObject`.
+ *   3. `head-branch` / `base-branch`, which are not transcribed at all. See `toMatchConfig`.
+ *
+ * A reader diffing this against upstream will find those three; they are here so that the
+ * diff is expected rather than a surprise. None can make this file accept a config the
+ * action would reject.
  *
  * `PINNED_SHA` below is checked against `.github/workflows/pr-triage.yml` by
  * `labeler.test.ts`. Bumping the action without revisiting this file fails that test,
@@ -94,8 +118,39 @@ type Unknown = Record<string, unknown>;
  * decided by `any:`/`all:` above them — not by their sharing a mapping.
  */
 function toChangedFilesMatchConfig(config: Unknown): BaseMatchConfig {
+  // The key being absent is ordinary — an entry can carry other conditions — and upstream
+  // and this agree that it contributes nothing.
+  if (!('changed-files' in config)) return {};
+
   const raw = config['changed-files'];
-  if (raw === undefined || raw === null || (Array.isArray(raw) && raw.length === 0)) return {};
+
+  // DEVIATION (fail-closed). Upstream guards with `!config['changed-files'] ||
+  // !config['changed-files'].length`. A YAML *mapping* is truthy and has no `length`, so
+  // upstream silently returns an empty match config and the label is never applied — a
+  // dead rule that looks like working config. An earlier version of this file rejected
+  // only undefined, null and the empty array, so a mapping fell through and was evaluated
+  // normally: writing `area:web`'s globs under a mapping instead of a list left this
+  // suite 31 of 31 green while the real action labelled nothing.
+  //
+  // Throwing rather than mirroring the swallow is the deliberate choice. Mirroring would
+  // make the exact-set assertions go red, which is enough for a label this test covers;
+  // throwing also catches the case for a label it does not, and turns "this rule quietly
+  // does nothing" into a message naming the label. It can only be more strict than the
+  // action, never less.
+  const length = (raw as { length?: unknown } | null | undefined)?.length;
+  if (!raw || length === undefined || length === 0) {
+    const describe = (): string => {
+      if (Array.isArray(raw)) return 'an empty list';
+      if (raw === null || raw === undefined) return 'empty';
+      if (typeof raw === 'object') return 'a mapping';
+      return `a ${typeof raw}`;
+    };
+    throw new UnsupportedLabelerConfig(
+      `A "changed-files:" value must be a non-empty list of glob-key mappings; this one is ${describe()}. ` +
+        'actions/labeler silently treats it as no condition at all, so the label would never ' +
+        'be applied and nothing would say so. Write it as a list: "- any-glob-to-any-file: [...]".',
+    );
+  }
 
   const changedFilesConfigs: unknown[] = Array.isArray(raw) ? raw : [raw];
   const valid: ChangedFilesGlobPatternsConfig[] = [];
@@ -181,7 +236,15 @@ export function getLabelConfigMapFromObject(configObject: unknown): Map<string, 
             matchConfigs.push({ any: [newMatchConfig] });
           }
         } else {
-          throw new UnsupportedLabelerConfig(`An unknown config option was under ${label}: ${key}`);
+          // DEVIATION (fail-closed), deviation 2 of the three listed in the file header.
+          // Upstream calls `core.info` here and carries on, which leaves the label with no
+          // conditions at all — so a typo in a key name produces a rule that can never
+          // apply and says nothing. A misspelled key is never intentional, and a loud
+          // error costs one line to fix where a dead rule costs a release to notice.
+          throw new UnsupportedLabelerConfig(
+            `An unknown config option was under ${label}: ${key}. actions/labeler would log ` +
+              'this and continue, leaving the label with no conditions and no warning.',
+          );
         }
       }
     }
