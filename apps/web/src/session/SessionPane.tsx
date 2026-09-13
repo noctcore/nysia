@@ -1,18 +1,17 @@
 import { useSnapshot } from '../store/hooks';
+import { TerminalView } from '../transport/TerminalView';
 import { GLYPH } from '../ui/glyphs';
 
 /**
- * The main pane: a placeholder terminal surface.
+ * The main pane.
  *
- * Deliberately not xterm.js. The terminal is W5's — the WebGL renderer pool, the
- * multiplexed binary Channel and the ≥ 1 KiB coalescing all belong with the transport, and
- * a second surface built here would be a second thing to delete. What this establishes is
- * the geometry around it: `0 24px` of padding, Fira Code at 12.5px/1.65, and a prompt line
- * carrying the accent focus ring so the pane is already the right shape when the real
- * surface drops in.
+ * The geometry is this file's: `0 24px` of padding, Fira Code at 12.5px/1.65, and a prompt
+ * line carrying the accent focus ring. The terminal inside it is `TerminalView` from
+ * `src/transport`, which owns the renderer, the WebGL pool and the acknowledgement of
+ * rendered bytes — none of which a component should know about.
  *
- * Terminal state lives in Rust (D-7) — this pane will be a display cache, never an
- * authority, which is why it holds no scrollback of its own even as a placeholder.
+ * Terminal state lives in Rust (D-7): this pane is a display cache, never an authority,
+ * which is why it holds no scrollback of its own.
  */
 export function SessionPane() {
   const { tabs, activeTab } = useSnapshot();
@@ -22,14 +21,7 @@ export function SessionPane() {
     <div className="flex min-h-0 flex-col px-6">
       <div className="text-term flex min-h-0 flex-1 flex-col gap-4 overflow-hidden pt-4 font-mono">
         {tab ? (
-          <div className="border-line bg-bg0 text-fg2 rounded-control border p-3.5 whitespace-pre-wrap">
-            <span className="text-fg">$</span> {tab.title}
-            {'\n'}
-            <span className="text-fg3">
-              Terminal surface lands with the transport in wave 2. Pane {tab.paneKey} is
-              held open by the daemon either way — closing this window does not stop it.
-            </span>
-          </div>
+          <TerminalView />
         ) : (
           <div className="text-fg3 m-auto text-center">
             No session open. Use {GLYPH.add} in the title bar to start an agent or a shell.

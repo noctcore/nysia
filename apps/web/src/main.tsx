@@ -2,8 +2,8 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import { App } from './App';
-import { createMockStore } from './store/mock/MockStore';
 import { StoreProvider } from './store/StoreProvider';
+import { createDaemonStore } from './transport';
 import { ThemeProvider } from './theme/ThemeProvider';
 import './index.css';
 
@@ -13,13 +13,14 @@ if (!container) {
 }
 
 /*
- * The one line wave 2 changes.
+ * The line wave 2 changed.
  *
- * `createMockStore()` becomes the daemon-backed provider from `src/transport`, and nothing
- * else in `apps/web` moves: every component reads session, project and tab data through the
- * `Store` interface, and both providers satisfy the same contract in `store/storeContract.ts`.
+ * The mock became the daemon-backed provider from `src/transport`, and nothing else in
+ * `apps/web` moved: every component reads session, project and tab data through the `Store`
+ * interface, and both providers satisfy the same contract in `store/storeContract.ts`. The
+ * mock is still there and still tested, for anyone working on the chrome without a daemon.
  */
-const store = createMockStore();
+const store = createDaemonStore();
 
 createRoot(container).render(
   <StrictMode>
