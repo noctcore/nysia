@@ -90,6 +90,22 @@ describe('the window', () => {
     }
   });
 
+  it('ships no affordance that looks live and does nothing', () => {
+    // Every unbuilt settings entry names a release; the rest of the chrome is held to the
+    // same standard. Help is the only rail item that is not built, so it is the only one
+    // disabled — and its tooltip, not its label, is what says when.
+    const help = tagContaining(app, 'aria-label="Help"');
+    expect(help).toContain('disabled');
+    expect(help).toMatch(/title="[^"]*later version[^"]*"/);
+
+    const addProject = tagContaining(app, 'aria-label="Add a project');
+    expect(addProject).toContain('disabled');
+    expect(addProject).toMatch(/title="[^"]+"/);
+
+    const live = [...app.matchAll(/<button(?![^>]*disabled)[^>]*>/g)];
+    expect(live.length).toBeGreaterThan(5);
+  });
+
   it('pushes Settings and Help below the three rail destinations', () => {
     for (const label of ['Session', 'Tasks', 'History', 'Settings', 'Help']) {
       expect(app, label).toContain(`aria-label="${label}"`);
@@ -122,6 +138,12 @@ describe('the window', () => {
 });
 
 describe('settings', () => {
+  it('gives the search box a real input rather than a div that looks like one', () => {
+    const settings = render(createElement(SettingsScreen));
+    expect(settings).toContain('aria-label="Search settings"');
+    expect(settings).toMatch(/<input[^>]*placeholder="Search settings"/);
+  });
+
   it('renders the whole nav tree, including what v0.1 does not build', () => {
     const settings = render(createElement(SettingsScreen));
     for (const entry of ['Agents', 'Orchestration', 'General', 'Appearance', 'Terminal']) {
@@ -155,4 +177,10 @@ function between(source: string, from: string, to: string): string {
   const start = source.indexOf(from);
   const end = source.indexOf(to, start);
   return source.slice(start, end === -1 ? undefined : end);
+}
+
+/** The whole opening tag that carries `marker`, however its attributes are ordered. */
+function tagContaining(source: string, marker: string): string {
+  const at = source.indexOf(marker);
+  return source.slice(source.lastIndexOf('<', at), source.indexOf('>', at) + 1);
 }
