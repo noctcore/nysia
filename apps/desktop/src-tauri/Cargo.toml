@@ -1,0 +1,33 @@
+[package]
+name = "nysia-desktop"
+description = "The Nysia window: a Tauri v2 client of the nysiad socket, deliberately thin."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nysia-desktop"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+nysia-core = { workspace = true }
+nysia-proto = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+# Set by `tauri build` for production bundles: the webview then loads the frontend through
+# the custom protocol instead of a dev server. DO NOT REMOVE.
+custom-protocol = ["tauri/custom-protocol"]
