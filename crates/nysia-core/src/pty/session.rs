@@ -259,6 +259,13 @@ impl PtySession {
             .map(|arg| arg.to_string_lossy().into_owned())
             .unwrap_or_default();
 
+        // The Job Object is created *before* the child exists. Creating it afterwards put a
+        // fallible step inside the window where an error unwinds through `pair.master`, and
+        // dropping the master runs `ClosePseudoConsole`, which blocks until the client exits
+        // — with no reader thread in existence to drain its flush (traps register #6).
+        #[cfg(windows)]
+        let job = teardown::JobObject::new().map_err(SpawnError::Confinement)?;
+
         let pair = native_pty_system()
             .openpty(pty_size(spec.size))
             .map_err(|err| SpawnError::OpenPty(err.to_string()))?;
@@ -284,30 +291,49 @@ impl PtySession {
         drop(pair.slave);
 
         let pid = child.process_id();
-
-        #[cfg(windows)]
-        let job = {
-            let job = teardown::JobObject::new().map_err(SpawnError::Confinement)?;
-            // Without the handle there is no way to put the child in the job, and a session
-            // with no tree-kill is worse than one that failed to start.
-            let handle = child.as_raw_handle().ok_or_else(|| {
-                SpawnError::Confinement(std::io::Error::other(
-                    "the spawned child exposed no process handle",
-                ))
-            })?;
-            job.assign(handle).map_err(SpawnError::Confinement)?;
-            job
-        };
-
         let killer = child.clone_killer();
+        // Past this point the child is running, so every remaining failure kills it before
+        // unwinding. A bare `?` here would drop `pair.master` with no reader thread yet,
+        // which is the deadlock above, and would leave the child behind as a certain orphan.
+        let mut unwind = child.clone_killer();
+
+        // Assignment can only follow the spawn — `portable-pty`'s attribute list does not
+        // expose `PROC_THREAD_ATTRIBUTE_JOB_LIST` — so this one step stays in the window.
+        #[cfg(windows)]
+        {
+            let assigned = child
+                .as_raw_handle()
+                .ok_or_else(|| {
+                    SpawnError::Confinement(std::io::Error::other(
+                        "the spawned child exposed no process handle",
+                    ))
+                })
+                .and_then(|handle| job.assign(handle).map_err(SpawnError::Confinement));
+            if let Err(err) = assigned {
+                let _ = unwind.kill();
+                return Err(err);
+            }
+        }
+
         let exit = Arc::new(ExitSlot::default());
         let eof = Arc::new(AtomicBool::new(false));
         let closing = Arc::new(AtomicBool::new(false));
 
         let (tx, rx) = sync_channel::<Vec<u8>>(spec.output_queue.max(1));
-        let reader_thread = spawn_reader(reader, tx, Arc::clone(&eof), Arc::clone(&closing))
-            .map_err(SpawnError::Thread)?;
-        let waiter_thread = spawn_waiter(child, Arc::clone(&exit)).map_err(SpawnError::Thread)?;
+        let reader_thread = match spawn_reader(reader, tx, Arc::clone(&eof), Arc::clone(&closing)) {
+            Ok(handle) => handle,
+            Err(err) => {
+                let _ = unwind.kill();
+                return Err(SpawnError::Thread(err));
+            }
+        };
+        let waiter_thread = match spawn_waiter(child, Arc::clone(&exit)) {
+            Ok(handle) => handle,
+            Err(err) => {
+                let _ = unwind.kill();
+                return Err(SpawnError::Thread(err));
+            }
+        };
 
         let session = Self {
             handle: SessionHandle::generate(),
@@ -449,10 +475,6 @@ impl PtySession {
         }
         #[cfg(unix)]
         {
-            // The child called `setsid`, so its pid is both its process-group id and its
-            // session id. The group catches the shell; the session sweep catches the `&`
-            // jobs an interactive shell put into groups of their own, which is the macOS
-            // answer to having no subreaper (§7.1).
             let Some(leader) = self.pid else {
                 let _ = self
                     .killer
@@ -461,18 +483,32 @@ impl PtySession {
                     .kill();
                 return;
             };
+            // Capture the tree while the shell is still holding it together: once the leader
+            // dies its children reparent away and there is nothing left to enumerate.
+            let tree = teardown::collect_tree(leader);
+            let leader_pid = i32::try_from(leader).unwrap_or(-1);
+            let jobs: Vec<i32> = tree
+                .iter()
+                .copied()
+                .filter(|pid| *pid != leader_pid)
+                .collect();
+
             if let Err(err) = teardown::signal_group(leader, teardown::SIGTERM) {
                 tracing::warn!(%err, leader, "SIGTERM to the process group failed");
             }
-            teardown::signal_session(leader, teardown::SIGTERM);
+            teardown::signal_pids(&tree, teardown::SIGTERM);
 
-            // Give the shell its exit traps, then stop asking. An interactive `bash`
-            // ignores SIGTERM, so this grace is usually burned in full.
-            if !teardown::wait_for(grace, || teardown::session_is_gone(leader)) {
+            // Only the jobs are polled. The leader stays a zombie until this session's own
+            // waiter thread reaps it, so including it would burn the whole grace every time.
+            if !teardown::wait_for(grace, || teardown::all_gone(&jobs)) {
                 if let Err(err) = teardown::signal_group(leader, teardown::SIGKILL) {
                     tracing::warn!(%err, leader, "SIGKILL to the process group failed");
                 }
-                let swept = teardown::signal_session(leader, teardown::SIGKILL);
+                // Re-collect as well as re-signalling: the grace period is long enough for
+                // the shell to have started something new while it was ignoring SIGTERM.
+                let late = teardown::collect_tree(leader);
+                let swept = teardown::signal_pids(&tree, teardown::SIGKILL)
+                    + teardown::signal_pids(&late, teardown::SIGKILL);
                 if swept > 0 {
                     tracing::debug!(swept, leader, "swept the session for surviving jobs");
                 }
@@ -794,40 +830,60 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn a_child_that_exits_is_reported_even_though_the_master_is_still_open() {
-        // Traps register #11. The `sleep` inherits the pty, so a slave fd stays open and
-        // EOF does not arrive — but the shell's exit status must still be reported. The
-        // subshell matters: started as a plain `&` job it would still belong to the
-        // interactive shell, and zsh refuses the first `exit` while a job is running and
-        // then HUPs it.
-        let (session, _output) = PtySession::spawn(SessionSpec::new(ShellProfile::Posix))
+    fn eof_does_not_mean_the_child_exited() {
+        // Traps register #11, tested from the side that is a property of Nysia rather than
+        // of the kernel. The previous version of this test asserted the converse — that a
+        // grandchild holding the slave keeps the master open after the shell exits — and it
+        // failed on macOS, because when EOF arrives is a BSD-versus-Linux kernel question
+        // and not ours to assert. This direction is deterministic on both: the child closes
+        // every slave fd there is and then keeps running, so EOF is forced to arrive first
+        // and the exit status must still be reported afterwards, by the waiter thread.
+        //
+        // `exec sh -c` first, so the process doing the redirect is a plain non-interactive
+        // shell with its whole script already in argv: an interactive shell reacting to its
+        // own stdin going away would make the timing a shell question too.
+        let (session, output) = PtySession::spawn(SessionSpec::new(ShellProfile::Posix))
             .expect("a posix shell must spawn");
-        session.write(b"( sleep 30 & )\nexit 5\n").expect("write");
+        session
+            .write(b"exec sh -c 'exec </dev/null >/dev/null 2>&1; sleep 10; exit 7'\n")
+            .expect("write");
+
+        let deadline = Instant::now() + DEADLINE;
+        while !session.is_at_eof() && Instant::now() < deadline {
+            if output.recv_timeout(Duration::from_millis(100)) == Output::Eof {
+                break;
+            }
+        }
+        assert!(
+            session.is_at_eof(),
+            "closing every slave fd must be seen as EOF on the master"
+        );
+        assert!(
+            session.exit_status().is_none(),
+            "EOF must not be reported as the child having exited"
+        );
 
         let status = session
             .wait_for_exit(DEADLINE)
-            .expect("the shell's exit status must arrive before EOF does");
-        assert_eq!(status.exit_code(), 5);
-        assert!(
-            !session.is_at_eof(),
-            "EOF must not be inferred from the child exiting"
-        );
+            .expect("the exit status must still arrive after EOF");
+        assert_eq!(status.exit_code(), 7);
     }
 
     #[test]
     #[cfg(unix)]
     fn a_tree_kill_leaves_no_orphan() {
+        // `sleep 300 &` is the case `killpg` alone misses: an interactive shell with job
+        // control puts it in a process group of its own.
         let (session, output) = PtySession::spawn(SessionSpec::new(ShellProfile::Posix))
             .expect("a posix shell must spawn");
         let mut state = grid();
         session
-            .write(b"sleep 300 & echo nysia-orphan-pid=$!\n")
+            .write(b"sleep 300 & echo nysia-orphan-pid=$!.end\n")
             .expect("write");
 
         assert!(
-            pump_until(&session, &output, &mut state, |screen| screen
-                .contains("nysia-orphan-pid=")
-                && screen.split("nysia-orphan-pid=").count() > 2),
+            pump_until(&session, &output, &mut state, |screen| orphan_pid(screen)
+                .is_some()),
             "screen was:\n{}",
             state.screen()
         );
@@ -835,21 +891,31 @@ mod tests {
 
         session.shutdown(Duration::from_secs(2));
 
-        // `killpg` on the session leader reaches the background job too; `portable-pty`'s
-        // own killer would only have reached the shell.
+        // The sweep reaches the job through the process table; `portable-pty`'s own killer
+        // would have reached the shell and nothing else.
         assert!(
             teardown::wait_for(Duration::from_secs(5), || !pid_is_alive(pid)),
             "pid {pid} survived the tree-kill"
         );
     }
 
-    #[cfg(unix)]
+    /// The pid the shell printed, accepted only once the whole number has arrived.
+    ///
+    /// The marker is `nysia-orphan-pid=<digits>.end`, and the `.end` is load-bearing: a
+    /// read of the master can split the line mid-number, and taking whatever digits have
+    /// turned up so far yields `410` from `41023` — a pid that is very likely some
+    /// unrelated live process, which turns "the sweep did not work" and "the read was
+    /// split" into the same failure. Requiring the terminator makes the test wait instead.
+    ///
+    /// The last occurrence is the shell's output; the earlier one is the command echoing,
+    /// and it never parses because `$!` and `$p.Id` are not digits.
     fn orphan_pid(screen: &str) -> Option<u32> {
-        // The command itself echoes, so take the last occurrence: the shell's own output.
-        screen.rsplit("nysia-orphan-pid=").find_map(|tail| {
-            let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
-            digits.parse().ok()
-        })
+        let (_, tail) = screen.rsplit_once("nysia-orphan-pid=")?;
+        let (digits, _) = tail.split_once(".end")?;
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()
     }
 
     #[cfg(unix)]
@@ -877,15 +943,13 @@ mod tests {
             .write(
                 b"powershell -NoProfile -Command \"$p = Start-Process -PassThru -WindowStyle \
                      Hidden ping -ArgumentList '-n','600','127.0.0.1'; 'nysia-orphan-pid=' + \
-                     $p.Id\"\r",
+                     $p.Id + '.end'\"\r",
             )
             .expect("write");
 
         assert!(
-            pump_until(&session, &output, &mut state, |screen| {
-                orphan_pid(screen).is_some_and(|pid| pid > 0)
-                    && screen.matches("nysia-orphan-pid=").count() >= 2
-            }),
+            pump_until(&session, &output, &mut state, |screen| orphan_pid(screen)
+                .is_some()),
             "screen was:\n{}",
             state.screen()
         );
@@ -897,14 +961,6 @@ mod tests {
             teardown::wait_for(Duration::from_secs(10), || !pid_is_alive(pid)),
             "pid {pid} survived the job-object tree-kill"
         );
-    }
-
-    #[cfg(windows)]
-    fn orphan_pid(screen: &str) -> Option<u32> {
-        screen.rsplit("nysia-orphan-pid=").find_map(|tail| {
-            let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
-            digits.parse().ok()
-        })
     }
 
     #[cfg(windows)]

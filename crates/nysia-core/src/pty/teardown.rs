@@ -17,19 +17,42 @@
 //! reaches everything in the shell's own process group: `SIGTERM` first, so a shell can run
 //! its exit traps, a short grace period, then `SIGKILL`.
 //!
-//! `killpg` alone is not enough, though, and §7.1 already says why: macOS has no
-//! `PR_SET_CHILD_SUBREAPER`, so the answer there is to **sweep by session id**. An
-//! interactive shell with job control puts every `&` job in a process group of its *own*,
-//! so `sleep 300 &` is not in the group `killpg` just signalled — but it is still in the
-//! session the `setsid` created, and a session id is not reused while any member is alive.
-//! The sweep is what actually reclaims it.
+//! `killpg` alone is not enough. An interactive shell with job control puts every `&` job
+//! in a process group of its *own*, so `sleep 300 &` is not in the group `killpg` just
+//! signalled. §7.1 names the answer — macOS has no `PR_SET_CHILD_SUBREAPER`, so sweep the
+//! session — and the sweep is built from the machine's process table.
 //!
-//! Two consequences worth stating rather than discovering. An interactive `bash` ignores
-//! `SIGTERM`, so on a Unix shell the grace period is normally burned in full before the
-//! `SIGKILL` phase does the work. And enumerating a session needs a process listing, which
-//! exists on Linux (`/proc`) and macOS (`proc_listallpids`) — the two Unix shapes Nysia
-//! cares about — and nowhere else; elsewhere the code falls back to the process-group
-//! check alone.
+//! Membership is decided by **two relations**, because neither is sufficient alone:
+//!
+//! - **Session.** `/proc/<pid>/stat` reports a session id directly on Linux. Elsewhere it
+//!   comes from `getsid`, which on Darwin is unconditional: XNU's `getsid` (`kern_prot.c`)
+//!   reads `p_sessionid` for any pid it can find and fails only with `ESRCH`, and the
+//!   "implementation may restrict this to the caller's session" line on the man page is a
+//!   portability note rather than a documented error of that kernel. POSIX does permit a
+//!   kernel to restrict it, though, which is the first reason not to rely on it alone.
+//! - **Parent.** The transitive closure of parent-to-child links from the leader. This is
+//!   the second reason: it reaches a backgrounded job even where the session relation is
+//!   unavailable, since the job is still a child of the shell.
+//!
+//! The tree is captured **before** anything is signalled. Once the leader dies its children
+//! reparent to `launchd` or `init` and the parent relation reports nothing, and a zombie is
+//! not returned by Darwin's `proc_find` at all, so `getsid` on one reports `ESRCH`. The set
+//! to kill has to be taken while the shell is still holding it together.
+//!
+//! The Darwin flavour matters: `proc_pidinfo` with `PROC_PIDTBSDINFO` is same-user
+//! restricted and returns `EPERM` across users, while `PROC_PIDT_SHORTBSDINFO` is on the
+//! kernel's `NO_CHECK_SAME_USER` list. The short flavour is the one used here, and it is
+//! also the one that carries `pbsi_ppid`.
+//!
+//! The gap that remains, stated rather than discovered: a grandchild that double-forked and
+//! reparented away before teardown began is reachable through the session relation but not
+//! through the parent one, so it survives on any kernel that does restrict `getsid`.
+//! Nothing in v1 spawns one, and closing it properly needs a process group Nysia allocates
+//! rather than one the shell chose.
+//!
+//! One more consequence worth stating: an interactive `bash` ignores `SIGTERM`, so on a
+//! Unix shell the grace period is normally burned in full before the `SIGKILL` phase does
+//! the work.
 
 use std::time::{Duration, Instant};
 
@@ -140,10 +163,11 @@ mod windows_impl {
 }
 
 #[cfg(unix)]
-pub(crate) use unix_impl::{SIGKILL, SIGTERM, session_is_gone, signal_group, signal_session};
+pub(crate) use unix_impl::{SIGKILL, SIGTERM, all_gone, collect_tree, signal_group, signal_pids};
 
 #[cfg(unix)]
 mod unix_impl {
+    use std::collections::BTreeSet;
     use std::io;
 
     /// `SIGTERM`, re-exported so the session module does not have to name `libc` itself.
@@ -151,6 +175,17 @@ mod unix_impl {
 
     /// `SIGKILL`, for when the grace period ran out.
     pub(crate) const SIGKILL: i32 = libc::SIGKILL;
+
+    /// One row of the machine's process table, reduced to what a sweep needs.
+    #[derive(Debug, Clone, Copy)]
+    struct Process {
+        /// The process id.
+        pid: i32,
+        /// Its parent, or zero when that could not be read.
+        ppid: i32,
+        /// Its session id, where the kernel will report one to us.
+        session: Option<i32>,
+    }
 
     /// Send a signal to the whole process group led by `pgid`.
     ///
@@ -173,90 +208,173 @@ mod unix_impl {
         Err(err)
     }
 
-    /// Signal every process in the session led by `sid`, including the jobs an interactive
-    /// shell put into process groups of their own.
+    /// Every process belonging to the session led by `leader`, including `leader` itself.
     ///
-    /// Returns how many processes were signalled, which is zero both when the session is
-    /// empty and when this platform cannot enumerate one.
-    pub(crate) fn signal_session(sid: u32, signal: i32) -> usize {
-        let Some(pids) = pids_in_session(sid) else {
-            return 0;
+    /// Collected by both relations described in the module docs, because neither alone
+    /// covers both platforms. Call this while the leader is still alive: after it dies its
+    /// children reparent away and the parent relation reports nothing.
+    ///
+    /// The caller's own pid is never included. The daemon is not inside a session one of
+    /// its children created with `setsid`, and a sweep able to reach its own pid would be
+    /// an expensive way to find that out.
+    pub(crate) fn collect_tree(leader: u32) -> Vec<i32> {
+        let Ok(leader) = i32::try_from(leader) else {
+            return Vec::new();
         };
-        pids.into_iter()
+        if leader <= 1 {
+            return Vec::new();
+        }
+        let mut wanted = BTreeSet::from([leader]);
+
+        if let Some(table) = process_table() {
+            for entry in &table {
+                if entry.session == Some(leader) {
+                    wanted.insert(entry.pid);
+                }
+            }
+            // Transitive descendants. The table is a snapshot, so this terminates: each
+            // pass can only add pids that are in it, and it stops when a pass adds none.
+            loop {
+                let before = wanted.len();
+                for entry in &table {
+                    if entry.ppid > 1 && wanted.contains(&entry.ppid) {
+                        wanted.insert(entry.pid);
+                    }
+                }
+                if wanted.len() == before {
+                    break;
+                }
+            }
+        }
+
+        // SAFETY: `getpid` takes no arguments and cannot fail.
+        let own = unsafe { libc::getpid() };
+        wanted.remove(&own);
+        wanted.into_iter().filter(|pid| *pid > 1).collect()
+    }
+
+    /// Signal every pid in `pids`, returning how many accepted it.
+    pub(crate) fn signal_pids(pids: &[i32], signal: i32) -> usize {
+        pids.iter()
             .filter(|pid| {
-                // SAFETY: `kill` takes two integers and has no memory effects.
-                unsafe { libc::kill(*pid, signal) == 0 }
+                // SAFETY: `kill` takes two integers and has no memory effects. A pid that
+                // has gone away reports `ESRCH`, which is the outcome the caller wanted.
+                unsafe { libc::kill(**pid, signal) == 0 }
             })
             .count()
     }
 
-    /// Whether nothing is left of the session led by `sid`.
+    /// Whether none of `pids` is still alive.
     ///
-    /// Falls back to the process-group check on a platform that cannot list processes, so
-    /// that the grace period still means something there.
-    pub(crate) fn session_is_gone(sid: u32) -> bool {
-        match pids_in_session(sid) {
-            Some(pids) => pids.is_empty(),
-            None => group_is_gone(sid),
-        }
+    /// A process that has exited but not yet been reaped still answers this, so the caller
+    /// should not include a pid whose parent is a thread of its own — see the session
+    /// module, which leaves the leader out for exactly that reason.
+    pub(crate) fn all_gone(pids: &[i32]) -> bool {
+        // SAFETY: signal 0 delivers nothing and only performs the existence check.
+        !pids.iter().any(|pid| unsafe { libc::kill(*pid, 0) == 0 })
     }
 
-    /// Whether no process is left in the group led by `pgid`.
+    /// The session id of `pid`, or `None` when the kernel will not say.
     ///
-    /// Signal zero performs the existence and permission checks without delivering
-    /// anything, which is the cheap way to poll a grace period.
-    fn group_is_gone(pgid: u32) -> bool {
-        let Ok(pgid) = i32::try_from(pgid) else {
-            return true;
-        };
-        // SAFETY: as above; signal 0 delivers nothing.
-        let result = unsafe { libc::killpg(pgid, 0) };
-        result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-    }
-
-    /// Every live pid in session `sid`, or `None` where processes cannot be enumerated.
+    /// Only Darwin needs this: Linux reads the session id straight out of
+    /// `/proc/<pid>/stat`, and the fallback arm reports no table at all.
     ///
-    /// The calling process is excluded on principle: the daemon is never inside a session
-    /// one of its children created with `setsid`, and a sweep that could reach its own pid
-    /// would be an expensive way to discover otherwise.
-    fn pids_in_session(sid: u32) -> Option<Vec<i32>> {
-        let Ok(sid) = i32::try_from(sid) else {
-            return Some(Vec::new());
-        };
-        // SAFETY: `getpid` takes no arguments and cannot fail.
-        let own = unsafe { libc::getpid() };
-        let members = all_pids()?
-            .into_iter()
-            .filter(|pid| *pid > 0 && *pid != own && session_of(*pid) == Some(sid))
-            .collect();
-        Some(members)
-    }
-
-    /// The session id of `pid`, or `None` if it has gone away.
+    /// `ESRCH` is ordinary churn in a full-machine sweep — a pid can exit between being
+    /// enumerated and being asked about, and a zombie is not findable at all — so a failure
+    /// here skips that row rather than abandoning the walk.
+    #[cfg(target_vendor = "apple")]
     fn session_of(pid: i32) -> Option<i32> {
-        // SAFETY: `getsid` takes one integer; a dead pid reports `ESRCH` as -1.
+        // SAFETY: `getsid` takes one integer; a failure reports -1.
         let sid = unsafe { libc::getsid(pid) };
         (sid > 0).then_some(sid)
     }
 
-    /// Every pid on the machine, or `None` where that cannot be asked for.
+    /// The machine's process table, or `None` where it cannot be read.
+    ///
+    /// `/proc/<pid>/stat` reports `pid (comm) state ppid pgrp session ...`. `comm` is the
+    /// executable name unescaped, so it can contain both spaces and parentheses; splitting
+    /// after the **last** `)` is the only way to find the fields that follow it.
     #[cfg(target_os = "linux")]
-    fn all_pids() -> Option<Vec<i32>> {
-        let entries = std::fs::read_dir("/proc").ok()?;
-        Some(
-            entries
-                .filter_map(Result::ok)
-                .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
-                .collect(),
-        )
+    fn process_table() -> Option<Vec<Process>> {
+        let mut rows = Vec::new();
+        for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                continue;
+            };
+            let Some((_, after_comm)) = stat.rsplit_once(')') else {
+                continue;
+            };
+            let mut fields = after_comm.split_whitespace();
+            let _state = fields.next();
+            let ppid = fields
+                .next()
+                .and_then(|field| field.parse().ok())
+                .unwrap_or(0);
+            let _pgrp = fields.next();
+            let session = fields.next().and_then(|field| field.parse().ok());
+            rows.push(Process { pid, ppid, session });
+        }
+        Some(rows)
+    }
+
+    /// The machine's process table, or `None` where it cannot be read.
+    #[cfg(target_vendor = "apple")]
+    fn process_table() -> Option<Vec<Process>> {
+        let rows = all_pids()?
+            .into_iter()
+            .filter(|pid| *pid > 0)
+            .filter_map(|pid| {
+                let ppid = parent_of(pid)?;
+                Some(Process {
+                    pid,
+                    ppid,
+                    session: session_of(pid),
+                })
+            })
+            .collect();
+        Some(rows)
+    }
+
+    /// The parent of `pid`, or `None` when it has gone away or belongs to another user.
+    #[cfg(target_vendor = "apple")]
+    fn parent_of(pid: i32) -> Option<i32> {
+        // SAFETY: `proc_bsdshortinfo` is a plain struct of integers and `c_char` arrays, so
+        // an all-zero bit pattern is a valid value to overwrite.
+        let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+        let size = i32::try_from(size_of::<libc::proc_bsdshortinfo>()).ok()?;
+        // SAFETY: the buffer is exactly one `proc_bsdshortinfo` and `size` is its length in
+        // bytes, which is what this flavour expects.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDT_SHORTBSDINFO,
+                0,
+                std::ptr::from_mut(&mut info).cast(),
+                size,
+            )
+        };
+        if written != size {
+            return None;
+        }
+        i32::try_from(info.pbsi_ppid).ok()
     }
 
     /// Every pid on the machine, or `None` where that cannot be asked for.
+    ///
+    /// `proc_listallpids` with a null buffer reports how many processes there are; the
+    /// second call reports how much it wrote. Both returns have been documented as a count
+    /// and as a byte length over the years, so neither reading is trusted here: the buffer
+    /// is over-allocated, zero-filled, and entries that are not positive pids are dropped,
+    /// which is correct under either.
     #[cfg(target_vendor = "apple")]
     fn all_pids() -> Option<Vec<i32>> {
-        // A first call with a null buffer reports the size needed, in bytes. The count can
-        // grow between the two calls, so the buffer is over-allocated and the result is
-        // truncated to what the second call actually wrote.
         // SAFETY: a null buffer of length zero is the documented way to ask for the size.
         let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
         if needed <= 0 {
@@ -270,18 +388,17 @@ mod unix_impl {
         if written <= 0 {
             return None;
         }
-        let count = usize::try_from(written).ok()?.min(capacity);
-        pids.truncate(count);
+        pids.retain(|pid| *pid > 0);
         Some(pids)
     }
 
-    /// Every pid on the machine, or `None` where that cannot be asked for.
+    /// The machine's process table, or `None` where it cannot be read.
     ///
     /// Nysia ships on Windows and macOS; this arm exists so the crate still compiles on
     /// another Unix, and it deliberately reports "cannot enumerate" rather than "nothing is
-    /// running".
+    /// running", so the caller falls back to the process group alone.
     #[cfg(all(unix, not(target_os = "linux"), not(target_vendor = "apple")))]
-    fn all_pids() -> Option<Vec<i32>> {
+    fn process_table() -> Option<Vec<Process>> {
         None
     }
 }
@@ -319,24 +436,59 @@ mod tests {
     #[cfg(unix)]
     fn signalling_a_group_that_is_already_gone_is_not_an_error() {
         // A pgid this high cannot exist; the point is that `ESRCH` reads as success,
-        // because "the tree is gone" is what the caller asked for.
+        // because "the group is gone" is what the caller asked for.
         assert!(signal_group(u32::MAX / 2, SIGTERM).is_ok());
-        assert_eq!(signal_session(u32::MAX / 2, SIGTERM), 0);
-        assert!(session_is_gone(u32::MAX / 2));
+        assert_eq!(signal_pids(&[i32::MAX / 2], SIGTERM), 0);
+        assert!(all_gone(&[i32::MAX / 2]));
     }
 
     #[test]
     #[cfg(unix)]
-    fn a_live_session_is_enumerable_and_does_not_read_as_gone() {
-        // The sweep is only worth anything if it can see a live session; this process is
-        // in one, so that is the one to check against.
-        // SAFETY: `getsid(0)` asks about the calling process and cannot fail.
-        let own = unsafe { libc::getsid(0) };
-        assert!(own > 0);
-        let sid = u32::try_from(own).expect("a session id is positive");
+    fn the_tree_of_a_live_session_contains_its_own_processes() {
+        // The sweep is worth nothing if it cannot see a live tree, and this test process is
+        // in one. Collecting from this session's own leader must find at least this
+        // process's siblings — and never this process itself, which the sweep would
+        // otherwise signal.
+        // SAFETY: `getsid(0)` and `getpid` ask about the calling process and cannot fail.
+        let (own_session, own_pid) = unsafe { (libc::getsid(0), libc::getpid()) };
+        assert!(own_session > 0);
+
+        let tree = collect_tree(u32::try_from(own_session).expect("a session id is positive"));
         assert!(
-            !session_is_gone(sid),
-            "the caller's own session must not read as empty"
+            !tree.contains(&own_pid),
+            "the sweep must never include the caller"
         );
+        assert!(
+            !all_gone(&[own_pid]),
+            "this process is plainly alive, so liveness detection is working"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_child_of_the_leader_is_collected_even_from_a_process_group_of_its_own() {
+        // The macOS case in miniature, and the one `killpg` alone misses: a process that is
+        // a child of the leader but has left its process group. Collected through the
+        // parent relation, which is why that relation exists.
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("/bin/sh must spawn");
+        let child_pid = i32::try_from(child.id()).expect("a pid is positive");
+
+        // SAFETY: `getpid` cannot fail. The child is ours, so it is in our session and its
+        // parent is this process; collecting from this process must reach it.
+        let own_pid = unsafe { libc::getpid() };
+        let tree = collect_tree(u32::try_from(own_pid).expect("a pid is positive"));
+        assert!(
+            tree.contains(&child_pid),
+            "the child {child_pid} must be in the collected tree {tree:?}"
+        );
+
+        assert_eq!(signal_pids(&[child_pid], SIGKILL), 1);
+        let _ = child.wait();
     }
 }
