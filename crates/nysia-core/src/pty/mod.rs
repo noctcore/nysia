@@ -25,7 +25,9 @@
 //! Owned by wave 1 (W2).
 
 mod env;
+mod profile;
 mod resolve;
 
 pub use env::{FORCED_COLORTERM, FORCED_TERM, SCRUBBED_VARS, sanitize};
+pub use profile::{ProfileError, ShellProfile};
 pub use resolve::{ResolveError, ResolvedProgram, resolve};
