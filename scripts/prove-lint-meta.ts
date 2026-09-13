@@ -119,6 +119,13 @@ expectRule(cargoTrips, 'no-tauri-reaching-rust-crates');
 expectFile(cargoTrips, 'no-tauri-in-rust-crates', 'crates/nysia-hook/Cargo.toml');
 expectMessage(cargoTrips, 'no-tauri-in-rust-crates', 'package = "tauri"');
 
+// The other half of a rename: the key says tauri and the crate behind it does not. That
+// makes `use tauri::…` compile here and reads as a tauri dependency to anyone skimming the
+// manifest, and only the key gives it away — origin/main's key-based parser caught it and
+// the resolved-name check did not.
+expectFile(cargoTrips, 'no-tauri-in-rust-crates', 'crates/nysia-shim/Cargo.toml');
+expectMessage(cargoTrips, 'no-tauri-in-rust-crates', '`tauri` (package = "third")');
+
 // Declared under a quoted key, in a `[ dependencies ]` header carrying whitespace and a
 // trailing comment. The hand-written parser reported 0 violations for every one of these.
 expectFile(cargoTrips, 'no-tauri-in-rust-crates', 'crates/nysia-proto/Cargo.toml');

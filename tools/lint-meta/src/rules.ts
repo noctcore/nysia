@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, posix, relative, sep } from 'node:path';
 
 import {
+  isTauriEdge,
   isTauriPackage,
   loadCargoWorkspace,
   type CargoDependencyEdge,
@@ -405,7 +406,7 @@ function describe(edge: CargoDependencyEdge): string {
  * that a developer can act on in ten seconds, where this rule reports a manifest.
  *
  * Every dependency kind counts — normal, dev and build alike. A runtime crate has no reason
- * to link the UI toolkit even in a test.
+ * to link the UI toolkit even in a test. So does either half of a rename: see `isTauriEdge`.
  */
 export function noTauriInRustCrates(workspace: CargoWorkspace): Violation[] {
   const violations: Violation[] = [];
@@ -413,7 +414,7 @@ export function noTauriInRustCrates(workspace: CargoWorkspace): Violation[] {
   for (const member of workspace.members) {
     if (TAURI_ALLOWLIST.some((prefix) => member.manifestPath.startsWith(prefix))) continue;
     for (const edge of member.dependencies) {
-      if (!isTauriPackage(edge.name)) continue;
+      if (!isTauriEdge(edge)) continue;
       violations.push({
         rule: 'no-tauri-in-rust-crates',
         file: member.manifestPath,

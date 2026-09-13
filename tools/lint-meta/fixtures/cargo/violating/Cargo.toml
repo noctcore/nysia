@@ -9,5 +9,6 @@ members = [
   "crates/nysia-core",
   "crates/nysia",
   "crates/nysia-hook",
+  "crates/nysia-shim",
   "apps/desktop/src-tauri",
 ]

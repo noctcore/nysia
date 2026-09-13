@@ -164,6 +164,8 @@ describe('the cargo dependency rules', () => {
       // Reported for declaring tauri...
       'crates/nysia-hook/Cargo.toml',
       'crates/nysia-proto/Cargo.toml',
+      // Renamed the other way round: the key is tauri, the crate behind it is not.
+      'crates/nysia-shim/Cargo.toml',
       // ...and this one for being invisible to cargo at all; see the next test.
       'crates/orphan/Cargo.toml',
     ]);

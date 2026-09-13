@@ -151,3 +151,21 @@ export function loadCargoWorkspace(root: string): CargoWorkspace {
 export function isTauriPackage(name: string): boolean {
   return name === 'tauri' || name.startsWith('tauri-');
 }
+
+/**
+ * Whether a declared dependency is tauri under either of its two names.
+ *
+ * Both directions of a rename matter, and only one of them was checked:
+ *
+ * - `ui = { package = "tauri" }` links the real UI toolkit under another key. Caught by the
+ *   resolved package name.
+ * - `tauri = { package = "third" }` links something else under the key `tauri`, which makes
+ *   `use tauri::…` compile in a crate where it must not, and reads to anyone skimming the
+ *   manifest as a tauri dependency. Only the key gives that away, and the key was ignored.
+ *
+ * Fail closed on both. The cost of a false positive here is a crate having to pick a less
+ * confusing alias.
+ */
+export function isTauriEdge(edge: CargoDependencyEdge): boolean {
+  return isTauriPackage(edge.name) || (edge.rename !== null && isTauriPackage(edge.rename));
+}
