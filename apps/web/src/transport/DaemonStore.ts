@@ -360,6 +360,19 @@ export class DaemonStore implements Store {
           this.#recordOnce('openTab', unreadable.message);
         }
       });
+
+      // **Everything learned over the previous connection is void.** A `StreamId` is scoped
+      // to one stream connection — proto is explicit that an id "means nothing on the
+      // other's connection" — so both the map and the surfaces keyed by it have to go.
+      //
+      // Keeping them was how any disconnect left every existing pane silent for the rest of
+      // the process: `#refresh` skipped every handle already in the map, so no session was
+      // ever re-attached, while the chrome said `ready`. Keeping the surfaces was the other
+      // half — a daemon whose counter restarted would hand the first new session id 1, and
+      // its output would land in whichever pane held id 1 before.
+      this.#streams.clear();
+      this.#router.resetStreams();
+
       await this.#refresh();
     } catch (cause) {
       this.#update((current) => ({ ...current, status: 'reconnecting' }));
@@ -387,6 +400,20 @@ export class DaemonStore implements Store {
         handle: session.handle,
       });
       this.#streams.set(session.handle, stream);
+    }
+
+    // Drop ids for sessions the daemon no longer holds. Without this a handle closed in
+    // another window keeps its entry forever, and the map is what decides whether a session
+    // still needs attaching — so a stale entry is a pane that never gets reattached.
+    const live = new Set(sessions.map((session) => session.handle));
+    for (const handle of [...this.#streams.keys()]) {
+      if (!live.has(handle)) {
+        const stream = this.#streams.get(handle);
+        if (stream !== undefined) {
+          this.#router.close(stream);
+        }
+        this.#streams.delete(handle);
+      }
     }
 
     const tabs = sessions.map(toTab);

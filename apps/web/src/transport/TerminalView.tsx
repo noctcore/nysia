@@ -29,13 +29,15 @@ export function TerminalView() {
   const { activeTab } = useSnapshot();
   const host = useRef<HTMLDivElement>(null);
 
+  // Read during render, not inside the effect, so it can be a dependency. A reconnect gives
+  // the same pane a new id — ids do not survive one — and the effect has to run again to
+  // mount the new surface. Keyed on `activeTab` alone it would not, and the pane would hold
+  // a surface that was disposed with the connection it belonged to.
+  const stream = store === null || activeTab === null ? null : store.surfaceStream(activeTab);
+
   useEffect(() => {
     const element = host.current;
-    if (element === null || activeTab === null || store === null) {
-      return;
-    }
-    const stream = store.surfaceStream(activeTab);
-    if (stream === null) {
+    if (element === null || activeTab === null || store === null || stream === null) {
       return;
     }
 
@@ -88,7 +90,7 @@ export function TerminalView() {
       // daemon's stream instead of asking for a full replay every time.
       surface.hide();
     };
-  }, [store, activeTab]);
+  }, [store, activeTab, stream]);
 
   return (
     <div
