@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/nysia-core", "crates/nysia-proto"]
+members = ["crates/nysia", "crates/nysia-core", "crates/nysia-proto"]
 
 [workspace.package]
 version = "0.1.0"
