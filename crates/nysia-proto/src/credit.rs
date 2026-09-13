@@ -26,8 +26,6 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::identity::SessionHandle;
-
 /// One kibibyte, so the constants below read as the design writes them.
 const KIB: u32 = 1024;
 /// One mebibyte.
@@ -96,12 +94,15 @@ impl Default for CreditWindow {
 }
 
 /// The reader tells the writer it may send more.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+///
+/// It names no session. A credit frame rides the stream connection, whose header already
+/// carries a [`StreamId`](crate::StreamId) — and two routing keys in one frame is a bug
+/// waiting for someone to pick the wrong one, because nothing stops a handle and an id
+/// disagreeing. The header is authoritative; this payload is the number and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct CreditGrant {
-    /// Which stream the credit is for.
-    pub handle: SessionHandle,
     /// How many further bytes the writer may send, on top of what it already has.
     pub bytes: u32,
     /// The window in force, so the client never holds its own copy of the constants.
@@ -112,20 +113,23 @@ pub struct CreditGrant {
 ///
 /// Sent after xterm's `write()` callback, not on arrival: the point of the window is to
 /// track what has been *rendered*, and a message sitting in a queue has not been.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+///
+/// Like [`CreditGrant`], it names no session: the frame header's stream id is the routing
+/// key on this connection, and a second one could only ever disagree with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct CreditAck {
-    /// Which stream.
-    pub handle: SessionHandle,
     /// Bytes consumed since the last ack. Batched to [`CreditWindow::ack_batch`].
     pub bytes: u32,
 }
 
 /// The payload of a [`crate::FrameKind::Credit`] frame.
 ///
-/// Both directions share the kind byte, so the payload says which one it is.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// Both directions share the kind byte, so the payload says which one it is. Which *stream*
+/// it is comes from the frame header, in both directions — see
+/// [`crate::stream`] for what happens when that id names nothing live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "credit", rename_all = "snake_case")]
 #[ts(export)]
 pub enum CreditFrame {
@@ -138,10 +142,6 @@ pub enum CreditFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn handle() -> SessionHandle {
-        "sess_0e2fa1f4-4f3e-4c5f-9f2a-1b2c3d4e5f60".parse().unwrap()
-    }
 
     #[test]
     fn the_defaults_are_the_numbers_the_design_names() {
@@ -210,32 +210,31 @@ mod tests {
     #[test]
     fn a_grant_carries_the_window_so_the_client_holds_no_copy() {
         let grant = CreditGrant {
-            handle: handle(),
             bytes: 196_608,
             window: CreditWindow::DEFAULT,
         };
-        let json = serde_json::to_value(&grant).unwrap();
+        let json = serde_json::to_value(grant).unwrap();
         assert_eq!(json["window"]["ackBatch"], 196_608);
         assert_eq!(json["window"]["perStreamInitial"], 524_288);
+        // No session key in the payload: the frame header's stream id is the only routing
+        // key, so there is nothing here that could disagree with it.
+        assert!(json.get("handle").is_none());
+        assert!(json.get("streamId").is_none());
         assert_eq!(serde_json::from_value::<CreditGrant>(json).unwrap(), grant);
     }
 
     #[test]
     fn a_credit_frame_says_which_direction_it_is() {
         let grant = CreditFrame::Grant(CreditGrant {
-            handle: handle(),
             bytes: 524_288,
             window: CreditWindow::DEFAULT,
         });
-        let ack = CreditFrame::Ack(CreditAck {
-            handle: handle(),
-            bytes: 196_608,
-        });
-        assert_eq!(serde_json::to_value(&grant).unwrap()["credit"], "grant");
-        assert_eq!(serde_json::to_value(&ack).unwrap()["credit"], "ack");
+        let ack = CreditFrame::Ack(CreditAck { bytes: 196_608 });
+        assert_eq!(serde_json::to_value(grant).unwrap()["credit"], "grant");
+        assert_eq!(serde_json::to_value(ack).unwrap()["credit"], "ack");
         for frame in [grant, ack] {
             assert_eq!(
-                serde_json::from_value::<CreditFrame>(serde_json::to_value(&frame).unwrap())
+                serde_json::from_value::<CreditFrame>(serde_json::to_value(frame).unwrap())
                     .unwrap(),
                 frame
             );
@@ -243,7 +242,6 @@ mod tests {
         assert!(
             serde_json::from_value::<CreditFrame>(serde_json::json!({
                 "credit": "refund",
-                "handle": "sess_0e2fa1f4-4f3e-4c5f-9f2a-1b2c3d4e5f60",
                 "bytes": 1,
             }))
             .is_err()

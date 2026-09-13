@@ -5,6 +5,8 @@ import type { CreditGrant } from "./CreditGrant";
 /**
  * The payload of a [`crate::FrameKind::Credit`] frame.
  *
- * Both directions share the kind byte, so the payload says which one it is.
+ * Both directions share the kind byte, so the payload says which one it is. Which *stream*
+ * it is comes from the frame header, in both directions — see
+ * [`crate::stream`] for what happens when that id names nothing live.
  */
 export type CreditFrame = { "credit": "grant" } & CreditGrant | { "credit": "ack" } & CreditAck;

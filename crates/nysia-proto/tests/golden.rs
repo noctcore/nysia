@@ -410,12 +410,11 @@ goldens! {
     );
 
     credit_grant: CreditFrame = CreditFrame::Grant(CreditGrant {
-        handle: handle(),
         bytes: 524_288,
         window: CreditWindow::DEFAULT,
     });
 
-    credit_ack: CreditFrame = CreditFrame::Ack(CreditAck { handle: handle(), bytes: 196_608 });
+    credit_ack: CreditFrame = CreditFrame::Ack(CreditAck { bytes: 196_608 });
 }
 
 /// Trap 12: every gate ships with a proof that it trips.
