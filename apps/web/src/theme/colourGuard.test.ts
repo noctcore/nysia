@@ -44,6 +44,8 @@ const OFFENDERS = [
   // The concrete failure a colon-flush pattern let through: on main this injected line
   // turned the sweep red, and it would not have here.
   { kind: 'named-colour', snippet: "style={{ color: failed ? 'red' : undefined }}" },
+  // The custom-property case, which hid the one module whose job is writing token values.
+  { kind: 'named-colour', snippet: `setProperty('--color-acc', 'red');` },
 ] as const;
 
 describe('findColourLiterals', () => {
@@ -176,6 +178,32 @@ describe('findColourLiterals', () => {
         (c) => c.kind,
       ),
     ).toEqual(['named-colour']);
+  });
+
+  it('finds a colour written to a custom property', () => {
+    // The blind spot that hid `theme/tokens.ts` entirely: every token in this codebase
+    // spells the word as a prefix, and the pattern wanted it as a suffix. The module whose
+    // whole job is writing those values was the one the rule could not see into, so
+    // hard-coding the accent there turned the picker into a no-op with every gate green.
+    for (const written of [
+      `{ '--color-acc': 'red' }`,
+      `{ "--color-status-failed": "red" }`,
+      `target.setProperty('--color-acc', 'red');`,
+      `root.style.setProperty('--accent-color', 'navy');`,
+    ]) {
+      expect(findColourLiterals(written).map((c) => c.kind), written).toContain(
+        'named-colour',
+      );
+    }
+  });
+
+  it('leaves the token names themselves alone', () => {
+    // The same module is full of custom-property names next to each other. A name is not
+    // a value, and none of these words is a colour.
+    expect(findColourLiterals(`['--color-bg0', '--color-fg3', '--color-acc35']`)).toEqual([]);
+    expect(findColourLiterals(`{ '--color-bg0': surface.bg0, '--color-fg': surface.fg }`)).toEqual(
+      [],
+    );
   });
 
   it('does not match a painting property inside a longer word', () => {

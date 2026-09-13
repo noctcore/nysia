@@ -106,8 +106,18 @@ const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
  * shorthands that take one among other tokens. Matching the suffix rather than a list
  * covers `borderTopColor`, `textDecorationColor` and every sibling without enumerating
  * them.
+ *
+ * The custom-property alternative is first and is not decoration. Every token in this
+ * codebase spells the word as a *prefix* — the names begin with two hyphens and the word
+ * and then say what they are for — so a suffix-only pattern could not see any of them, and
+ * the one module whose entire job is writing those values was the one module the rule was
+ * blind to. Someone "fixing" the accent by writing a literal there would have turned the
+ * accent picker into a no-op with every gate green, which is the exact failure this guard
+ * exists to prevent. The trailing part after the word is what the suffix rule could not
+ * express.
  */
 const PAINTING_PROPERTY =
+  '--[a-zA-Z0-9-]*[cC]olor[a-zA-Z0-9-]*|' +
   '[a-zA-Z-]*[cC]olor|background|background-?[iI]mage|' +
   'border(?:-?(?:top|right|bottom|left|Top|Right|Bottom|Left))?|' +
   'outline|fill|stroke|box-?[sS]hadow|text-?[sS]hadow';
