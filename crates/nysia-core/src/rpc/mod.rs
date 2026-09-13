@@ -56,6 +56,7 @@
 pub mod control;
 pub mod endpoint;
 pub mod lease;
+pub mod peer;
 pub mod transport;
 
 pub use control::{ControlError, ControlReader, ControlWriter, MAX_CONTROL_LINE_BYTES};
@@ -63,4 +64,5 @@ pub use endpoint::{
     ENDPOINT_VAR, Endpoint, EndpointResolveError, EnvSource, Listening, RUNTIME_DIR_VAR,
 };
 pub use lease::{LeaseError, PidRecordFile};
+pub use peer::{CallerSession, PeerCredentials, PeerError, ancestry, parent_of};
 pub use transport::{Connection, ConnectionReader, ConnectionWriter, Listener, TransportError};
