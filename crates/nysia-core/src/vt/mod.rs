@@ -20,7 +20,9 @@
 mod line_log;
 mod osc;
 mod replay;
+mod state;
 
 pub use line_log::{LineLog, LogicalLine};
 pub use osc::{CommandState, OscSniffer, ShellState};
 pub use replay::ReplayRing;
+pub use state::{FEED_SLICE, ReadMode, TerminalRead, TerminalSize, TerminalState, VtConfig};
