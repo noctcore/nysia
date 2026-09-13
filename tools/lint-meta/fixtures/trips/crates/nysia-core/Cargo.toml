@@ -1,0 +1,7 @@
+# Rule (b): the runtime linking the UI toolkit.
+[package]
+name = "nysia-core"
+
+[dependencies]
+nysia-proto = { path = "../nysia-proto" }
+tauri = "2.11"
