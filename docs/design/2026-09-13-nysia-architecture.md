@@ -88,7 +88,7 @@ Lifted wholesale from Orca's daemon, which has earned it:
 - **Versioned socket name** — `nysiad-v1.sock` / `\\.\pipe\nysiad-v1-<user>`. A new client refuses to attach to an incompatible daemon instead of corrupting it. Orca is on `daemon-v36` and still advertises `attachableDaemonProtocolVersions: [1..36]`, so a newer app adopts an older daemon rather than orphaning its sessions. Copy that.
 - **Token file** beside the socket, mode 0600 / owner-only ACL.
 - **Handshake first frame**: `{type:"hello", version, token, role:"control"|"stream", clientId}` → `{ok, daemonIdentity:{pid, startedAtMs, launchNonce, appVersion}}`. Reject with `retryable` set so clients know whether to back off or die.
-- **Framing**: newline-delimited JSON for control; length-prefixed binary (`[kind:u8][len:u32 BE][payload]`) for terminal output.
+- **Framing**: newline-delimited JSON for control; length-prefixed binary (`[kind:u8][streamId:u32 BE][len:u32 BE][payload]`) for terminal output.
 - **Adoption lease**: pid + `startedAtMs` + `launchNonce` in a pid-record file, so a restarted app can verify the daemon it found is the one it thinks it is.
 - **Idle retire**: `shutdownIfIdle` only when the caller is the sole client, no sessions exist, nothing in flight. Otherwise the daemon outlives the app — that is the point.
 
