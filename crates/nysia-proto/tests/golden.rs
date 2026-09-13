@@ -174,6 +174,7 @@ goldens! {
         retry_request: None,
         payload: RequestPayload::SessionCreate(SessionCreate {
             kind: SessionKind::Shell,
+            pane_key: Some(pane()),
             profile: Some(ShellProfile::Wsl { distro: Some("Ubuntu-24.04".to_owned()) }),
             cwd: Some("C:/src/nysia".into()),
             env_overrides: BTreeMap::from([
@@ -190,6 +191,7 @@ goldens! {
         retry_request: Some(RETRY.parse().expect("the fixture retry id is well formed")),
         payload: RequestPayload::SessionCreate(SessionCreate {
             kind: SessionKind::Agent,
+            pane_key: None,
             profile: None,
             cwd: None,
             env_overrides: BTreeMap::new(),
