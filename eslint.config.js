@@ -66,7 +66,18 @@ const BAN_NODE_BUILTINS = {
  * one. Everything else goes through `useCommands()`.
  */
 const BAN_STORE_CONTEXT = {
-  group: ['**/store/StoreContext', '**/store/StoreContext.*'],
+  // `**/StoreContext` as well as `**/store/StoreContext`, because the longer pattern needs
+  // `store` adjacent to the filename and `../store/./StoreContext` and `../store//StoreContext`
+  // are both on-disk-valid spellings that slipped past it. No auto-import produces either, so
+  // this turns a slip into a deliberate act rather than closing a hole a tool could open by
+  // itself — and it has a second effect worth more: it is what makes the store carve-out
+  // load-bearing, so a proof case can tell whether the carve-out is there.
+  group: [
+    '**/store/StoreContext',
+    '**/store/StoreContext.*',
+    '**/StoreContext',
+    '**/StoreContext.*',
+  ],
   message:
     'Components reach the store through useCommands() / useSnapshot() from store/hooks, ' +
     'never through StoreContext. The context hands back the raw provider, whose commands ' +
