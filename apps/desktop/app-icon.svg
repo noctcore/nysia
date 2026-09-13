@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Terminal-first: a prompt chevron and a block caret, in Ember's bg0 and accent. -->
+  <rect width="1024" height="1024" rx="224" fill="#090b10"/>
+  <rect x="64" y="64" width="896" height="896" rx="176" fill="none" stroke="#1f2532" stroke-width="16"/>
+  <path d="M288 360 L432 512 L288 664" fill="none" stroke="#f2b35b" stroke-width="72"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="512" y="600" width="224" height="64" rx="16" fill="#f2b35b"/>
+</svg>
