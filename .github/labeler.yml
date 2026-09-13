@@ -27,16 +27,17 @@
 # seconds a run is in flight can still be lost, and re-applying it sticks. That is
 # upstream v5 behaviour, not something this repository can fix from the config.
 #
-# Matching is minimatch. `any-glob-to-any-file` asks whether at least one changed file
-# matches; `all-globs-to-all-files` asks whether *every* changed file matches, which is
-# how a negated glob carves an exception out.
+# Matching is minimatch, and the four keys do not mean the same thing. `any-glob-to-any-file`
+# ORs its globs, so a negation beside a positive glob there excludes nothing — it matches
+# every file it does not exclude, and the label lands on nearly every pull request.
+# `all-globs-to-any-file` ANDs its globs against each file in turn, which is what an
+# exclusion needs, and is the form `area:web` uses.
 #
-# The `all:` wrapper on `area:web` is load-bearing, not decoration. A match object with
-# no top-level key defaults to `any`, so two conditions written without it are OR-ed —
-# and `all-globs-to-all-files: ['!apps/web/src/generated/**', …]` is true of almost every
-# pull request in the repository, which would have put `area:web` on all of them.
-# Combining a positive glob with a negated one always needs `all:`.
-# .github/scripts/check-labeler-config.mjs fails CI if that is ever dropped.
+# Do not take that as a rule to follow by hand. The rule is the test: `scripts/labeler`
+# runs the pinned action's own matching code over this file and asserts the exact labels
+# produced for a fixed set of representative pull requests. Write the config however reads
+# best and let the test tell you what it does — three rounds of a hand-written scanner
+# that checked spellings instead were each blind to the next spelling someone used.
 
 # A Rust module is either `foo.rs` or `foo/mod.rs`, and which one a module uses changes
 # over its life. Every area below therefore matches both spellings. `area:git` matched
