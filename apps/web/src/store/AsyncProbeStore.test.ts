@@ -49,3 +49,22 @@ describe('AsyncProbeStore', () => {
     expect(store.getSnapshot()).not.toBe(before);
   });
 });
+
+describe('AsyncProbeStore telemetry', () => {
+  it('moves the metrics on every frame, including a command that changes nothing', async () => {
+    // The proof for the contract's `observable()`: a provider streaming resident set and
+    // quota windows must still satisfy "a command that changes nothing leaves the state
+    // alone". Comparing whole snapshots would fail it on `memoryBytes` having ticked.
+    const store = new AsyncProbeStore(createSeedSnapshot(), 0);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const before = store.getSnapshot();
+    await store.selectNav(before.nav);
+    const after = store.getSnapshot();
+
+    expect(after.daemon.memoryBytes).not.toBe(before.daemon.memoryBytes);
+    expect(after.usage[0]?.percentLeft).not.toBe(before.usage[0]?.percentLeft);
+    expect(after.nav).toBe(before.nav);
+    expect(after.tabs).toEqual(before.tabs);
+  });
+});

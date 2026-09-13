@@ -323,13 +323,23 @@ async function waitForReady(store: Store): Promise<void> {
 }
 
 /**
- * Everything the chrome renders, minus the bookkeeping a comparison should ignore.
+ * The part of the snapshot a command is expected to leave alone.
  *
- * `errors` is dropped because a failing command is *supposed* to append to it, and
- * `status` because a provider may legitimately flicker through `reconnecting` while a
- * command is in flight.
+ * Four fields are excluded, each for a reason a provider should not have to work around:
+ *
+ *  - `errors`, because a failing command is *supposed* to append to it;
+ *  - `status`, because a provider may legitimately flicker through `reconnecting` while a
+ *    command is in flight;
+ *  - `daemon` and `usage`, because they are telemetry. A real transport streams resident
+ *    set, terminal count and quota windows on their own schedule, so requiring them to be
+ *    frozen across an unrelated command would fail a provider on `memoryBytes` having
+ *    ticked — while everything the assertion actually means, the session and project
+ *    state, was untouched. A provider could pass by holding its metrics still between
+ *    commands; it should not have to distort its design to satisfy a test.
  */
-function observable(snapshot: StoreSnapshot): Omit<StoreSnapshot, 'errors' | 'status'> {
+type Observable = Omit<StoreSnapshot, 'errors' | 'status' | 'daemon' | 'usage'>;
+
+function observable(snapshot: StoreSnapshot): Observable {
   return {
     nav: snapshot.nav,
     projects: snapshot.projects,
@@ -337,7 +347,5 @@ function observable(snapshot: StoreSnapshot): Omit<StoreSnapshot, 'errors' | 'st
     tabs: snapshot.tabs,
     activeTab: snapshot.activeTab,
     launchers: snapshot.launchers,
-    daemon: snapshot.daemon,
-    usage: snapshot.usage,
   };
 }

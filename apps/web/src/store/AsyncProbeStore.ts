@@ -30,6 +30,10 @@ import type {
  *     command is therefore never available; only stability *between* notifications is.
  *  4. **Commands settle a turn late**, so anything asserted before the returned promise
  *     resolves is asserted against stale state.
+ *  5. **Telemetry ticks on every frame.** Resident set and quota windows move whether or
+ *     not a command touched anything, which is what a transport streaming metrics looks
+ *     like — and which a contract comparing whole snapshots would fail on `memoryBytes`
+ *     alone while the session state it meant to check was untouched.
  *
  * It is not a fixture for component tests and it is not shipped to the window. Its only
  * job is to be run through `describeStoreContract` alongside the mock.
@@ -39,6 +43,7 @@ export class AsyncProbeStore implements Store {
   readonly #listeners = new Set<() => void>();
   #nextTab = 1;
   #nextError = 1;
+  #frame = 0;
 
   constructor(seed: StoreSnapshot, connectDelayMs = 0) {
     setTimeout(() => {
@@ -142,11 +147,30 @@ export class AsyncProbeStore implements Store {
     return new StoreCommandError(command, message, id);
   }
 
-  /** Always allocates, always notifies — the opposite of the mock's short-circuit. */
+  /**
+   * Always allocates, always notifies, and always moves the telemetry — the opposite of
+   * the mock's short-circuit.
+   */
   #emit(next: (current: StoreSnapshot) => StoreSnapshot): void {
-    this.#snapshot = next(this.#snapshot);
+    this.#snapshot = this.#tick(next(this.#snapshot));
     for (const listener of [...this.#listeners]) {
       listener();
     }
+  }
+
+  /** Metrics that move on their own schedule, as a transport streaming them would. */
+  #tick(snapshot: StoreSnapshot): StoreSnapshot {
+    this.#frame += 1;
+    return {
+      ...snapshot,
+      daemon: {
+        ...snapshot.daemon,
+        memoryBytes: snapshot.daemon.memoryBytes + this.#frame * 4096,
+      },
+      usage: snapshot.usage.map((window) => ({
+        ...window,
+        percentLeft: Math.max(0, window.percentLeft - 0.01),
+      })),
+    };
   }
 }
