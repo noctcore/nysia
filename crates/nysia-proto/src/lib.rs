@@ -17,6 +17,7 @@ pub mod handshake;
 pub mod identity;
 mod newtype;
 pub mod session;
+pub mod stream;
 pub mod terminal;
 pub mod version;
 
@@ -40,6 +41,7 @@ pub use session::{
     ExitStatus, SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary,
     ShellProfile,
 };
+pub use stream::{StreamAttach, StreamAttached, StreamDetach, StreamId};
 pub use terminal::{
     LineCursor, ReadMode, TerminalError, TerminalRead, TerminalReadResult, TerminalResize,
     TerminalSend, TerminalWait, TerminalWaitResult, WaitFor, WaitOutcome,

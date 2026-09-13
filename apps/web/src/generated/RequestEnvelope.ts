@@ -3,6 +3,8 @@ import type { RequestId } from "./RequestId";
 import type { SessionClose } from "./SessionClose";
 import type { SessionCreate } from "./SessionCreate";
 import type { SessionList } from "./SessionList";
+import type { StreamAttach } from "./StreamAttach";
+import type { StreamDetach } from "./StreamDetach";
 import type { TerminalRead } from "./TerminalRead";
 import type { TerminalResize } from "./TerminalResize";
 import type { TerminalSend } from "./TerminalSend";
@@ -23,4 +25,4 @@ requestId: RequestId,
  * landed, the original answer comes back with `replayed` set and nothing runs twice.
  * Meaningful only when the payload [`is_mutation`](RequestPayload::is_mutation).
  */
-retryRequest: RequestId | null, } & ({ "type": "session_create" } & SessionCreate | { "type": "session_list" } & SessionList | { "type": "session_close" } & SessionClose | { "type": "terminal_read" } & TerminalRead | { "type": "terminal_send" } & TerminalSend | { "type": "terminal_resize" } & TerminalResize | { "type": "terminal_wait" } & TerminalWait);
+retryRequest: RequestId | null, } & ({ "type": "session_create" } & SessionCreate | { "type": "session_list" } & SessionList | { "type": "session_close" } & SessionClose | { "type": "terminal_read" } & TerminalRead | { "type": "terminal_send" } & TerminalSend | { "type": "terminal_resize" } & TerminalResize | { "type": "terminal_wait" } & TerminalWait | { "type": "stream_attach" } & StreamAttach | { "type": "stream_detach" } & StreamDetach);

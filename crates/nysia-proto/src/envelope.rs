@@ -31,6 +31,7 @@ use ts_rs::TS;
 use crate::error::ErrorEnvelope;
 use crate::newtype::deserialize_via_from_str;
 use crate::session::{SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary};
+use crate::stream::{StreamAttach, StreamAttached, StreamDetach};
 use crate::terminal::{
     TerminalRead, TerminalReadResult, TerminalResize, TerminalSend, TerminalWait,
     TerminalWaitResult,
@@ -117,6 +118,10 @@ pub enum RequestPayload {
     TerminalResize(TerminalResize),
     /// Block until a session exits or goes idle.
     TerminalWait(TerminalWait),
+    /// Start routing a session's output on this client's stream connection.
+    StreamAttach(StreamAttach),
+    /// Stop routing a stream id.
+    StreamDetach(StreamDetach),
 }
 
 impl RequestPayload {
@@ -131,6 +136,8 @@ impl RequestPayload {
             Self::TerminalSend(_) => "terminal_send",
             Self::TerminalResize(_) => "terminal_resize",
             Self::TerminalWait(_) => "terminal_wait",
+            Self::StreamAttach(_) => "stream_attach",
+            Self::StreamDetach(_) => "stream_detach",
         }
     }
 
@@ -145,7 +152,9 @@ impl RequestPayload {
             Self::SessionCreate(_)
             | Self::SessionClose(_)
             | Self::TerminalSend(_)
-            | Self::TerminalResize(_) => true,
+            | Self::TerminalResize(_)
+            | Self::StreamAttach(_)
+            | Self::StreamDetach(_) => true,
             Self::SessionList(_) | Self::TerminalRead(_) | Self::TerminalWait(_) => false,
         }
     }
@@ -240,6 +249,10 @@ pub enum ResponsePayload {
     TerminalResize,
     /// How the wait ended.
     TerminalWait(TerminalWaitResult),
+    /// The id the daemon assigned.
+    StreamAttach(StreamAttached),
+    /// The id was released.
+    StreamDetach,
     /// The verb failed.
     Error(ErrorEnvelope),
 }
@@ -256,6 +269,8 @@ impl ResponsePayload {
             Self::TerminalSend => "terminal_send",
             Self::TerminalResize => "terminal_resize",
             Self::TerminalWait(_) => "terminal_wait",
+            Self::StreamAttach(_) => "stream_attach",
+            Self::StreamDetach => "stream_detach",
             Self::Error(_) => "error",
         }
     }

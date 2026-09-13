@@ -2,6 +2,7 @@
 import type { ErrorEnvelope } from "./ErrorEnvelope";
 import type { SessionCreated } from "./SessionCreated";
 import type { SessionSummary } from "./SessionSummary";
+import type { StreamAttached } from "./StreamAttached";
 import type { TerminalReadResult } from "./TerminalReadResult";
 import type { TerminalWaitResult } from "./TerminalWaitResult";
 
@@ -17,4 +18,4 @@ export type ResponsePayload = { "type": "session_create" } & SessionCreated | { 
 /**
  * The rows.
  */
-sessions: Array<SessionSummary>, } | { "type": "session_close" } | { "type": "terminal_read" } & TerminalReadResult | { "type": "terminal_send" } | { "type": "terminal_resize" } | { "type": "terminal_wait" } & TerminalWaitResult | { "type": "error" } & ErrorEnvelope;
+sessions: Array<SessionSummary>, } | { "type": "session_close" } | { "type": "terminal_read" } & TerminalReadResult | { "type": "terminal_send" } | { "type": "terminal_resize" } | { "type": "terminal_wait" } & TerminalWaitResult | { "type": "stream_attach" } & StreamAttached | { "type": "stream_detach" } | { "type": "error" } & ErrorEnvelope;

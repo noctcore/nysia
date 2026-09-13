@@ -2,6 +2,8 @@
 import type { SessionClose } from "./SessionClose";
 import type { SessionCreate } from "./SessionCreate";
 import type { SessionList } from "./SessionList";
+import type { StreamAttach } from "./StreamAttach";
+import type { StreamDetach } from "./StreamDetach";
 import type { TerminalRead } from "./TerminalRead";
 import type { TerminalResize } from "./TerminalResize";
 import type { TerminalSend } from "./TerminalSend";
@@ -10,4 +12,4 @@ import type { TerminalWait } from "./TerminalWait";
 /**
  * What a request asks for.
  */
-export type RequestPayload = { "type": "session_create" } & SessionCreate | { "type": "session_list" } & SessionList | { "type": "session_close" } & SessionClose | { "type": "terminal_read" } & TerminalRead | { "type": "terminal_send" } & TerminalSend | { "type": "terminal_resize" } & TerminalResize | { "type": "terminal_wait" } & TerminalWait;
+export type RequestPayload = { "type": "session_create" } & SessionCreate | { "type": "session_list" } & SessionList | { "type": "session_close" } & SessionClose | { "type": "terminal_read" } & TerminalRead | { "type": "terminal_send" } & TerminalSend | { "type": "terminal_resize" } & TerminalResize | { "type": "terminal_wait" } & TerminalWait | { "type": "stream_attach" } & StreamAttach | { "type": "stream_detach" } & StreamDetach;
