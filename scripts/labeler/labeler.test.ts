@@ -52,49 +52,55 @@ const labels = (...files: string[]): string[] => labelsFor(labelConfigs, files);
  * Each asserts the EXACT set. An over-labelling config fails not because a particular
  * negation was spelled wrongly but because a label came out that should not have.
  */
+/**
+ * The sampled pull requests, hoisted so the dead-rule invariant below can read them.
+ * `[what, changed files, the exact labels expected]`.
+ */
+const SAMPLES: readonly (readonly [string, readonly string[], readonly string[]])[] = [
+  ['a pty-only change', ['crates/nysia-core/src/pty/mod.rs'], ['area:pty']],
+  ['a vt-only change', ['crates/nysia-core/src/vt/mod.rs'], ['area:vt']],
+  ['a git flat-module change', ['crates/nysia-core/src/git.rs'], ['area:git']],
+  ['a worktree change', ['crates/nysia-core/src/worktree.rs'], ['area:git']],
+  ['an rpc change', ['crates/nysia-core/src/rpc/mod.rs'], ['area:daemon']],
+  ['a daemon binary change', ['crates/nysia/src/main.rs'], ['area:daemon']],
+  ['a core module no narrower area owns', ['crates/nysia-core/src/store.rs'], ['area:daemon']],
+  ['a proto change', ['crates/nysia-proto/src/lib.rs'], ['area:proto']],
+  ['a generated-bindings-only change', ['apps/web/src/generated/SessionId.ts'], ['area:proto']],
+  ['a transport-only change', ['apps/web/src/transport/channel.ts'], ['area:desktop']],
+  ['a desktop shell change', ['apps/desktop/src-tauri/src/main.rs'], ['area:desktop']],
+  ['a web-only change', ['apps/web/src/App.tsx'], ['area:web']],
+  ['a docs-only change', ['docs/plans/v0.1-delivery-plan.md'], []],
+  ['a design-doc change', ['docs/design/design-spec.md'], ['design-system']],
+  ['a Cargo.lock-only change', ['Cargo.lock'], ['area:build', 'dependencies']],
+  ['a root manifest change', ['package.json'], ['area:build', 'dependencies']],
+  ['a crate manifest change', ['crates/nysia-core/Cargo.toml'], ['area:daemon', 'dependencies']],
+  ['a gate change', ['scripts/prove-lint-meta.ts'], ['area:build', 'gate']],
+  ['a workflow change', ['.github/workflows/ci.yml'], ['area:build']],
+  [
+    'a multi-area change',
+    ['crates/nysia-core/src/pty/mod.rs', 'apps/web/src/App.tsx', 'docs/design/design-spec.md'],
+    ['area:pty', 'area:web', 'design-system'],
+  ],
+  // The web exclusions, per file rather than across the pull request: a hand-written
+  // component beside a generated binding is still a web change.
+  [
+    'web code beside a generated binding',
+    ['apps/web/src/App.tsx', 'apps/web/src/generated/SessionId.ts'],
+    ['area:proto', 'area:web'],
+  ],
+  [
+    'web code beside a transport file',
+    ['apps/web/src/App.tsx', 'apps/web/src/transport/channel.ts'],
+    ['area:desktop', 'area:web'],
+  ],
+  // The shape that every over-labelling bug has produced. A pull request touching
+  // nothing must be labelled nothing; each of the three scanner defects labelled it.
+  ['an empty pull request', [], []],
+];
+
 describe('the labels .github/labeler.yml produces', () => {
-  it.each([
-    ['a pty-only change', ['crates/nysia-core/src/pty/mod.rs'], ['area:pty']],
-    ['a vt-only change', ['crates/nysia-core/src/vt/mod.rs'], ['area:vt']],
-    ['a git flat-module change', ['crates/nysia-core/src/git.rs'], ['area:git']],
-    ['a worktree change', ['crates/nysia-core/src/worktree.rs'], ['area:git']],
-    ['an rpc change', ['crates/nysia-core/src/rpc/mod.rs'], ['area:daemon']],
-    ['a daemon binary change', ['crates/nysia/src/main.rs'], ['area:daemon']],
-    ['a core module no narrower area owns', ['crates/nysia-core/src/store.rs'], ['area:daemon']],
-    ['a proto change', ['crates/nysia-proto/src/lib.rs'], ['area:proto']],
-    ['a generated-bindings-only change', ['apps/web/src/generated/SessionId.ts'], ['area:proto']],
-    ['a transport-only change', ['apps/web/src/transport/channel.ts'], ['area:desktop']],
-    ['a desktop shell change', ['apps/desktop/src-tauri/src/main.rs'], ['area:desktop']],
-    ['a web-only change', ['apps/web/src/App.tsx'], ['area:web']],
-    ['a docs-only change', ['docs/plans/v0.1-delivery-plan.md'], []],
-    ['a design-doc change', ['docs/design/design-spec.md'], ['design-system']],
-    ['a Cargo.lock-only change', ['Cargo.lock'], ['area:build', 'dependencies']],
-    ['a root manifest change', ['package.json'], ['area:build', 'dependencies']],
-    ['a crate manifest change', ['crates/nysia-core/Cargo.toml'], ['area:daemon', 'dependencies']],
-    ['a gate change', ['scripts/prove-lint-meta.ts'], ['area:build', 'gate']],
-    ['a workflow change', ['.github/workflows/ci.yml'], ['area:build']],
-    [
-      'a multi-area change',
-      ['crates/nysia-core/src/pty/mod.rs', 'apps/web/src/App.tsx', 'docs/design/design-spec.md'],
-      ['area:pty', 'area:web', 'design-system'],
-    ],
-    // The web exclusions, per file rather than across the pull request: a hand-written
-    // component beside a generated binding is still a web change.
-    [
-      'web code beside a generated binding',
-      ['apps/web/src/App.tsx', 'apps/web/src/generated/SessionId.ts'],
-      ['area:proto', 'area:web'],
-    ],
-    [
-      'web code beside a transport file',
-      ['apps/web/src/App.tsx', 'apps/web/src/transport/channel.ts'],
-      ['area:desktop', 'area:web'],
-    ],
-    // The shape that every over-labelling bug has produced. A pull request touching
-    // nothing must be labelled nothing; each of the three scanner defects labelled it.
-    ['an empty pull request', [], []],
-  ])('%s -> %j', (_what, files, expected) => {
-    expect(labels(...files)).toEqual(expected);
+  it.each(SAMPLES)('%s -> %j', (_what, files, expected) => {
+    expect(labels(...files)).toEqual([...expected]);
   });
 });
 
@@ -142,19 +148,84 @@ describe('spellings that have defeated a guard before', () => {
     expect(() => labelsOf(mapping)).toThrow(/silently treats it as no condition/);
   });
 
+  // Not all of these are swallowed upstream, and the earlier title claimed they all were.
+  // A NON-EMPTY string has a length, so upstream carries on and throws its own "valid
+  // config structure" error for it; only a number, a boolean or the empty string is
+  // swallowed, which is what upstream.ts's header says. All four are rejected here — what
+  // differs is whether upstream would have been silent about it.
   it.each([
-    ['an empty list', "'area:web':\n  - changed-files: []\n"],
-    ['a bare scalar', "'area:web':\n  - changed-files: 'apps/web/**'\n"],
-    ['an explicit null', "'area:web':\n  - changed-files:\n"],
-  ])('rejects %s, which upstream would swallow', (_what, source) => {
+    ['an empty list, which upstream swallows', "'area:web':\n  - changed-files: []\n"],
+    ['a bare scalar, which upstream rejects too', "'area:web':\n  - changed-files: 'apps/web/**'\n"],
+    ['an explicit null, which upstream swallows', "'area:web':\n  - changed-files:\n"],
+    ['a number, which upstream swallows', "'area:web':\n  - changed-files: 3\n"],
+  ])('rejects %s', (_what, source) => {
     expect(() => labelsOf(source)).toThrow(UnsupportedLabelerConfig);
   });
 
-  it('still ignores a changed-files key that is simply absent', () => {
-    // Not the same thing: an entry can legitimately carry no changed-files, and upstream
-    // and the transcription agree it contributes nothing. Only a *present* value that
-    // upstream would swallow is an error.
+  it('drops a label whose only entry is an empty mapping, leaving it dead', () => {
+    // This case used to be titled "still ignores a changed-files key that is simply
+    // absent" and called the legitimate case. It is not. Upstream, an entry with no
+    // changed-files can carry a branch key instead, so emptiness there means "matched by
+    // something else". In this transcription every other key throws, so an entry with
+    // nothing in it is ALWAYS dead — and the test was enshrining a dead rule as correct.
+    //
+    // The behaviour is unchanged and faithful; what changed is that it is no longer
+    // described as desirable, and `no declared label is silently dead` below now fails on
+    // a real config written this way.
     expect(getLabelConfigMapFromObject({ 'area:web': [{}] }).size).toBe(0);
+  });
+});
+
+/*
+ * No declared label is silently dead.
+ *
+ * Nine spellings leave a label that a reader would call declared unable to ever fire, and
+ * upstream is silent on every one of them — so `upstream.ts` has nothing to fail closed
+ * against, and being faithful is not enough. Two halves cover them:
+ *
+ *   (1) every top-level key of the parsed YAML survives into the parsed label configs.
+ *       Catches the seven where the label vanishes during parsing: `any:`/`all:` as a
+ *       mapping, a scalar or null, an empty rule list, and entries that are only null or
+ *       an empty mapping.
+ *
+ *   (2) every label the config can write appears in at least one sampled expected set.
+ *       Catches the other two — `any: []` and `all: []` — plus an empty glob list, because
+ *       a label that must appear in an expected set is a label the exact-set assertions
+ *       above will notice failing to fire. It also closes the general case: a label nobody
+ *       sampled cannot quietly stop working, because it cannot exist unsampled.
+ *
+ * Half (2) is the one that makes this finite test cover an infinite space of spellings. It
+ * is a coverage requirement, not a behaviour assertion: it says the table above must keep
+ * pace with the config, and the table is what does the catching.
+ */
+describe('no declared label is silently dead', () => {
+  const rawKeys = Object.keys(yaml.load(labelerSource) as Record<string, unknown>);
+
+  it('parses every label declared in the file', () => {
+    const lost = rawKeys.filter((key) => !labelConfigs.has(key));
+    expect(lost).toEqual([]);
+  });
+
+  it('samples every label the config can write', () => {
+    const expected = new Set(SAMPLES.flatMap(([, , labels_]) => labels_));
+    const unsampled = [...labelConfigs.keys()].filter((label) => !expected.has(label));
+    expect(unsampled).toEqual([]);
+  });
+
+  it('has a sample table that cannot go stale silently', () => {
+    // Both halves compare against the real file, so neither can pass on an empty input.
+    expect(rawKeys.length).toBeGreaterThan(5);
+    expect(SAMPLES.length).toBeGreaterThan(5);
+  });
+
+  it('samples no path containing a backslash', () => {
+    // CI runs Windows and macOS; the action runs on Linux. minimatch's only platform
+    // branch converts backslashes in the path being matched when `process.platform` is
+    // win32, so a sampled path containing one would mean the Windows job and the action
+    // disagree, and the macOS job alone would be carrying the fidelity claim. No sample
+    // contains one today. This keeps that true rather than leaving it to be remembered.
+    const withBackslash = SAMPLES.flatMap(([, files]) => files).filter((f) => f.includes('\\'));
+    expect(withBackslash).toEqual([]);
   });
 });
 
