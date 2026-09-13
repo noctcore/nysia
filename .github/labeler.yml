@@ -17,8 +17,15 @@
 # .github/scripts/check-labeler-config.mjs fails CI if a type label appears as a key
 # here. The full label set, and which facet each label belongs to, is .github/labels.yml.
 #
-# The labeler runs with `sync-labels` off (the default), so it only ever adds. A label
-# a human put on a PR is never removed by automation.
+# The labeler runs with `sync-labels` off (the default), so it never *decides* to remove
+# a label: it computes the set it wants, unions it with the labels it read, and writes
+# the result. But it writes with `issues.setLabels`, which replaces the whole set — so a
+# label added by a human in the window between that read and that write is dropped.
+#
+# The honest guarantee is therefore: the labeler removes nothing it read, and nothing is
+# removed on a later run for having stopped matching. A label applied during the few
+# seconds a run is in flight can still be lost, and re-applying it sticks. That is
+# upstream v5 behaviour, not something this repository can fix from the config.
 #
 # Matching is minimatch. `any-glob-to-any-file` asks whether at least one changed file
 # matches; `all-globs-to-all-files` asks whether *every* changed file matches, which is
