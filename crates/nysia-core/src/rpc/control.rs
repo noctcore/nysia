@@ -104,6 +104,17 @@ impl<R: AsyncRead + Unpin> ControlReader<R> {
         }
     }
 
+    /// Take the reader back, along with whatever it had already buffered.
+    ///
+    /// The buffered bytes come first and must not be dropped: the handshake and the frames
+    /// after it arrive on one connection, so a single `read` can easily deliver the `hello`
+    /// line *and* the first binary frame behind it. Returning the reader alone would discard
+    /// that frame and leave a stream that never starts.
+    pub fn into_parts(self) -> (Vec<u8>, R) {
+        let buffered = self.inner.buffer().to_vec();
+        (buffered, self.inner.into_inner())
+    }
+
     /// Read the next frame as `T`, or `None` at a clean end of stream.
     ///
     /// # Errors
@@ -129,6 +140,14 @@ impl<W: AsyncWrite + Unpin> ControlWriter<W> {
     /// Write frames to `writer`.
     pub fn new(writer: W) -> Self {
         Self { inner: writer }
+    }
+
+    /// Take the writer back.
+    ///
+    /// Safe at any point because [`ControlWriter::write_frame`] flushes every frame: there is
+    /// never anything held back to lose.
+    pub fn into_inner(self) -> W {
+        self.inner
     }
 
     /// Write one frame, terminated and flushed.
