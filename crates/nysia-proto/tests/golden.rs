@@ -122,20 +122,26 @@ fn print_fixture<T: Serialize>(name: &str, value: &T) {
     );
 }
 
-/// Declare every fixture once, and get both the check and the printer from it.
+/// Declare every fixture once, and get both the checks and the printer from it.
+///
+/// **One test per fixture**, not one test over all of them. A single test stops at its
+/// first `assert_eq!`, so a change to a shared type — renaming a field on `SessionHandle`,
+/// say — would surface as one diff, get fixed, and reveal the next one on the following
+/// run. Twenty-three fixtures could take twenty-three rounds to walk through. Split, the
+/// first run names every fixture the change touched.
 macro_rules! goldens {
     ($($name:ident: $ty:ty = $value:expr;)*) => {
-        #[test]
-        fn committed_fixtures_still_describe_the_wire() {
-            $(
+        $(
+            #[test]
+            fn $name() {
                 let value: $ty = $value;
                 check::<$ty>(
                     stringify!($name),
                     &value,
                     include_str!(concat!("golden/", stringify!($name), ".json")),
                 );
-            )*
-        }
+            }
+        )*
 
         #[test]
         #[ignore = "prints the fixtures; run it only to regenerate them after a deliberate change"]
@@ -166,6 +172,21 @@ goldens! {
 
     hello_rejected_shutting_down: HelloResponse =
         HelloResponse::Rejected(HelloRejected::new(RejectReason::ShuttingDown));
+
+    hello_rejected_unauthorized: HelloResponse = HelloResponse::Rejected(HelloRejected::new(
+        RejectReason::Unauthorized {
+            detail: "caller is not in a session this daemon spawned".to_owned(),
+        },
+    ));
+
+    hello_rejected_malformed: HelloResponse = HelloResponse::Rejected(HelloRejected::new(
+        RejectReason::Malformed { detail: "first frame was not JSON".to_owned() },
+    ));
+
+    // The forward-compatibility valve. A fixture pins what this build *writes* for it;
+    // what it reads is any `kind` it does not know, which `handshake.rs` covers.
+    hello_rejected_unknown: HelloResponse =
+        HelloResponse::Rejected(HelloRejected::new(RejectReason::Unknown));
 
     pid_record: PidRecord = identity().pid_record();
 
@@ -329,6 +350,22 @@ goldens! {
         ResponsePayload::TerminalWait(TerminalWaitResult {
             handle: handle(),
             outcome: WaitOutcome::Exited { status: ExitStatus::Signaled { signal: 15 } },
+        }),
+    );
+
+    response_terminal_wait_idle: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::TerminalWait(TerminalWaitResult {
+            handle: handle(),
+            outcome: WaitOutcome::Idle,
+        }),
+    );
+
+    response_terminal_wait_timed_out: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::TerminalWait(TerminalWaitResult {
+            handle: handle(),
+            outcome: WaitOutcome::TimedOut,
         }),
     );
 
