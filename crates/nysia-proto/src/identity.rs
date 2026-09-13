@@ -15,8 +15,10 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+
+use crate::newtype::deserialize_via_from_str;
 
 /// Why a string could not be read as one of the identity types.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -292,19 +294,6 @@ impl FromStr for SessionKind {
             other => Err(IdentityError::SessionKindShape(other.to_owned())),
         }
     }
-}
-
-/// Deserialise a newtype identity through its [`FromStr`], so the wire cannot carry a shape
-/// the constructors would have refused.
-macro_rules! deserialize_via_from_str {
-    ($ty:ty) => {
-        impl<'de> Deserialize<'de> for $ty {
-            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let raw = String::deserialize(deserializer)?;
-                raw.parse().map_err(serde::de::Error::custom)
-            }
-        }
-    };
 }
 
 deserialize_via_from_str!(PaneKey);
