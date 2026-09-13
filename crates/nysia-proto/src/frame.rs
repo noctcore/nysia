@@ -66,6 +66,20 @@ const STREAM_ID_OFFSET: usize = 1;
 /// Where the payload length starts in the header.
 const LENGTH_OFFSET: usize = 5;
 
+// The offsets and the header size have to describe the same nine bytes. They are three
+// constants that can be edited independently, so the agreement is asserted at compile time
+// rather than left as a property someone has to notice: a header laid out differently is a
+// build failure here, not a wrong length at runtime.
+const _: () = assert!(STREAM_ID_OFFSET == 1, "the kind byte comes first");
+const _: () = assert!(
+    LENGTH_OFFSET - STREAM_ID_OFFSET == 4,
+    "the stream id is a u32"
+);
+const _: () = assert!(
+    FRAME_HEADER_BYTES - LENGTH_OFFSET == 4,
+    "the payload length is a u32"
+);
+
 /// The largest payload one frame may carry.
 ///
 /// §7.3 chunks output at 48 KiB and flushes the coalescing window at 64 KiB, and the
@@ -212,14 +226,6 @@ pub enum FrameError {
     },
 }
 
-/// Read a big-endian `u32` out of a four-byte window of the header.
-///
-/// The slice is exactly four bytes long at every call site, so the conversion is total;
-/// `unwrap_or` keeps the crate free of `expect` without inventing a second error path.
-fn be_u32(header: &[u8]) -> u32 {
-    u32::from_be_bytes(header.try_into().unwrap_or([0; 4]))
-}
-
 /// Append `frame` to `out`.
 ///
 /// This, rather than a `Vec`-returning encoder, is what the coalescing writer wants: §7.3
@@ -289,18 +295,22 @@ pub fn decode(buf: &[u8]) -> Result<Option<(Frame, usize)>, FrameError> {
     };
     let kind = FrameKind::from_byte(kind_byte).ok_or(FrameError::UnknownKind(kind_byte))?;
 
-    let Some(raw_stream) = buf.get(STREAM_ID_OFFSET..LENGTH_OFFSET) else {
+    // A four-element slice pattern rather than a fallible conversion with a default: if the
+    // window is ever not four bytes the pattern simply does not match, so the decoder asks
+    // for more input instead of fabricating a number. The `const` assertions above are what
+    // stop that from being reachable in the first place.
+    let Some(&[a, b, c, d]) = buf.get(STREAM_ID_OFFSET..LENGTH_OFFSET) else {
         return Ok(None);
     };
-    let stream = StreamId(be_u32(raw_stream));
+    let stream = StreamId(u32::from_be_bytes([a, b, c, d]));
     if stream == StreamId::RESERVED {
         return Err(FrameError::ReservedStream(stream.get()));
     }
 
-    let Some(raw_len) = buf.get(LENGTH_OFFSET..FRAME_HEADER_BYTES) else {
+    let Some(&[a, b, c, d]) = buf.get(LENGTH_OFFSET..FRAME_HEADER_BYTES) else {
         return Ok(None);
     };
-    let len = be_u32(raw_len) as usize;
+    let len = u32::from_be_bytes([a, b, c, d]) as usize;
     if len > MAX_FRAME_PAYLOAD_BYTES {
         return Err(FrameError::Oversized {
             len,
