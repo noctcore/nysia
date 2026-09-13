@@ -691,6 +691,33 @@ mod tests {
         false
     }
 
+    /// Block until the shell is drawing a prompt and consuming input.
+    ///
+    /// Writing to a session the moment it is spawned races the shell's own startup, and the
+    /// loser is the command: a macOS runner prints the "default interactive shell is now
+    /// zsh" notice between the two halves of whatever was typed, and what reaches the
+    /// parser is spliced nonsense. Sending a marker and waiting for the shell to *run* it —
+    /// the echo of the line, and then its output — is the only proof that the next write
+    /// will be read whole.
+    fn wait_until_ready(session: &PtySession, output: &PtyOutput, state: &mut TerminalState) {
+        const MARKER: &str = "nysia-session-ready";
+        session
+            .write(format!("echo {MARKER}{}", line_end()).as_bytes())
+            .expect("write the readiness marker");
+        assert!(
+            pump_until(session, output, state, |screen| {
+                screen.matches(MARKER).count() >= 2
+            }),
+            "the shell never reached a prompt; screen was:\n{}",
+            state.screen()
+        );
+    }
+
+    /// What ends a typed line for the platform's shell.
+    fn line_end() -> &'static str {
+        if cfg!(windows) { "\r" } else { "\n" }
+    }
+
     fn grid() -> TerminalState {
         TerminalState::new(TerminalSize::new(120, 30), VtConfig::default())
     }
@@ -699,6 +726,7 @@ mod tests {
     fn an_echo_reaches_the_rendered_screen() {
         let (session, output) = shell();
         let mut state = grid();
+        wait_until_ready(&session, &output, &mut state);
         session
             .write(b"echo nysia-marker-one\r")
             .expect("write to the shell");
@@ -719,11 +747,7 @@ mod tests {
     fn a_resize_reaches_the_child() {
         let (session, output) = shell();
         let mut state = grid();
-        // Let the shell finish starting up, so the resize lands on a live prompt.
-        assert!(
-            pump_until(&session, &output, &mut state, |screen| !screen.is_empty()),
-            "the shell never drew anything"
-        );
+        wait_until_ready(&session, &output, &mut state);
 
         session
             .resize(TerminalSize::new(40, 10))
@@ -750,7 +774,7 @@ mod tests {
     fn the_exit_status_is_captured() {
         let (session, output) = shell();
         let mut state = grid();
-        let _ = pump_until(&session, &output, &mut state, |screen| !screen.is_empty());
+        wait_until_ready(&session, &output, &mut state);
 
         session.write(b"exit 7\r").expect("write");
         let status = session
@@ -832,34 +856,46 @@ mod tests {
     #[cfg(unix)]
     fn eof_does_not_mean_the_child_exited() {
         // Traps register #11, tested from the side that is a property of Nysia rather than
-        // of the kernel. The previous version of this test asserted the converse — that a
+        // of the kernel. The first version of this test asserted the converse — that a
         // grandchild holding the slave keeps the master open after the shell exits — and it
         // failed on macOS, because when EOF arrives is a BSD-versus-Linux kernel question
         // and not ours to assert. This direction is deterministic on both: the child closes
-        // every slave fd there is and then keeps running, so EOF is forced to arrive first
-        // and the exit status must still be reported afterwards, by the waiter thread.
+        // every slave fd there is and then keeps running, so EOF has to arrive first and
+        // the exit status must still be reported afterwards, by the waiter thread.
         //
         // `exec sh -c` first, so the process doing the redirect is a plain non-interactive
         // shell with its whole script already in argv: an interactive shell reacting to its
         // own stdin going away would make the timing a shell question too.
         let (session, output) = PtySession::spawn(SessionSpec::new(ShellProfile::Posix))
             .expect("a posix shell must spawn");
+        let mut state = grid();
+        wait_until_ready(&session, &output, &mut state);
+
         session
-            .write(b"exec sh -c 'exec </dev/null >/dev/null 2>&1; sleep 10; exit 7'\n")
+            .write(b"exec sh -c 'exec </dev/null >/dev/null 2>&1; sleep 30; exit 7'\n")
             .expect("write");
 
+        // Sample the exit status at the instant EOF is noticed, not after the loop: leaving
+        // it until the end would turn "EOF never arrived" into "the child had exited by
+        // then", which are different findings and must not share a failure message.
         let deadline = Instant::now() + DEADLINE;
-        while !session.is_at_eof() && Instant::now() < deadline {
-            if output.recv_timeout(Duration::from_millis(100)) == Output::Eof {
+        let mut exit_at_eof = None;
+        let mut saw_eof = false;
+        while Instant::now() < deadline {
+            let chunk = output.recv_timeout(Duration::from_millis(50));
+            if session.is_at_eof() || chunk == Output::Eof {
+                saw_eof = true;
+                exit_at_eof = session.exit_status();
                 break;
             }
         }
+
         assert!(
-            session.is_at_eof(),
+            saw_eof,
             "closing every slave fd must be seen as EOF on the master"
         );
         assert!(
-            session.exit_status().is_none(),
+            exit_at_eof.is_none(),
             "EOF must not be reported as the child having exited"
         );
 
@@ -872,13 +908,21 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_tree_kill_leaves_no_orphan() {
-        // `sleep 300 &` is the case `killpg` alone misses: an interactive shell with job
-        // control puts it in a process group of its own.
+        // A backgrounded job is the case `killpg` alone misses: an interactive shell with
+        // job control puts it in a process group of its own.
+        //
+        // The job reports its own pid rather than the shell reporting `$!`, because the
+        // macOS runner's login shell is an interactive `bash` with history expansion on,
+        // where `$!.end` is read as the history event `!.end` and the whole line is
+        // rejected with "event not found". `sh -c` gets a pid from `$$` with no `!` in
+        // sight, and `exec` keeps that pid for the `sleep` that replaces it.
         let (session, output) = PtySession::spawn(SessionSpec::new(ShellProfile::Posix))
             .expect("a posix shell must spawn");
         let mut state = grid();
+        wait_until_ready(&session, &output, &mut state);
+
         session
-            .write(b"sleep 300 & echo nysia-orphan-pid=$!.end\n")
+            .write(b"sh -c 'echo nysia-orphan-pid=$$.end; exec sleep 300' &\n")
             .expect("write");
 
         assert!(
@@ -897,6 +941,15 @@ mod tests {
             teardown::wait_for(Duration::from_secs(5), || !pid_is_alive(pid)),
             "pid {pid} survived the tree-kill"
         );
+    }
+
+    #[cfg(unix)]
+    fn pid_is_alive(pid: u32) -> bool {
+        let Ok(pid) = i32::try_from(pid) else {
+            return false;
+        };
+        // SAFETY: signal 0 delivers nothing and only performs the existence check.
+        unsafe { libc::kill(pid, 0) == 0 }
     }
 
     /// The pid the shell printed, accepted only once the whole number has arrived.
@@ -918,15 +971,6 @@ mod tests {
         digits.parse().ok()
     }
 
-    #[cfg(unix)]
-    fn pid_is_alive(pid: u32) -> bool {
-        let Ok(pid) = i32::try_from(pid) else {
-            return false;
-        };
-        // SAFETY: signal 0 delivers nothing and only performs the existence check.
-        unsafe { libc::kill(pid, 0) == 0 }
-    }
-
     #[test]
     #[cfg(windows)]
     fn a_tree_kill_leaves_no_orphan() {
@@ -936,6 +980,7 @@ mod tests {
         )
         .expect("cmd.exe must spawn");
         let mut state = grid();
+        wait_until_ready(&session, &output, &mut state);
 
         // `Start-Process` detaches the child from the console, which is exactly the kind of
         // process a kill aimed at the direct child would leave behind.
