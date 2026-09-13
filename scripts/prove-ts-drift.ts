@@ -29,7 +29,7 @@
  *
  * Failures are raised as exceptions rather than `process.exit`, because `exit` terminates
  * without unwinding and would leave the sources mutated on disk. Everything that can fail
- * runs inside a `try` whose `finally` writes the original bytes of both files back.
+ * runs inside a `try` whose `finally` writes the original bytes of every probe file back.
  *
  * What that does *not* cover, deliberately: a hard kill between a mutation and the restore
  * — Ctrl-C at the wrong moment, a `SIGKILL`, the machine losing power — still leaves the
@@ -52,22 +52,13 @@ const frame = join(repoRoot, 'crates', 'nysia-proto', 'src', 'frame.rs');
 const driftGuard = join(repoRoot, 'scripts', 'ts-drift.ts');
 
 /**
- * The nested path the type probe must appear at, as the guard reports it.
- *
- * Not exported: importing this module would run the proof. The restore test spawns the
- * script as a child process and keeps its own copy of this string.
- */
-const PROBE_BINDING = 'drift_probe/DriftProbe.ts';
-
-/** The generated value module the second probe must move. */
-const CONSTANTS_BINDING = 'wireConstants.ts';
-
-/**
  * A test seam, read by `scripts/prove-ts-drift.restore.test.ts`.
  *
- * Set to `after-mutation` to make the proof fail on purpose immediately after it writes
- * the first probe. That is the path that used to leave a developer with a mutated working
- * tree, so it is the path that has to be exercised.
+ * Set it to a probe's name to make the proof fail on purpose the instant that probe has
+ * mutated its file. Those are the paths that used to leave a developer with a modified
+ * working tree, so they are the paths that have to be exercised — and there is one per
+ * probe, because a seam that only covered the first would leave every later restore
+ * untested.
  */
 const FAULT = process.env['NYSIA_PROVE_TS_DRIFT_FAULT'];
 
@@ -126,29 +117,6 @@ function requireClean(when: string): void {
   }
 }
 
-/**
- * Assert the guard tripped on drift and named `binding`.
- *
- * Naming it matters as much as tripping: a guard that reports drift without mentioning the
- * file the probe moved is comparing something else, and would keep reporting success for
- * the file nobody is watching.
- */
-function requireTrips(binding: string, vacuity: string): void {
-  const after = runGuard();
-  if (after.status === 0) {
-    fail(`nysia-proto changed and the guard still passed (expected ${binding} to move)`);
-  }
-  if (after.status !== 1) {
-    fail(
-      `expected exit 1 (drift); got ${after.status}. Exit 2 means the generator failed, ` +
-        'which would make this proof pass for the wrong reason.',
-    );
-  }
-  if (!after.output.includes(binding)) {
-    fail(`the guard tripped but never named ${binding}. ${vacuity}`);
-  }
-}
-
 /** Replace exactly one occurrence, or say so rather than silently doing nothing. */
 function replaceOnce(source: Buffer, before: string, after: string, file: string): Buffer {
   const text = source.toString('utf8');
@@ -162,53 +130,113 @@ function replaceOnce(source: Buffer, before: string, after: string, file: string
   return Buffer.from(text.replace(before, after), 'utf8');
 }
 
+interface Probe {
+  /** Also the value the fault seam takes to stop here. */
+  readonly name: string;
+  readonly file: string;
+  /** Bytes as found, so the restore puts back exactly what was there. */
+  readonly original: Buffer;
+  readonly mutated: () => Buffer;
+  /** The binding the guard must name once this probe has run. */
+  readonly binding: string;
+  /** What the guard failing to name that binding would mean. */
+  readonly vacuity: string;
+}
+
 // Bytes, not strings: reading and writing through utf8 would rewrite line endings on a
 // CRLF checkout, and this script must put back exactly what it found.
 const identityOriginal = readFileSync(identity);
 const frameOriginal = readFileSync(frame);
 
+const probes: readonly Probe[] = [
+  {
+    name: 'identity',
+    file: identity,
+    original: identityOriginal,
+    mutated: () => Buffer.concat([identityOriginal, Buffer.from(PROBE, 'utf8')]),
+    binding: 'drift_probe/DriftProbe.ts',
+    vacuity:
+      'It is comparing the top level only, so every nested binding is silently outside ' +
+      'the diff.',
+  },
+  {
+    name: 'frame',
+    file: frame,
+    original: frameOriginal,
+    mutated: () => replaceOnce(frameOriginal, KIND_BYTE_BEFORE, KIND_BYTE_AFTER, frame),
+    binding: 'wireConstants.ts',
+    vacuity:
+      'The guard is watching the ts-rs type files and ignoring the generated values, so ' +
+      'a frame kind byte could change in Rust without CI noticing — and a wrong kind ' +
+      'byte misroutes binary data rather than failing to compile.',
+  },
+];
+
+/** Mutate, and say so. The marker is what the restore test keys on. */
+function applyProbe(probe: Probe): void {
+  writeFileSync(probe.file, probe.mutated());
+  process.stderr.write(`prove:ts-drift: mutated ${probe.file}\n`);
+}
+
+/**
+ * Run one probe end to end: mutate, require the guard to trip and name the binding,
+ * restore, and require the guard to go clean again before the next probe starts.
+ *
+ * Naming the binding matters as much as tripping: a guard that reports drift without
+ * mentioning the file the probe moved is comparing something else, and would keep reporting
+ * success for the file nobody is watching.
+ */
+function runProbe(probe: Probe): void {
+  applyProbe(probe);
+
+  const after = runGuard();
+  if (after.status === 0) {
+    fail(`nysia-proto changed and the guard still passed (expected ${probe.binding} to move)`);
+  }
+  if (after.status !== 1) {
+    fail(
+      `expected exit 1 (drift); got ${after.status}. Exit 2 means the generator failed, ` +
+        'which would make this proof pass for the wrong reason.',
+    );
+  }
+  if (!after.output.includes(probe.binding)) {
+    fail(`the guard tripped but never named ${probe.binding}. ${probe.vacuity}`);
+  }
+
+  writeFileSync(probe.file, probe.original);
+  requireClean(`after restoring the ${probe.name} probe`);
+}
+
 let failure: string | undefined;
 
 try {
-  if (FAULT !== 'after-mutation') {
-    requireClean('before the mutation');
+  if (FAULT === undefined) {
+    requireClean('before the first mutation');
+    for (const probe of probes) {
+      runProbe(probe);
+    }
+  } else {
+    // Fault mode goes straight to the probe under test and stops the moment its file is
+    // mutated. Every `runGuard` is a cargo invocation, and what the seam exists to exercise
+    // is the restore — running the earlier probes first would add minutes to the restore
+    // test and not one line of extra coverage.
+    const target = probes.find((probe) => probe.name === FAULT);
+    if (target === undefined) {
+      fail(
+        `unknown fault point ${FAULT}; expected one of ` +
+          probes.map((probe) => probe.name).join(', '),
+      );
+    }
+    applyProbe(target);
+    fail(`injected fault (NYSIA_PROVE_TS_DRIFT_FAULT=${FAULT})`);
   }
-
-  // Probe 1 — a new exported type, in a subdirectory.
-  writeFileSync(identity, Buffer.concat([identityOriginal, Buffer.from(PROBE, 'utf8')]));
-  // The marker is what the restore test keys on: it proves the file really was mutated
-  // before the failure path was taken, so a passing restore is not just a no-op.
-  process.stderr.write(`prove:ts-drift: mutated ${identity}\n`);
-
-  if (FAULT === 'after-mutation') {
-    fail('injected fault (NYSIA_PROVE_TS_DRIFT_FAULT=after-mutation)');
-  }
-
-  requireTrips(
-    PROBE_BINDING,
-    'It is comparing the top level only, so every nested binding is silently outside the ' +
-      'diff.',
-  );
-
-  writeFileSync(identity, identityOriginal);
-  requireClean('after restoring identity.rs');
-
-  // Probe 2 — a changed numeric value, which ts-rs does not export at all.
-  writeFileSync(frame, replaceOnce(frameOriginal, KIND_BYTE_BEFORE, KIND_BYTE_AFTER, frame));
-  process.stderr.write(`prove:ts-drift: mutated ${frame}\n`);
-
-  requireTrips(
-    CONSTANTS_BINDING,
-    'The guard is watching the ts-rs type files and ignoring the generated values, so a ' +
-      'frame kind byte could change in Rust without CI noticing — and a wrong kind byte ' +
-      'misroutes binary data rather than failing to compile.',
-  );
 } catch (error) {
   if (!(error instanceof ProofFailure)) throw error;
   failure = error.message;
 } finally {
-  writeFileSync(identity, identityOriginal);
-  writeFileSync(frame, frameOriginal);
+  for (const probe of probes) {
+    writeFileSync(probe.file, probe.original);
+  }
 }
 
 if (failure !== undefined) {
@@ -220,12 +248,12 @@ const restored = runGuard();
 if (restored.status !== 0) {
   process.stderr.write(
     `prove:ts-drift FAILED — the guard did not go clean again after restoring ` +
-      `identity.rs and frame.rs (exit ${restored.status})\n`,
+      `${probes.map((probe) => probe.name).join(' and ')} (exit ${restored.status})\n`,
   );
   process.exit(1);
 }
 
 process.stdout.write(
-  `prove:ts-drift OK — the guard trips on a new type (${PROBE_BINDING}, nested) and on a ` +
-    `changed wire constant (${CONSTANTS_BINDING}), and clears when both are fixed\n`,
+  `prove:ts-drift OK — the guard trips on a new type (${probes[0]?.binding}, nested) and ` +
+    `on a changed wire constant (${probes[1]?.binding}), and clears when both are fixed\n`,
 );
