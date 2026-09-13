@@ -7,7 +7,7 @@ import { Titlebar } from './chrome/Titlebar';
 import { SessionPane } from './session/SessionPane';
 import { SettingsScreen } from './settings/SettingsScreen';
 import { ProjectsSidebar } from './sidebar/ProjectsSidebar';
-import { useSnapshot } from './store/useStore';
+import { useSnapshot } from './store/hooks';
 import { ComingSoon } from './ui/ComingSoon';
 
 /**

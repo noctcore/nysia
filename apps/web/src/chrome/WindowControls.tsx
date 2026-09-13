@@ -1,5 +1,4 @@
-import { runCommand } from '../store/runCommand';
-import { useStore } from '../store/useStore';
+import { useCommands } from '../store/hooks';
 import { GLYPH } from '../ui/glyphs';
 
 /**
@@ -11,7 +10,7 @@ import { GLYPH } from '../ui/glyphs';
  * correct for a window that has no shell around it yet.
  */
 export function WindowControls() {
-  const { window } = useStore();
+  const { window } = useCommands();
 
   return (
     <div className="flex h-titlebar">
@@ -41,13 +40,13 @@ function ControlButton({
   readonly label: string;
   readonly glyph: string;
   readonly className?: string;
-  readonly onClick: () => Promise<void>;
+  readonly onClick: () => void;
 }) {
   return (
     <button
       type="button"
       aria-label={label}
-      onClick={() => runCommand(onClick())}
+      onClick={() => onClick()}
       className={`text-fg2 hover:bg-bg2 grid w-[46px] cursor-pointer place-items-center border-0 bg-transparent focus-visible:shadow-focus focus-visible:outline-none ${className}`}
     >
       <span aria-hidden="true">{glyph}</span>

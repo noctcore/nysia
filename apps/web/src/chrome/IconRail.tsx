@@ -1,5 +1,4 @@
-import { runCommand } from '../store/runCommand';
-import { useSnapshot, useStore } from '../store/useStore';
+import { useCommands, useSnapshot } from '../store/hooks';
 import type { NavSection } from '../store/types';
 import { GLYPH } from '../ui/glyphs';
 
@@ -22,7 +21,7 @@ const DESTINATIONS: readonly { readonly section: NavSection; readonly label: str
 
 export function IconRail({ onOpenSettings }: { readonly onOpenSettings: () => void }) {
   const { nav } = useSnapshot();
-  const store = useStore();
+  const commands = useCommands();
 
   return (
     <nav
@@ -35,7 +34,7 @@ export function IconRail({ onOpenSettings }: { readonly onOpenSettings: () => vo
           label={label}
           glyph={glyph}
           active={nav === section}
-          onClick={() => runCommand(store.selectNav(section))}
+          onClick={() => commands.selectNav(section)}
         />
       ))}
       <RailButton

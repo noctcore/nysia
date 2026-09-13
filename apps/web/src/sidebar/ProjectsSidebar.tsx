@@ -1,8 +1,7 @@
 import { useMemo, useState } from 'react';
 
 import { formatAge } from '../format';
-import { runCommand } from '../store/runCommand';
-import { useSnapshot, useStore } from '../store/useStore';
+import { useCommands, useSnapshot } from '../store/hooks';
 import type { Project, SessionSummary, Worktree } from '../store/types';
 import { GLYPH } from '../ui/glyphs';
 import { SectionLabel } from '../ui/SectionLabel';
@@ -21,7 +20,7 @@ import { useNow } from '../ui/useNow';
  */
 export function ProjectsSidebar() {
   const { projects, activeProjectId } = useSnapshot();
-  const store = useStore();
+  const commands = useCommands();
   const [query, setQuery] = useState('');
 
   const visible = useMemo(() => filterProjects(projects, query), [projects, query]);
@@ -68,7 +67,7 @@ export function ProjectsSidebar() {
                 <button
                   type="button"
                   aria-current={project.id === activeProjectId ? 'true' : undefined}
-                  onClick={() => runCommand(store.selectProject(project.id))}
+                  onClick={() => commands.selectProject(project.id)}
                   className="text-fg hover:bg-bg2 flex w-full cursor-pointer items-center gap-2.5 rounded-chip border-0 bg-transparent px-2.5 py-[7px] text-left focus-visible:shadow-focus focus-visible:outline-none"
                 >
                   <ProjectAvatar />
@@ -130,13 +129,13 @@ function SessionRow({
   readonly session: SessionSummary;
   readonly now: number;
 }) {
-  const store = useStore();
+  const commands = useCommands();
   const { activeTab } = useSnapshot();
 
   return (
     <button
       type="button"
-      onClick={() => runCommand(store.selectTab(session.paneKey))}
+      onClick={() => commands.selectTab(session.paneKey)}
       aria-current={session.paneKey === activeTab ? 'true' : undefined}
       className={`flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent p-0 text-left text-xs focus-visible:shadow-focus focus-visible:outline-none ${
         session.kind === 'agent' ? 'text-fg' : 'text-fg2'

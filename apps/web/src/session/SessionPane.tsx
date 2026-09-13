@@ -1,4 +1,4 @@
-import { useSnapshot } from '../store/useStore';
+import { useSnapshot } from '../store/hooks';
 import { GLYPH } from '../ui/glyphs';
 
 /**

@@ -1,5 +1,5 @@
-import { runCommand } from '../store/runCommand';
-import { useSnapshot, useStore } from '../store/useStore';
+import type { StoreError } from '../store/errors';
+import { useCommands, useSnapshot } from '../store/hooks';
 import { GLYPH } from '../ui/glyphs';
 
 /**
@@ -16,7 +16,7 @@ import { GLYPH } from '../ui/glyphs';
  */
 export function CommandErrors() {
   const { errors } = useSnapshot();
-  const store = useStore();
+  const commands = useCommands();
 
   if (errors.length === 0) {
     return null;
@@ -30,27 +30,40 @@ export function CommandErrors() {
       className="pointer-events-none absolute bottom-statusbar left-3.5 z-30 flex w-[380px] flex-col gap-2 pb-2"
     >
       {errors.map((error) => (
-        <div
+        <Notice
           key={error.id}
-          className="border-status-failed bg-bg2 text-term pointer-events-auto flex items-start gap-3 rounded-panel border p-3 shadow-flyout"
-        >
-          <span aria-hidden="true" className="text-status-failed leading-none">
-            {GLYPH.dot}
-          </span>
-          <div className="flex-1">
-            <div className="text-fg font-semibold">{error.command} failed</div>
-            <div className="text-fg2 mt-1 leading-normal">{error.message}</div>
-          </div>
-          <button
-            type="button"
-            aria-label={`Dismiss ${error.command} failure`}
-            onClick={() => runCommand(store.dismissError(error.id))}
-            className="text-fg3 hover:text-fg cursor-pointer border-0 bg-transparent p-0 leading-none focus-visible:shadow-focus focus-visible:outline-none"
-          >
-            {GLYPH.close}
-          </button>
-        </div>
+          error={error}
+          onDismiss={() => commands.dismissError(error.id)}
+        />
       ))}
+    </div>
+  );
+}
+
+function Notice({
+  error,
+  onDismiss,
+}: {
+  readonly error: StoreError;
+  readonly onDismiss: () => void;
+}) {
+  return (
+    <div className="border-status-failed bg-bg2 text-term pointer-events-auto flex items-start gap-3 rounded-panel border p-3 shadow-flyout">
+      <span aria-hidden="true" className="text-status-failed leading-none">
+        {GLYPH.dot}
+      </span>
+      <div className="flex-1">
+        <div className="text-fg font-semibold">{error.command} failed</div>
+        <div className="text-fg2 mt-1 leading-normal">{error.message}</div>
+      </div>
+      <button
+        type="button"
+        aria-label={`Dismiss ${error.command} failure`}
+        onClick={onDismiss}
+        className="text-fg3 hover:text-fg cursor-pointer border-0 bg-transparent p-0 leading-none focus-visible:shadow-focus focus-visible:outline-none"
+      >
+        {GLYPH.close}
+      </button>
     </div>
   );
 }

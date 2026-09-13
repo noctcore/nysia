@@ -1,7 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 
-import { runCommand } from '../store/runCommand';
-import { useSnapshot, useStore } from '../store/useStore';
+import { useCommands, useSnapshot } from '../store/hooks';
 import { GLYPH } from '../ui/glyphs';
 import { SectionLabel } from '../ui/SectionLabel';
 import { useDismiss } from '../ui/useDismiss';
@@ -17,7 +16,7 @@ import { useDismiss } from '../ui/useDismiss';
  */
 export function NewTabButton() {
   const { launchers } = useSnapshot();
-  const store = useStore();
+  const commands = useCommands();
   const [open, setOpen] = useState(false);
   const container = useRef<HTMLDivElement>(null);
 
@@ -54,7 +53,7 @@ export function NewTabButton() {
                   role="menuitem"
                   onClick={() => {
                     close();
-                    runCommand(store.openTab(item.id));
+                    commands.openTab(item.id);
                   }}
                   className="text-fg hover:bg-bg3 flex cursor-pointer items-center gap-2.5 rounded-chip border-0 bg-transparent px-2.5 py-[7px] text-left focus-visible:shadow-focus focus-visible:outline-none"
                 >
