@@ -153,38 +153,70 @@ fn client_id() -> ClientId {
 /// when the daemon reports the verb failed.
 pub async fn run(verb: Verb, no_spawn: bool) -> Result<(), VerbError> {
     let json = verb.json();
+    // The arguments are checked *before* a daemon is needed. Finding out that a handle is
+    // malformed should not cost a process: without this ordering, `nysia terminal read
+    // not-a-handle` starts a whole daemon and then refuses the handle it already had in hand.
+    let request = prepare(verb)?;
     let mut client = connect(no_spawn).await?;
-    match verb {
-        Verb::SessionCreate(args) => {
-            let created = client.session_create(create_request(&args)?).await?;
+    match request {
+        Prepared::SessionCreate(request) => {
+            let created = client.session_create(request).await?;
             print_created(&created, json);
         }
-        Verb::SessionList { .. } => {
+        Prepared::SessionList => {
             let sessions = client.session_list().await?;
             print_sessions(&sessions, json);
         }
-        Verb::SessionClose { handle, .. } => {
-            client.session_close(parse_handle(&handle)?).await?;
+        Prepared::SessionClose(handle) => {
+            client.session_close(handle).await?;
             print_done("closed", json);
         }
-        Verb::TerminalRead(args) => {
-            let result = client.terminal_read(read_request(&args)?).await?;
+        Prepared::TerminalRead(request) => {
+            let result = client.terminal_read(request).await?;
             print_read(&result, json);
         }
-        Verb::TerminalSend(args) => {
-            client.terminal_send(send_request(&args)?).await?;
+        Prepared::TerminalSend(request) => {
+            client.terminal_send(request).await?;
             print_done("sent", json);
         }
-        Verb::TerminalResize(args) => {
-            client.terminal_resize(resize_request(&args)?).await?;
+        Prepared::TerminalResize(request) => {
+            client.terminal_resize(request).await?;
             print_done("resized", json);
         }
-        Verb::TerminalWait(args) => {
-            let result = client.terminal_wait(wait_request(&args)?).await?;
+        Prepared::TerminalWait(request) => {
+            let result = client.terminal_wait(request).await?;
             print_wait(&result, json);
         }
     }
     Ok(())
+}
+
+/// A verb whose arguments have been checked and turned into the wire request.
+///
+/// The type exists to make the ordering above impossible to get wrong again: there is no way
+/// to reach the socket holding anything but a request that already parsed.
+#[derive(Debug)]
+enum Prepared {
+    SessionCreate(SessionCreate),
+    SessionList,
+    SessionClose(SessionHandle),
+    TerminalRead(TerminalRead),
+    TerminalSend(TerminalSend),
+    TerminalResize(TerminalResize),
+    TerminalWait(TerminalWait),
+}
+
+/// Check a verb's arguments, without touching the socket.
+fn prepare(verb: Verb) -> Result<Prepared, VerbError> {
+    Ok(match verb {
+        Verb::SessionCreate(args) => Prepared::SessionCreate(create_request(&args)?),
+        Verb::SessionList { .. } => Prepared::SessionList,
+        Verb::SessionClose { handle, .. } => Prepared::SessionClose(parse_handle(&handle)?),
+        Verb::TerminalRead(args) => Prepared::TerminalRead(read_request(&args)?),
+        Verb::TerminalSend(args) => Prepared::TerminalSend(send_request(&args)?),
+        Verb::TerminalResize(args) => Prepared::TerminalResize(resize_request(&args)?),
+        Verb::TerminalWait(args) => Prepared::TerminalWait(wait_request(&args)?),
+    })
 }
 
 /// Parse a session handle, saying what a good one looks like.
