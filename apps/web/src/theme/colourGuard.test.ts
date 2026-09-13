@@ -164,9 +164,15 @@ describe('findColourLiterals', () => {
 
   it('finds a colour beside a url quoted inside the same value', () => {
     // Missed by every earlier version of the rule, because the inner quote closed the
-    // value early. One pattern per quote character is what lets the value carry the others.
+    // value early. One pattern per quote character is what lets the value carry the others,
+    // whichever way round they are nested.
     expect(
       findColourLiterals(`style={{ background: "url('a.png') no-repeat red" }}`).map(
+        (c) => c.kind,
+      ),
+    ).toEqual(['named-colour']);
+    expect(
+      findColourLiterals(`style={{ background: 'url("a.png") no-repeat red' }}`).map(
         (c) => c.kind,
       ),
     ).toEqual(['named-colour']);

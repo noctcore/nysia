@@ -93,10 +93,11 @@ const PALETTE_CLASS = new RegExp(
  * value contain the *other* quote, catching a shorthand whose url is quoted inside it.
  *
  * What it still cannot see, stated so the next reader knows it is known and can trust the
- * rest of this list: a colour that reaches CSS through a variable rather than a literal,
- * and a colour name in a string that no painting property introduces. Both need types or a
- * parser rather than a sweep; the hex and colour-function rules, which do scan whole files,
- * are the backstop.
+ * rest of this list: a colour that reaches CSS through a variable rather than a literal, a
+ * colour name in a string that no painting property introduces, and a value whose own quote
+ * character appears inside it escaped, which ends the match early. The first two need types
+ * or a parser rather than a sweep; the third needs one, and the hex and colour-function
+ * rules, which do scan whole files, are the backstop for all three.
  */
 const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
 
