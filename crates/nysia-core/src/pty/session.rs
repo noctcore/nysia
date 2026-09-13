@@ -714,13 +714,9 @@ mod tests {
     /// Every wait in these tests is bounded.
     const DEADLINE: Duration = Duration::from_secs(20);
 
-    /// Spawn the platform's default shell, sized for the tests.
-    fn shell() -> (PtySession, PtyOutput) {
-        PtySession::spawn(
-            SessionSpec::new(ShellProfile::platform_default())
-                .with_size(TerminalSize::new(120, 30)),
-        )
-        .expect("the platform shell must spawn")
+    /// A spec for the platform's default shell, sized for the tests.
+    fn shell_spec() -> SessionSpec {
+        SessionSpec::new(ShellProfile::platform_default()).with_size(TerminalSize::new(120, 30))
     }
 
     /// Pump output into a grid until `predicate` holds or the deadline passes.
@@ -777,6 +773,23 @@ mod tests {
         }
     }
 
+    /// Spawn `spec` and return once its shell is drawing a prompt and running commands.
+    ///
+    /// Spawning and waiting are one step on purpose. The probe below has to be written in
+    /// the language of the shell that was actually started, and when the two were chosen
+    /// separately they drifted: the Windows tree-kill test spawns `cmd` explicitly while the
+    /// probe came from `platform_default`, which on a runner with PowerShell installed is
+    /// `pwsh` — so a PowerShell probe was typed at `cmd`, which echoed it back verbatim and
+    /// the wait timed out. Taking both from one `spec` makes that mismatch unrepresentable.
+    fn spawn_ready(spec: SessionSpec) -> (PtySession, PtyOutput, TerminalState) {
+        let profile = spec.profile.clone();
+        let size = spec.size;
+        let (session, output) = PtySession::spawn(spec).expect("the session must spawn");
+        let mut state = TerminalState::new(size, VtConfig::default());
+        wait_until_ready(&session, &output, &mut state, &profile);
+        (session, output, state)
+    }
+
     /// Block until the shell is drawing a prompt and consuming input.
     ///
     /// Writing to a session the moment it is spawned races the shell's own startup, and the
@@ -784,8 +797,13 @@ mod tests {
     /// zsh" notice between the two halves of whatever was typed, and what reaches the
     /// parser is spliced nonsense. Waiting for the shell to *run* something is the only
     /// proof that the next write will be read whole.
-    fn wait_until_ready(session: &PtySession, output: &PtyOutput, state: &mut TerminalState) {
-        let probe = ready_probe(&ShellProfile::platform_default());
+    fn wait_until_ready(
+        session: &PtySession,
+        output: &PtyOutput,
+        state: &mut TerminalState,
+        profile: &ShellProfile,
+    ) {
+        let probe = ready_probe(profile);
         session
             .write(format!("{probe}{}", line_end()).as_bytes())
             .expect("write the readiness probe");
@@ -801,15 +819,9 @@ mod tests {
         if cfg!(windows) { "\r" } else { "\n" }
     }
 
-    fn grid() -> TerminalState {
-        TerminalState::new(TerminalSize::new(120, 30), VtConfig::default())
-    }
-
     #[test]
     fn an_echo_reaches_the_rendered_screen() {
-        let (session, output) = shell();
-        let mut state = grid();
-        wait_until_ready(&session, &output, &mut state);
+        let (session, output, mut state) = spawn_ready(shell_spec());
         session
             .write(b"echo nysia-marker-one\r")
             .expect("write to the shell");
@@ -828,9 +840,7 @@ mod tests {
 
     #[test]
     fn a_resize_reaches_the_child() {
-        let (session, output) = shell();
-        let mut state = grid();
-        wait_until_ready(&session, &output, &mut state);
+        let (session, output, mut state) = spawn_ready(shell_spec());
 
         session
             .resize(TerminalSize::new(40, 10))
@@ -855,9 +865,7 @@ mod tests {
 
     #[test]
     fn the_exit_status_is_captured() {
-        let (session, output) = shell();
-        let mut state = grid();
-        wait_until_ready(&session, &output, &mut state);
+        let (session, _output, _state) = spawn_ready(shell_spec());
 
         session.write(b"exit 7\r").expect("write");
         let status = session
@@ -871,7 +879,7 @@ mod tests {
 
     #[test]
     fn shutdown_is_idempotent_and_bounded() {
-        let (session, _output) = shell();
+        let (session, _output) = PtySession::spawn(shell_spec()).expect("spawn");
         let start = Instant::now();
         session.shutdown(Duration::from_millis(500));
         session.shutdown(Duration::from_millis(500));
@@ -888,9 +896,29 @@ mod tests {
 
     #[test]
     fn a_session_has_a_handle_and_a_pid() {
-        let (session, _output) = shell();
+        let (session, _output) = PtySession::spawn(shell_spec()).expect("spawn");
         assert!(session.handle().as_str().starts_with("sess_"));
         assert!(session.pid().is_some_and(|pid| pid > 0));
+    }
+
+    #[test]
+    fn each_shell_gets_a_readiness_probe_written_in_its_own_language() {
+        // The three are genuinely different languages, and sending one shell another's
+        // probe is what broke the Windows leg: `cmd` echoed a PowerShell subexpression back
+        // verbatim and the wait timed out. Both forms are verified against a live shell —
+        // the `cmd` one on the development machine, the `pwsh` one on CI, which is where
+        // PowerShell is installed.
+        let cmd = ready_probe(&ShellProfile::CommandPrompt);
+        let pwsh = ready_probe(&ShellProfile::PowerShell7);
+        let posix = ready_probe(&ShellProfile::Posix);
+        assert_ne!(cmd, pwsh);
+        assert_ne!(pwsh, posix);
+        for probe in [&cmd, &pwsh, &posix] {
+            assert!(
+                !probe.contains(READY),
+                "{probe:?} already contains {READY}, so an echo of it would satisfy the wait"
+            );
+        }
     }
 
     #[test]
@@ -912,7 +940,7 @@ mod tests {
         // With nobody receiving, a reader that stopped reading would leave the child
         // blocked in `write` and, on Windows, leave `ClosePseudoConsole` with nowhere to
         // put its flush. The reader keeps draining and discards instead.
-        let (session, output) = shell();
+        let (session, output) = PtySession::spawn(shell_spec()).expect("spawn");
         drop(output);
         let _ = session.write(b"echo nysia-nobody-is-listening\r");
 
@@ -951,9 +979,7 @@ mod tests {
         // to promise is that neither fact is *derived* from the other: the exit status comes
         // from `wait()` on the waiter thread and EOF from the read loop on the reader
         // thread, and that is what this pins.
-        let (session, output) = shell();
-        let mut state = grid();
-        wait_until_ready(&session, &output, &mut state);
+        let (session, _output, _state) = spawn_ready(shell_spec());
 
         // Output has flowed and the reader has gone quiet again. Neither is an exit, and an
         // implementation that inferred one from an idle reader would fail here.
@@ -1047,15 +1073,11 @@ mod tests {
         // The end-to-end form of the same guarantee, because this was reported as reachable
         // on ConPTY: a session built with an attacker-controlled endpoint and a child-session
         // marker printed both on the rendered screen.
-        let (session, output) = PtySession::spawn(
-            SessionSpec::new(ShellProfile::platform_default())
-                .with_size(TerminalSize::new(120, 30))
+        let (session, output, mut state) = spawn_ready(
+            shell_spec()
                 .with_env("CLAUDECODE", "1")
                 .with_env("ANTHROPIC_BASE_URL", "https://nysia-attacker.invalid"),
-        )
-        .expect("the platform shell must spawn");
-        let mut state = grid();
-        wait_until_ready(&session, &output, &mut state);
+        );
 
         #[cfg(windows)]
         let probe = "echo scrubbed=[%CLAUDECODE%][%ANTHROPIC_BASE_URL%]";
@@ -1089,10 +1111,9 @@ mod tests {
         // `exec sh -c` so the leader ignores SIGTERM *and* never reads stdin — otherwise the
         // newline and VEOF that `portable-pty` writes when it drops the master half would
         // end the shell on their own and the kill would not be what proved anything.
-        let (session, output) = PtySession::spawn(SessionSpec::new(ShellProfile::Posix))
-            .expect("a posix shell must spawn");
-        let mut state = grid();
-        wait_until_ready(&session, &output, &mut state);
+        let (session, output, mut state) = spawn_ready(
+            SessionSpec::new(ShellProfile::Posix).with_size(TerminalSize::new(120, 30)),
+        );
         let leader = session.pid().expect("a spawned session has a pid");
 
         session
@@ -1127,10 +1148,9 @@ mod tests {
         // where `$!.end` is read as the history event `!.end` and the whole line is
         // rejected with "event not found". `sh -c` gets a pid from `$$` with no `!` in
         // sight, and `exec` keeps that pid for the `sleep` that replaces it.
-        let (session, output) = PtySession::spawn(SessionSpec::new(ShellProfile::Posix))
-            .expect("a posix shell must spawn");
-        let mut state = grid();
-        wait_until_ready(&session, &output, &mut state);
+        let (session, output, mut state) = spawn_ready(
+            SessionSpec::new(ShellProfile::Posix).with_size(TerminalSize::new(120, 30)),
+        );
 
         session
             .write(b"sh -c 'echo nysia-orphan-pid=$$.end; exec sleep 300' &\n")
@@ -1186,12 +1206,9 @@ mod tests {
     #[cfg(windows)]
     fn a_tree_kill_leaves_no_orphan() {
         // ConPTY has no signals, so the Job Object is the only tree-kill there is.
-        let (session, output) = PtySession::spawn(
+        let (session, output, mut state) = spawn_ready(
             SessionSpec::new(ShellProfile::CommandPrompt).with_size(TerminalSize::new(120, 30)),
-        )
-        .expect("cmd.exe must spawn");
-        let mut state = grid();
-        wait_until_ready(&session, &output, &mut state);
+        );
 
         // `Start-Process` detaches the child from the console, which is exactly the kind of
         // process a kill aimed at the direct child would leave behind.
