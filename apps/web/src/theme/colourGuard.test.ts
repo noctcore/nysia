@@ -34,12 +34,13 @@ const scanned: readonly ScannedFile[] = Object.entries(modules)
   .map(([path, source]) => ({ path: normalize(path), source: String(source) }))
   .filter(({ path }) => !path.endsWith('.test.ts') && !path.startsWith('src/generated/'));
 
-/** The four shapes, written only here — the guard module deliberately contains none. */
+/** The five shapes, written only here — the guard module deliberately contains none. */
 const OFFENDERS = [
   { kind: 'hex', snippet: 'style={{ color: "#ff0000" }}' },
   { kind: 'function', snippet: 'style={{ color: "rgb(255 0 0)" }}' },
   { kind: 'palette-class', snippet: 'className="text-red-500"' },
   { kind: 'named-colour', snippet: 'className="[color:red]"' },
+  { kind: 'named-colour', snippet: "style={{ color: 'red' }}" },
 ] as const;
 
 describe('findColourLiterals', () => {
@@ -79,6 +80,28 @@ describe('findColourLiterals', () => {
     ]);
   });
 
+  it('finds a named colour in an inline style, the same as hex and a function', () => {
+    // The gap this closes: the bracket-only rule let an inline style naming a colour ship
+    // with every gate green, while the same style naming a hex was caught.
+    for (const style of [
+      "style={{ color: 'red' }}",
+      'style={{ background: "rebeccapurple" }}',
+      "style={{ borderColor: 'DarkSlateGray' }}",
+    ]) {
+      expect(findColourLiterals(style).map((c) => c.kind), style).toEqual(['named-colour']);
+    }
+  });
+
+  it('does not mistake prose or an ordinary short string for a colour', () => {
+    // The whole string has to be the colour name, which is what keeps English out: a
+    // comment mentioning one is not a one-word string literal, and a doc comment marks up
+    // code with backticks rather than quotes.
+    expect(findColourLiterals('// the red build turned green again')).toEqual([]);
+    expect(findColourLiterals('/** paints it `red` when it fails */')).toEqual([]);
+    expect(findColourLiterals("const label = 'red alert';")).toEqual([]);
+    expect(findColourLiterals("t('Tasks')")).toEqual([]);
+  });
+
   it('does not fire on tokens, on the colours that follow the theme, or on prose', () => {
     expect(findColourLiterals('color: var(--color-acc)')).toEqual([]);
     expect(findColourLiterals('className="bg-transparent text-current text-inherit"')).toEqual(
@@ -112,6 +135,7 @@ describe('hardcoded colour guard', () => {
     // line added, rather than handing a string to the regex. A guard that is quietly
     // unwired — scanning an empty file list, or filtering away everything — passes a
     // fixture test and fails this one.
+    expect(new Set(OFFENDERS.map((o) => o.kind)).size).toBe(4);
     for (const { kind, snippet } of OFFENDERS) {
       const poisoned = scanned.map((file) =>
         file.path === 'src/App.tsx'

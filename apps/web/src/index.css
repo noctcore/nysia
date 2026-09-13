@@ -13,8 +13,8 @@
 
 /*
  * The token layer (design-spec.md §1). This file and `src/theme/themes.ts` are the only
- * two places in `apps/web` allowed to carry a colour literal — `src/theme/hexGuard.test.ts`
- * fails the build if a third appears.
+ * two places in `apps/web` allowed to carry a colour literal —
+ * `src/theme/colourGuard.test.ts` fails the build if a third appears.
  *
  * The colour values here are Ember, the default theme, so the first paint is correct
  * before any JavaScript runs. `ThemeProvider` then writes the same custom property names
