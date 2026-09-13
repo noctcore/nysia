@@ -1,12 +1,13 @@
 /**
  * The architecture-rule runner, wired into `pnpm lint`.
  *
- * Two rules today (D-14 keeps the set minimal and lets it ratchet):
+ * Three rules today (D-14 keeps the set minimal and lets it ratchet):
  *
  *   a. nothing outside `apps/desktop` and `apps/web/src/transport` may import tauri;
- *   b. `nysia-core` must not depend on tauri, directly or through another Nysia crate.
+ *   b. no Rust crate outside `apps/desktop` may declare a tauri dependency;
+ *   c. `nysia-core` must not reach tauri through another Nysia crate.
  *
- * Both ship with a fixture proving they trip — `pnpm prove:lint-meta`. A check that passes
+ * Each ships a fixture proving it trips — `pnpm prove:lint-meta`. A check that passes
  * without exercising anything is worse than no check (traps register #13).
  *
  * Usage: `node tools/lint-meta/src/cli.ts [root]`
@@ -24,7 +25,7 @@ const includeFixtures = process.argv.includes('--include-fixtures');
 const violations = runRules(root, includeFixtures);
 
 if (violations.length === 0) {
-  process.stdout.write('lint-meta: 2 rules, 0 violations\n');
+  process.stdout.write('lint-meta: 3 rules, 0 violations\n');
   process.exit(0);
 }
 

@@ -1,0 +1,6 @@
+[package]
+name = "nysia"
+
+[dependencies]
+nysia-core = { path = "../nysia-core" }
+clap = { workspace = true }

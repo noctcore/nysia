@@ -1,0 +1,9 @@
+# Rule (b): the daemon binary linking the UI toolkit. `tauri` is already in the workspace
+# dependency table, so this needs no shared-file edit at all — which is exactly why the
+# rule has to inspect every crate and not just the chain rooted at nysia-core.
+[package]
+name = "nysia"
+
+[dependencies]
+nysia-core = { path = "../nysia-core" }
+tauri = { workspace = true }

@@ -130,10 +130,36 @@ export function noTauriOutsideDesktop(root: string, files: readonly string[]): V
   return violations;
 }
 
-/** Names of the dependencies declared by a Cargo manifest, across every dependency table. */
-export function cargoDependencies(manifest: string): string[] {
-  const names = new Set<string>();
+/** One entry of a Cargo dependency table. */
+export interface CargoDependency {
+  /** The key as written, which is the name the crate is `use`d by. */
+  readonly key: string;
+  /**
+   * The crate actually pulled from the registry.
+   *
+   * Differs from `key` when the entry is renamed — `ui = { package = "tauri" }` links
+   * tauri under the name `ui`, and a scan that only read keys would never see it.
+   */
+  readonly package: string;
+}
+
+/**
+ * Every dependency a Cargo manifest declares, across every dependency table.
+ *
+ * `[workspace.dependencies]` is deliberately excluded: it is a table of *available*
+ * versions for members to opt into, not a dependency of anything. The root manifest lists
+ * tauri there on purpose, and a scan that counted it would fire on the workspace itself and
+ * teach everyone to ignore the rule.
+ */
+export function cargoDependencies(manifest: string): CargoDependency[] {
+  const found = new Map<string, string>();
   let inDependencyTable = false;
+  /** Set while inside `[dependencies.<key>]`, so a later bare `package = "x"` binds to it. */
+  let nestedKey: string | undefined;
+
+  const record = (key: string, pkg?: string): void => {
+    found.set(key, pkg ?? found.get(key) ?? key);
+  };
 
   for (const raw of manifest.split(/\r?\n/)) {
     const line = raw.trim();
@@ -142,61 +168,157 @@ export function cargoDependencies(manifest: string): string[] {
     const header = /^\[([^\]]+)\]$/.exec(line);
     if (header?.[1] !== undefined) {
       const section = header[1];
+      const isWorkspaceTable = section.startsWith('workspace.');
       // `[dependencies]`, `[dev-dependencies]`, `[target.'cfg(windows)'.dependencies]`.
-      inDependencyTable = /(^|\.)(dev-|build-)?dependencies$/.test(section);
+      inDependencyTable =
+        !isWorkspaceTable && /(^|\.)(dev-|build-)?dependencies$/.test(section);
       // `[dependencies.tauri]` names the crate in the header itself.
       const nested = /(^|\.)(dev-|build-)?dependencies\.([A-Za-z0-9_-]+)$/.exec(section);
-      if (nested?.[3] !== undefined) names.add(nested[3]);
+      nestedKey = isWorkspaceTable ? undefined : nested?.[3];
+      if (nestedKey !== undefined) record(nestedKey);
+      continue;
+    }
+
+    // Inside `[dependencies.ui]` every line describes that one entry, so the only thing
+    // worth reading is a `package = "tauri"` rename. Treating these as new keys would
+    // invent dependencies called `version` and `features`.
+    if (nestedKey !== undefined) {
+      const rename = /^package\s*=\s*['"]([A-Za-z0-9_-]+)['"]/.exec(line);
+      if (rename?.[1] !== undefined) record(nestedKey, rename[1]);
       continue;
     }
     if (!inDependencyTable) continue;
 
     const key = /^([A-Za-z0-9_-]+)\s*(?:\.[A-Za-z0-9_-]+\s*)?=/.exec(line);
-    if (key?.[1] !== undefined) names.add(key[1]);
+    if (key?.[1] === undefined) continue;
+    // `ui = { package = "tauri", version = "2" }` on one line.
+    const inlineRename = /\bpackage\s*=\s*['"]([A-Za-z0-9_-]+)['"]/.exec(line);
+    record(key[1], inlineRename?.[1]);
   }
-  return [...names];
-}
 
-const NYSIA_CRATES = ['nysia', 'nysia-core', 'nysia-proto'];
+  return [...found].map(([key, pkg]) => ({ key, package: pkg }));
+}
 
 function isTauri(name: string): boolean {
   return name === 'tauri' || name.startsWith('tauri-');
 }
 
+/** How a dependency is named in a message — `ui (package = "tauri")` when renamed. */
+function describe(dependency: CargoDependency): string {
+  return dependency.key === dependency.package
+    ? `\`${dependency.key}\``
+    : `\`${dependency.key}\` (package = "${dependency.package}")`;
+}
+
 /**
- * Rule (b): `nysia-core` must not depend on `tauri`, directly or through another Nysia
- * crate.
+ * The `name` of a manifest's `[package]` table, if it has one.
  *
- * The runtime outliving the UI is the founding constraint (D-1). A runtime that links the
- * UI toolkit cannot honour it, and the dependency would arrive by accident — someone adds
- * `tauri` to a shared crate for one convenience type and the boundary is gone.
+ * Scoped to that table on purpose: `[[bin]]` and `[lib]` also carry a `name`, and matching
+ * the first one in the file would mis-key a crate whose sections are ordered unusually.
  */
-export function coreDeclaresNoTauri(root: string, files: readonly string[]): Violation[] {
+function packageName(manifest: string): string | undefined {
+  let inPackage = false;
+  for (const raw of manifest.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.startsWith('#')) continue;
+    const header = /^\[([^\]]+)\]$/.exec(line);
+    if (header !== null) {
+      inPackage = header[1] === 'package';
+      continue;
+    }
+    if (!inPackage) continue;
+    const name = /^name\s*=\s*['"]([A-Za-z0-9_-]+)['"]/.exec(line);
+    if (name?.[1] !== undefined) return name[1];
+  }
+  return undefined;
+}
+
+/** Package name → manifest path, for every Cargo manifest in the tree. */
+function manifestsByPackage(
+  root: string,
+  files: readonly string[],
+): Map<string, { path: string; text: string }> {
+  const found = new Map<string, { path: string; text: string }>();
+  for (const file of files) {
+    if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) continue;
+    const text = readFileSync(join(root, file), 'utf8');
+    const name = packageName(text);
+    // A virtual manifest — the workspace root — has no [package] and owns no code, so
+    // there is nothing to link tauri into. Its [workspace.dependencies] table is excluded
+    // by `cargoDependencies` for the same reason.
+    if (name !== undefined) found.set(name, { path: file, text });
+  }
+  return found;
+}
+
+/**
+ * Rule (b): no Rust crate outside `apps/desktop` may declare a tauri dependency.
+ *
+ * This used to walk only the dependency chain rooted at `nysia-core`, which meant
+ * `crates/nysia/Cargo.toml` was never inspected at all. `tauri` is already in
+ * `[workspace.dependencies]`, so the worker who owns `crates/nysia/**` could add
+ * `tauri = { workspace = true }` without touching a single shared file, and the daemon
+ * binary would link the UI toolkit with nothing tripping.
+ *
+ * The runtime outliving the UI is the founding constraint (D-1). A process that links the
+ * UI toolkit cannot honour it.
+ */
+export function noTauriInRustCrates(root: string, files: readonly string[]): Violation[] {
   const violations: Violation[] = [];
-  const manifestOf = (crate: string): string | undefined => {
-    const path = `crates/${crate}/Cargo.toml`;
-    return files.includes(path) ? path : undefined;
-  };
+
+  for (const [, manifest] of manifestsByPackage(root, files)) {
+    if (TAURI_ALLOWLIST.some((prefix) => manifest.path.startsWith(prefix))) continue;
+    for (const dependency of cargoDependencies(manifest.text)) {
+      if (!isTauri(dependency.package)) continue;
+      violations.push({
+        rule: 'no-tauri-in-rust-crates',
+        file: manifest.path,
+        line: 0,
+        message:
+          `declares ${describe(dependency)}; only apps/desktop may link the UI toolkit (D-1)`,
+      });
+    }
+  }
+
+  return violations;
+}
+
+/**
+ * Rule (c): `nysia-core` must not reach tauri *through* another Nysia crate.
+ *
+ * Rule (b) catches the crate that declares the dependency. This one says what it costs:
+ * it names the chain, so the reviewer of a `nysia-proto` change can see that it has just
+ * put the UI toolkit inside the runtime. `tools/lint-meta/fixtures/trips-transitive`
+ * exercises this branch specifically — without a committed fixture it is dead code that
+ * nobody has watched fail.
+ */
+export function noTauriReachingCore(root: string, files: readonly string[]): Violation[] {
+  const violations: Violation[] = [];
+  const manifests = manifestsByPackage(root, files);
 
   const seen = new Set<string>();
   const inspect = (crate: string, via: readonly string[]): void => {
     if (seen.has(crate)) return;
     seen.add(crate);
-    const path = manifestOf(crate);
-    if (path === undefined) return;
+    const manifest = manifests.get(crate);
+    if (manifest === undefined) return;
 
-    const dependencies = cargoDependencies(readFileSync(join(root, path), 'utf8'));
-    for (const dependency of dependencies) {
-      if (isTauri(dependency)) {
-        const chain = [...via, crate].join(' -> ');
-        violations.push({
-          rule: 'core-declares-no-tauri',
-          file: path,
-          line: 0,
-          message: `${chain} depends on \`${dependency}\`; the runtime must not link the UI toolkit (D-1)`,
-        });
-      } else if (NYSIA_CRATES.includes(dependency)) {
-        inspect(dependency, [...via, crate]);
+    for (const dependency of cargoDependencies(manifest.text)) {
+      const chain = [...via, crate];
+      if (isTauri(dependency.package)) {
+        // Only the indirect case: rule (b) already reports the crate that declares it.
+        if (chain.length > 1) {
+          violations.push({
+            rule: 'no-tauri-reaching-core',
+            file: manifest.path,
+            line: 0,
+            message:
+              `${chain.join(' -> ')} depends on ${describe(dependency)}; the runtime must ` +
+              'not link the UI toolkit (D-1)',
+          });
+        }
+      } else if (manifests.has(dependency.package)) {
+        inspect(dependency.package, chain);
       }
     }
   };
@@ -208,5 +330,9 @@ export function coreDeclaresNoTauri(root: string, files: readonly string[]): Vio
 /** Run every architecture rule over the tree at `root`. */
 export function runRules(root: string, includeFixtures = false): Violation[] {
   const files = walk(root, includeFixtures);
-  return [...noTauriOutsideDesktop(root, files), ...coreDeclaresNoTauri(root, files)];
+  return [
+    ...noTauriOutsideDesktop(root, files),
+    ...noTauriInRustCrates(root, files),
+    ...noTauriReachingCore(root, files),
+  ];
 }
