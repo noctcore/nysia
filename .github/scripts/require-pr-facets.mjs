@@ -12,7 +12,7 @@
 // Run `node .github/scripts/require-pr-facets.mjs --self-test` to exercise the rule
 // itself. CI runs that too: a check nobody has watched fail is not a check (trap 12).
 
-import { readFileSync } from 'node:fs';
+import { Buffer } from 'node:buffer';
 import process from 'node:process';
 
 /** Exactly one of these. The kind of change, which a diff cannot infer. */
@@ -123,13 +123,37 @@ function selfTest() {
   process.stdout.write('require-pr-facets self-test: all cases held\n');
 }
 
-function main() {
+/**
+ * Read all of stdin.
+ *
+ * Asynchronously, and deliberately not `readFileSync(0, 'utf8')` — that is the obvious
+ * spelling and it throws `EAGAIN: resource temporarily unavailable` on Linux, where the
+ * pipe a GitHub runner hands a step is non-blocking. It works on Windows, so it passed
+ * locally and failed in CI on the first run of this very workflow. Async reads handle
+ * the would-block case instead of surfacing it as an error.
+ *
+ * @returns {Promise<string>}
+ */
+async function readStdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+async function main() {
   if (process.argv.includes('--self-test')) {
     selfTest();
     return;
   }
 
-  const labels = readFileSync(0, 'utf8')
+  if (process.stdin.isTTY === true) {
+    process.stderr.write(
+      'No label names on stdin. Usage: gh pr view <n> --json labels --jq ".labels[].name" | node .github/scripts/require-pr-facets.mjs\n',
+    );
+    process.exit(2);
+  }
+
+  const labels = (await readStdin())
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
@@ -150,4 +174,9 @@ function main() {
   process.exit(1);
 }
 
-main();
+// A rejection here must fail the step, not print a warning and exit 0 — a gate that
+// cannot read its input has not passed.
+main().catch((error) => {
+  process.stderr.write(`::error::require-pr-facets could not run: ${error.message}\n`);
+  process.exit(2);
+});
