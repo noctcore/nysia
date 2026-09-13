@@ -40,3 +40,9 @@ jobs:
 
       - name: self-test the label rules
         run: node .github/scripts/require-pr-facets.mjs --self-test
+
+      - name: self-test the labeler config rule
+        run: node .github/scripts/check-labeler-config.mjs --self-test
+
+      - name: check the labeler config
+        run: node .github/scripts/check-labeler-config.mjs
