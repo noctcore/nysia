@@ -53,6 +53,7 @@ use nysia_proto::session::{
     ExitStatus, SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary,
     ShellProfile,
 };
+use nysia_proto::stream::{StreamAttach, StreamAttached, StreamDetach, StreamId};
 use nysia_proto::terminal::{
     LineCursor, ReadMode, TerminalRead, TerminalReadResult, TerminalResize, TerminalSend,
     TerminalWait, TerminalWaitResult, WaitFor, WaitOutcome,
@@ -369,6 +370,31 @@ goldens! {
         }),
     );
 
+    request_stream_attach: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::StreamAttach(StreamAttach { handle: handle() }),
+    };
+
+    request_stream_detach: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::StreamDetach(StreamDetach { stream_id: StreamId(3) }),
+    };
+
+    response_stream_attach: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::StreamAttach(StreamAttached {
+            handle: handle(),
+            stream_id: StreamId(3),
+        }),
+    )
+    .with_receipt(MutationReceipt { request_id: request_id(), replayed: false });
+
+    response_stream_detach: ResponseEnvelope =
+        ResponseEnvelope::new(request_id(), ResponsePayload::StreamDetach)
+            .with_receipt(MutationReceipt { request_id: request_id(), replayed: false });
+
     response_error: ResponseEnvelope = ResponseEnvelope::new(
         request_id(),
         ResponsePayload::Error(
@@ -440,14 +466,20 @@ fn the_fixture_comparison_catches_a_wire_change() {
 /// The binary framing has no JSON form, so its golden is the bytes themselves.
 ///
 /// Hex rather than a `.bin`, so a change to the header layout is legible in a diff instead
-/// of showing up as "binary files differ".
+/// of showing up as "binary files differ". It pins byte order independently of the codec's
+/// own helpers: the literal `0000000b` below is what proves the stream id is big-endian, and
+/// it would still catch a swap that `encode` and `decode` agreed on between themselves.
+///
+/// The frames deliberately use two different stream ids, so the golden covers the
+/// multiplexed case rather than a single-session one.
 #[test]
 fn the_framing_still_produces_the_committed_bytes() {
     let frames = [
-        Frame::new(FrameKind::Output, b"hello\r\n".as_slice()),
-        Frame::empty(FrameKind::Bell),
+        Frame::new(FrameKind::Output, StreamId(11), b"hello\r\n".as_slice()),
+        Frame::empty(FrameKind::Bell, StreamId(258)),
         Frame::new(
             FrameKind::Exit,
+            StreamId(11),
             br#"{"outcome":"exited","code":0}"#.as_slice(),
         ),
     ];

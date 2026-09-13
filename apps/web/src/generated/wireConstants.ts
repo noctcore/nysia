@@ -22,6 +22,10 @@ export const MIN_ATTACHABLE_PROTOCOL_VERSION = 1;
 /**
  * The byte that names each kind in a frame header.
  *
+ * It says *what* a frame is. The stream id in the same header says *which session* it
+ * belongs to — one connection carries them all, so route on the id rather than assuming a
+ * run of frames belongs together.
+ *
  * Zero is deliberately absent, so a zero-filled buffer is rejected rather than read as a
  * run of empty frames. `satisfies Record<FrameKind, number>` is load-bearing: it fails the
  * typecheck if this table and the generated `FrameKind` union ever disagree.
@@ -49,9 +53,14 @@ export const FRAME_KIND_BY_BYTE: Readonly<Record<number, FrameKind | undefined>>
 };
 
 /**
- * The bytes a frame header occupies: one kind byte plus a four-byte big-endian length.
+ * The bytes a frame header occupies, in order: one kind byte, a four-byte big-endian
+ * stream id, and a four-byte big-endian payload length.
+ *
+ * Read this rather than typing 9. The header grew from 5 when stream multiplexing landed,
+ * and a hand-copied constant is exactly what survives that change quietly — a decoder that
+ * slices at the old offset reads the top half of the stream id as a length.
  */
-export const FRAME_HEADER_BYTES = 5;
+export const FRAME_HEADER_BYTES = 9;
 
 /**
  * The largest payload one frame may carry. Not a limit on the writer — a legitimate frame
