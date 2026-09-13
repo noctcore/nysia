@@ -4,6 +4,7 @@ import type { MutationReceipt } from "./MutationReceipt";
 import type { RequestId } from "./RequestId";
 import type { SessionCreated } from "./SessionCreated";
 import type { SessionSummary } from "./SessionSummary";
+import type { StreamAttached } from "./StreamAttached";
 import type { TerminalReadResult } from "./TerminalReadResult";
 import type { TerminalWaitResult } from "./TerminalWaitResult";
 
@@ -25,4 +26,4 @@ receipt: MutationReceipt | null, } & ({ "type": "session_create" } & SessionCrea
 /**
  * The rows.
  */
-sessions: Array<SessionSummary>, } | { "type": "session_close" } | { "type": "terminal_read" } & TerminalReadResult | { "type": "terminal_send" } | { "type": "terminal_resize" } | { "type": "terminal_wait" } & TerminalWaitResult | { "type": "error" } & ErrorEnvelope);
+sessions: Array<SessionSummary>, } | { "type": "session_close" } | { "type": "terminal_read" } & TerminalReadResult | { "type": "terminal_send" } | { "type": "terminal_resize" } | { "type": "terminal_wait" } & TerminalWaitResult | { "type": "stream_attach" } & StreamAttached | { "type": "stream_detach" } | { "type": "error" } & ErrorEnvelope);
