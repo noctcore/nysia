@@ -31,93 +31,91 @@ pub enum ErrorEnvelopeError {
     NoNextSteps,
 }
 
-/// What went wrong, in a form a caller can branch on.
+/// Define [`ErrorCode`] and everything keyed on its variants from one list.
 ///
-/// Open rather than closed. A client that meets a code a newer daemon added must still be
-/// able to read the rest of the envelope — the message and the next steps are the parts
-/// that actually help — so an unrecognised code lands in [`ErrorCode::Other`] instead of
-/// failing the whole frame. An error that cannot be parsed is the worst possible place to
-/// be strict.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TS)]
-#[ts(
-    export,
-    type = "\"unknown_session\" | \"invalid_request\" | \"unsupported\" | \"path_refused\" \
-            | \"spawn_failed\" | \"session_busy\" | \"internal\" | (string & {})"
-)]
-pub enum ErrorCode {
-    /// No session by that handle. Usually a handle from before a daemon restart.
-    UnknownSession,
-    /// The frame parsed as JSON but was not a valid request.
-    InvalidRequest,
-    /// A verb this daemon does not serve at the negotiated protocol version.
-    Unsupported,
-    /// A path was refused by `safe_join` / `path_confine` (§7.5).
-    PathRefused,
-    /// The PTY child could not be started.
-    SpawnFailed,
-    /// The session exists but cannot take this verb right now.
-    SessionBusy,
-    /// The daemon failed in a way the caller did nothing to cause.
-    Internal,
-    /// A code this build does not know, carried verbatim.
-    Other(String),
+/// That list used to be restated four times — the enum, `known`, `as_str` and `from_wire` —
+/// and only two of them were exhaustive matches the compiler checked. A variant could be
+/// added, satisfy both matches because the compiler demanded it, and still be missing from
+/// `known`. `known` is the list the TypeScript-union test reads, so the test passed, the
+/// suite stayed green, and the exported union shipped without the new code. The gate had
+/// moved a hand-maintained list from one place to two rather than removing it.
+///
+/// One list removes that whole class of mistake instead of catching it: a variant cannot
+/// exist without appearing in `known`, `as_str` and `from_wire`, because all four are the
+/// same tokens. The `#[ts(type = …)]` union below is the one restatement that has to stay —
+/// ts-rs rejects a container type override on an enum, and `concat!` is not a literal — so
+/// it keeps its test, which is now anchored to a `known` that cannot lie.
+macro_rules! error_codes {
+    ($( $(#[$doc:meta])* $variant:ident => $wire:literal, )+) => {
+        /// What went wrong, in a form a caller can branch on.
+        ///
+        /// Open rather than closed. A client that meets a code a newer daemon added must
+        /// still be able to read the rest of the envelope — the message and the next steps
+        /// are the parts that actually help — so an unrecognised code lands in
+        /// [`ErrorCode::Other`] instead of failing the whole frame. An error that cannot be
+        /// parsed is the worst possible place to be strict.
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TS)]
+        #[ts(
+            export,
+            type = "\"unknown_session\" | \"invalid_request\" | \"unsupported\" | \"path_refused\" \
+                    | \"spawn_failed\" | \"session_busy\" | \"internal\" | (string & {})"
+        )]
+        pub enum ErrorCode {
+            $( $(#[$doc])* $variant, )+
+            /// A code this build does not know, carried verbatim.
+            Other(String),
+        }
+
+        impl ErrorCode {
+            /// Every code this build knows, excluding [`ErrorCode::Other`].
+            ///
+            /// Generated from the same list as the variants themselves, so it cannot fall
+            /// behind them. `the_exported_typescript_union_lists_every_known_code` reads
+            /// this, and that test is only worth anything because this cannot lie.
+            #[must_use]
+            pub fn known() -> [Self; [$(stringify!($variant)),+].len()] {
+                [$(Self::$variant),+]
+            }
+
+            /// The wire spelling.
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                match self {
+                    $(Self::$variant => $wire,)+
+                    Self::Other(code) => code,
+                }
+            }
+
+            /// The code a wire spelling names, falling back to [`ErrorCode::Other`].
+            ///
+            /// Total by design: there is no "unparseable code", because refusing to read an
+            /// error leaves the caller with less than the error would have given it.
+            #[must_use]
+            pub fn from_wire(code: &str) -> Self {
+                match code {
+                    $($wire => Self::$variant,)+
+                    other => Self::Other(other.to_owned()),
+                }
+            }
+        }
+    };
 }
 
-impl ErrorCode {
-    /// Every code this build knows, excluding [`ErrorCode::Other`].
-    ///
-    /// The anchor for `the_exported_typescript_union_lists_every_known_code`. The exported
-    /// TypeScript union is a hand-written string in a `#[ts(type = …)]` attribute — ts-rs
-    /// cannot derive it, because `Other(String)` would otherwise widen the whole union to
-    /// `string` and throw away the autocomplete that makes the closed codes useful. Nothing
-    /// in the compiler ties that attribute to [`as_str`](Self::as_str), so this list plus
-    /// that test is what stops a new variant shipping with a TypeScript union that has
-    /// never heard of it.
-    #[must_use]
-    pub fn known() -> [Self; 7] {
-        [
-            Self::UnknownSession,
-            Self::InvalidRequest,
-            Self::Unsupported,
-            Self::PathRefused,
-            Self::SpawnFailed,
-            Self::SessionBusy,
-            Self::Internal,
-        ]
-    }
-
-    /// The wire spelling.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::UnknownSession => "unknown_session",
-            Self::InvalidRequest => "invalid_request",
-            Self::Unsupported => "unsupported",
-            Self::PathRefused => "path_refused",
-            Self::SpawnFailed => "spawn_failed",
-            Self::SessionBusy => "session_busy",
-            Self::Internal => "internal",
-            Self::Other(code) => code,
-        }
-    }
-
-    /// The code a wire spelling names, falling back to [`ErrorCode::Other`].
-    ///
-    /// Total by design: there is no "unparseable code", because refusing to read an error
-    /// leaves the caller with less than the error would have given it.
-    #[must_use]
-    pub fn from_wire(code: &str) -> Self {
-        match code {
-            "unknown_session" => Self::UnknownSession,
-            "invalid_request" => Self::InvalidRequest,
-            "unsupported" => Self::Unsupported,
-            "path_refused" => Self::PathRefused,
-            "spawn_failed" => Self::SpawnFailed,
-            "session_busy" => Self::SessionBusy,
-            "internal" => Self::Internal,
-            other => Self::Other(other.to_owned()),
-        }
-    }
+error_codes! {
+    /// No session by that handle. Usually a handle from before a daemon restart.
+    UnknownSession => "unknown_session",
+    /// The frame parsed as JSON but was not a valid request.
+    InvalidRequest => "invalid_request",
+    /// A verb this daemon does not serve at the negotiated protocol version.
+    Unsupported => "unsupported",
+    /// A path was refused by `safe_join` / `path_confine` (§7.5).
+    PathRefused => "path_refused",
+    /// The PTY child could not be started.
+    SpawnFailed => "spawn_failed",
+    /// The session exists but cannot take this verb right now.
+    SessionBusy => "session_busy",
+    /// The daemon failed in a way the caller did nothing to cause.
+    Internal => "internal",
 }
 
 impl fmt::Display for ErrorCode {
