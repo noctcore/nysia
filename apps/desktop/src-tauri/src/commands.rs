@@ -26,9 +26,9 @@ use nysia_proto::terminal::{TerminalResize, TerminalSend};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager};
 
-use crate::channel::framing::StreamId;
 use crate::daemon::{CommandFailure, DaemonError};
 use crate::state::Client;
+use nysia_proto::stream::StreamId;
 
 /// What every command answers with when it could not do the thing.
 type Failed<T> = Result<T, CommandFailure>;
@@ -156,7 +156,7 @@ pub async fn session_create(app: AppHandle, request: SessionCreate) -> Failed<Se
 pub async fn session_close(app: AppHandle, handle: SessionHandle) -> Failed<()> {
     let client = client(&app)?;
     blocking(move || {
-        client.forget(&handle);
+        client.detach_session(&handle);
         match client.request(RequestPayload::SessionClose(SessionClose { handle }))? {
             ResponsePayload::SessionClose => Ok(()),
             other => Err(unexpected("session_close", &other)),
@@ -182,6 +182,37 @@ pub async fn session_close(app: AppHandle, handle: SessionHandle) -> Failed<()> 
 pub async fn terminal_attach(app: AppHandle, channel: Channel<InvokeResponseBody>) -> Failed<()> {
     let client = client(&app)?;
     blocking(move || client.attach_channel(channel)).await
+}
+
+/// Ask the daemon to route a session's output on this window's stream connection.
+///
+/// Separate from [`terminal_attach`], which opens the connection itself. The daemon assigns
+/// the id — a client cannot, because ids are per connection and only the daemon knows which
+/// are in use — so this answers with the one a pane's frames will carry.
+///
+/// # Errors
+///
+/// [`CommandFailure`] if no stream connection is open, or whatever the daemon said.
+#[tauri::command]
+pub async fn stream_attach(app: AppHandle, handle: SessionHandle) -> Failed<StreamId> {
+    let client = client(&app)?;
+    blocking(move || client.attach_session(handle)).await
+}
+
+/// Stop routing a session's output.
+///
+/// # Errors
+///
+/// Never fails: a session that has already gone took its stream with it, and reporting that
+/// as an error would put a notice in front of the user for an ordinary close.
+#[tauri::command]
+pub async fn stream_detach(app: AppHandle, handle: SessionHandle) -> Failed<()> {
+    let client = client(&app)?;
+    blocking(move || {
+        client.detach_session(&handle);
+        Ok(())
+    })
+    .await
 }
 
 /// Report that the webview has rendered `bytes` of `stream`.
@@ -240,12 +271,17 @@ pub async fn terminal_resize(app: AppHandle, request: TerminalResize) -> Failed<
 /// strings that have changed between releases, and a renderer that guesses wrong either
 /// forfeits WebGL or exhausts WebKit's app-wide context cap.
 ///
+/// The body is a constant, so `spawn_blocking` buys nothing here on its own. It is used
+/// anyway: "every command is `async fn` plus `spawn_blocking`" is only a rule anyone can
+/// check if it holds for all of them, and an exception justified by today's body is an
+/// exception that outlives the justification the first time someone adds a line to it.
+///
 /// # Errors
 ///
 /// Never fails.
 #[tauri::command]
 pub async fn host_platform() -> Failed<&'static str> {
-    Ok(std::env::consts::OS)
+    blocking(|| Ok(std::env::consts::OS)).await
 }
 
 /// A response of the wrong shape is a protocol failure, not a silent success.

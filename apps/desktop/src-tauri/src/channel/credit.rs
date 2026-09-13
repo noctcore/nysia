@@ -13,17 +13,26 @@
 //!
 //! The daemon may only send bytes it has been granted. This process grants more once the
 //! webview says it has *rendered* them — after xterm's `write()` callback fires, not when
-//! the message arrives, because a message sitting in a queue has not been rendered. At zero
-//! credit this process stops reading the socket; the socket buffer fills, the daemon's
-//! write blocks, the daemon stops reading the PTY, the kernel buffer fills, and the child
-//! blocks in `write(2)`. Not one byte is dropped and nothing grows without bound.
+//! the message arrives, because a message sitting in a queue has not been rendered. When no
+//! attached stream can take another chunk this process stops reading the socket; the socket
+//! buffer fills, the daemon's write blocks, the daemon stops reading the PTY, the kernel
+//! buffer fills, and the child blocks in `write(2)`. Not one byte is dropped and nothing
+//! grows without bound.
 //!
-//! ## What this ledger guarantees
+//! ## Two balances, and why the reader has to watch both
 //!
-//! Unrendered bytes are bounded by [`CreditWindow::per_stream_initial`] for any one session
-//! and by [`CreditWindow::total_initial`] across all of them — 512 KiB and 2 MiB at the
-//! defaults. That is the memory ceiling, and it holds no matter how fast the child writes,
-//! because credit is only ever returned by rendering.
+//! §7.3 gives a per-stream figure *and* a total. They run out at different times, and the
+//! difference is not academic: with one session attached, per-stream credit is exhausted at
+//! 512 KiB while the 2 MiB total is still three quarters full. A reader that asked only
+//! "is the total spent?" would answer no, go back to `read`, and block — while an honest
+//! daemon, obeying the per-stream figure it was given, had already stopped sending. Nothing
+//! would ever arrive, the queued render reports would never be drained, no grant would ever
+//! be written, and the session would wedge on its first burst.
+//!
+//! So [`CreditLedger::is_blocked`] asks the question the reader actually has: **can any
+//! attached stream take another chunk?** [`CreditLedger::available`] is the per-stream
+//! figure behind it, and both are asserted against the flood, precisely because an earlier
+//! version of this file tested only the second and shipped the first broken.
 //!
 //! ## Why the numbers are not here
 //!
@@ -31,13 +40,15 @@
 //! was issued under, so the client never holds its own copy of the constants (D-13). A
 //! daemon that narrows the window for a slow renderer is obeyed on the next grant, with no
 //! protocol change and no chance of the two ends disagreeing about what is in force.
+//!
+//! A grant names no session. It rides a [`nysia_proto::FrameKind::Credit`] frame whose
+//! header already carries the stream id, and a second copy in the payload could only ever
+//! disagree with it.
 
 use std::collections::HashMap;
 
 use nysia_proto::credit::{CreditGrant, CreditWindow};
-use nysia_proto::identity::SessionHandle;
-
-use super::framing::StreamId;
+use nysia_proto::stream::StreamId;
 
 /// Why the ledger refused an operation.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -77,8 +88,6 @@ pub enum CreditError {
 /// One session's balance.
 #[derive(Debug, Clone)]
 struct StreamCredit {
-    /// Which session, so a grant can name it on the wire.
-    handle: SessionHandle,
     /// Bytes the daemon may still send. Falls as output arrives, rises as it is rendered.
     credit: u32,
     /// Delivered to the webview, not yet reported rendered. The memory ceiling.
@@ -139,10 +148,10 @@ impl CreditLedger {
     ///
     /// Re-attaching a stream that is already open leaves it untouched: a reconnect must not
     /// silently re-grant credit the daemon has already spent.
-    pub fn attach(&mut self, stream: StreamId, handle: SessionHandle) {
-        self.streams.entry(stream).or_insert_with(|| StreamCredit {
-            handle,
-            credit: self.window.per_stream_initial,
+    pub fn attach(&mut self, stream: StreamId) {
+        let initial = self.window.per_stream_initial;
+        self.streams.entry(stream).or_insert(StreamCredit {
+            credit: initial,
             unrendered: 0,
             ungranted: 0,
         });
@@ -162,18 +171,12 @@ impl CreditLedger {
     }
 
     /// Whether a stream is attached.
-    #[cfg(test)]
     pub fn is_attached(&self, stream: StreamId) -> bool {
         self.streams.contains_key(&stream)
     }
 
     /// Bytes this stream may still receive, which is the smaller of its own credit and the
     /// shared budget.
-    ///
-    /// The reader does not consult this — it stops on [`Self::is_blocked`], which is the
-    /// coarser question of whether *any* stream could take another chunk. This is the
-    /// per-stream figure the ceiling tests assert against.
-    #[cfg(test)]
     pub fn available(&self, stream: StreamId) -> u32 {
         self.streams
             .get(&stream)
@@ -186,19 +189,24 @@ impl CreditLedger {
         self.total_credit
     }
 
-    /// Whether the shared budget can no longer fund a full chunk of output.
+    /// Whether no attached stream can take another chunk of output.
     ///
-    /// "Cannot fund a chunk" rather than "is exactly zero", because the daemon sends in
-    /// [`CreditWindow::chunk`]-sized pieces (48 KiB at the defaults) and a budget that
-    /// cannot cover one is a budget that cannot cover anything. A ledger holding 40 KiB of
-    /// credit is not usefully different from one holding none, and treating it as unblocked
-    /// would have the reader wake, find nothing it can accept, and sleep again.
+    /// **The question the reader loop actually has**, and deliberately not "is the total
+    /// spent?". With one session attached, per-stream credit runs out at 512 KiB while the
+    /// 2 MiB total is still three quarters full; a reader gated on the total alone would go
+    /// back to `read` and block against a daemon that had already stopped sending, and the
+    /// session would wedge on its first burst with no error anywhere. See the module docs.
     ///
-    /// This is the signal the socket reader stops on. It does not mean anything is broken —
-    /// it means the webview is behind, and the correct response is to stop reading until it
-    /// catches up, which is what pushes the stall back down to the child.
+    /// "Cannot take a chunk" rather than "has exactly zero", because the daemon sends in
+    /// [`CreditWindow::chunk`]-sized pieces and a balance that cannot cover one cannot cover
+    /// anything. With nothing attached the answer is `false`: there is no session to stall,
+    /// and a reader that stopped would never see the first frame of the next one.
     pub fn is_blocked(&self) -> bool {
-        self.total_credit < self.window.chunk
+        if self.streams.is_empty() {
+            return false;
+        }
+        let chunk = self.window.chunk;
+        self.total_credit < chunk || self.streams.keys().all(|s| self.available(*s) < chunk)
     }
 
     /// Unrendered bytes across every stream: the figure the memory ceiling bounds.
@@ -242,9 +250,9 @@ impl CreditLedger {
     /// Record that the webview has rendered `bytes` of this stream.
     ///
     /// Returns a [`CreditGrant`] once the batch reaches [`CreditWindow::ack_batch`], and
-    /// `None` while it is still accumulating. Call [`Self::drain_grant`] when the stream has
-    /// gone quiet, or the tail of a burst is never returned and the window shrinks by that
-    /// much for the life of the session.
+    /// `None` while it is still accumulating. The reader also walks
+    /// [`Self::streams_owing_a_grant`] on every pass, so a partial batch is returned by
+    /// whichever pass notices it rather than waiting for one that happens to fill.
     ///
     /// # Errors
     ///
@@ -286,8 +294,8 @@ impl CreditLedger {
     /// Return whatever credit this stream has earned but not yet been granted.
     ///
     /// `None` when there is nothing to return. This is the idle flush: without it the last
-    /// few kilobytes of every burst sit in `ungranted` forever, and a session that alternates
-    /// between bursts and silence loses a little of its window on each one.
+    /// few kilobytes of every burst sit in `ungranted` forever, and a session that
+    /// alternates between bursts and silence loses a little of its window on each one.
     pub fn drain_grant(&mut self, stream: StreamId) -> Option<CreditGrant> {
         let window = self.window;
         let total_credit = self.total_credit;
@@ -299,27 +307,42 @@ impl CreditLedger {
 
         // Neither balance may climb past its ceiling, so a stream that renders faster than
         // it receives does not bank credit indefinitely.
-        let bytes = entry
-            .ungranted
-            .min(window.per_stream_max - entry.credit.min(window.per_stream_max));
+        let headroom = window
+            .per_stream_max
+            .saturating_sub(entry.credit.min(window.per_stream_max));
+        let bytes = entry.ungranted.min(headroom);
         entry.ungranted = 0;
         entry.credit = entry
             .credit
             .saturating_add(bytes)
             .min(window.per_stream_max);
 
-        let shared = total_ungranted.min(window.total_max - total_credit.min(window.total_max));
+        let shared = total_ungranted.min(
+            window
+                .total_max
+                .saturating_sub(total_credit.min(window.total_max)),
+        );
         self.total_credit = total_credit.saturating_add(shared).min(window.total_max);
         self.total_ungranted = 0;
 
         if bytes == 0 {
             return None;
         }
-        Some(CreditGrant {
-            handle: entry.handle.clone(),
-            bytes,
-            window,
-        })
+        Some(CreditGrant { bytes, window })
+    }
+
+    /// Every attached stream holding credit that has not been returned upstream.
+    ///
+    /// The reader walks this on each pass, so a grant leaves as soon as any pass notices it
+    /// is owed. Without that, the only thing that ever wrote a grant was the render report
+    /// that happened to fill a batch — and a stream whose last burst fell short of one sat
+    /// on the credit forever.
+    pub fn streams_owing_a_grant(&self) -> Vec<StreamId> {
+        self.streams
+            .iter()
+            .filter(|(_, entry)| entry.ungranted > 0)
+            .map(|(stream, _)| *stream)
+            .collect()
     }
 }
 
@@ -327,15 +350,9 @@ impl CreditLedger {
 mod tests {
     use super::*;
 
-    fn handle(n: u8) -> SessionHandle {
-        format!("sess_0e2fa1f4-4f3e-4c5f-9f2a-1b2c3d4e5f{n:02}")
-            .parse()
-            .expect("a well-formed handle")
-    }
-
     fn ledger() -> CreditLedger {
         let mut ledger = CreditLedger::new(CreditWindow::DEFAULT);
-        ledger.attach(1, handle(1));
+        ledger.attach(StreamId(1));
         ledger
     }
 
@@ -343,13 +360,13 @@ mod tests {
     fn a_fresh_stream_starts_on_the_windows_initial_credit() {
         let ledger = ledger();
         assert_eq!(
-            ledger.available(1),
+            ledger.available(StreamId(1)),
             CreditWindow::DEFAULT.per_stream_initial
         );
         assert!(!ledger.is_blocked());
         assert_eq!(ledger.unrendered(), 0);
         // A stream nobody attached has no credit, rather than unlimited credit.
-        assert_eq!(ledger.available(99), 0);
+        assert_eq!(ledger.available(StreamId(99)), 0);
     }
 
     #[test]
@@ -357,25 +374,24 @@ mod tests {
         let mut ledger = ledger();
         let chunk = CreditWindow::DEFAULT.chunk;
 
-        ledger.receive(1, chunk).unwrap();
+        ledger.receive(StreamId(1), chunk).unwrap();
         assert_eq!(
-            ledger.available(1),
+            ledger.available(StreamId(1)),
             CreditWindow::DEFAULT.per_stream_initial - chunk
         );
         assert_eq!(ledger.unrendered(), u64::from(chunk));
 
         // Under the ack batch: nothing goes upstream yet.
-        assert_eq!(ledger.render(1, chunk).unwrap(), None);
+        assert_eq!(ledger.render(StreamId(1), chunk).unwrap(), None);
         assert_eq!(ledger.unrendered(), 0);
 
         let grant = ledger
-            .drain_grant(1)
+            .drain_grant(StreamId(1))
             .expect("an idle flush returns the tail");
         assert_eq!(grant.bytes, chunk);
-        assert_eq!(grant.handle, handle(1));
         assert_eq!(grant.window, CreditWindow::DEFAULT);
         assert_eq!(
-            ledger.available(1),
+            ledger.available(StreamId(1)),
             CreditWindow::DEFAULT.per_stream_initial
         );
     }
@@ -390,8 +406,8 @@ mod tests {
         let mut grants = 0;
         let mut rendered = 0;
         while rendered < window.ack_batch {
-            ledger.receive(1, window.chunk).unwrap();
-            if ledger.render(1, window.chunk).unwrap().is_some() {
+            ledger.receive(StreamId(1), window.chunk).unwrap();
+            if ledger.render(StreamId(1), window.chunk).unwrap().is_some() {
                 grants += 1;
             }
             rendered += window.chunk;
@@ -400,28 +416,81 @@ mod tests {
         assert!(rendered >= window.ack_batch);
     }
 
+    /// The regression the reader loop wedged on: one stream, its own credit spent, the
+    /// shared total still three quarters full.
+    ///
+    /// The earlier `is_blocked` asked only whether the *total* was spent, so it answered
+    /// "keep reading" here — and the reader went back into `read` against a daemon that had
+    /// already stopped sending, never drained its render reports, and never wrote the grant
+    /// that would have freed it. Asserting on `available` alone could not catch it, because
+    /// `available` was right and the loop's question was wrong.
+    #[test]
+    fn a_single_stream_out_of_its_own_credit_blocks_the_reader() {
+        let window = CreditWindow::DEFAULT;
+        let mut ledger = CreditLedger::new(window);
+        ledger.attach(StreamId(1));
+
+        while ledger.available(StreamId(1)) >= window.chunk {
+            ledger.receive(StreamId(1), window.chunk).unwrap();
+        }
+
+        assert!(
+            ledger.shared_credit() > window.chunk,
+            "the shared budget must still be healthy or this proves nothing: {} left",
+            ledger.shared_credit()
+        );
+        assert!(
+            ledger.is_blocked(),
+            "the reader must stop: this stream cannot take a chunk even though the total can"
+        );
+    }
+
+    #[test]
+    fn a_ledger_with_nothing_attached_does_not_stop_the_reader() {
+        // There is no session to stall, and a reader that stopped here would never see the
+        // first frame of the next one.
+        let ledger = CreditLedger::new(CreditWindow::DEFAULT);
+        assert!(!ledger.is_blocked());
+    }
+
+    #[test]
+    fn one_exhausted_stream_does_not_stop_a_reader_that_still_has_another() {
+        let window = CreditWindow::DEFAULT;
+        let mut ledger = CreditLedger::new(window);
+        ledger.attach(StreamId(1));
+        ledger.attach(StreamId(2));
+
+        while ledger.available(StreamId(1)) >= window.chunk {
+            ledger.receive(StreamId(1), window.chunk).unwrap();
+        }
+        assert!(
+            !ledger.is_blocked(),
+            "stream 2 can still take a chunk, so its frames must keep arriving"
+        );
+    }
+
     /// Deliverable 4: unbounded output, bounded memory.
     ///
     /// `yes` in a pane nobody is rendering. The webview never acks, so credit is never
     /// returned, and the assertion is that the ledger stops the flood rather than absorbing
-    /// it. This is the unit-level half of the proof — the end-to-end half needs W4's daemon,
-    /// which is not in this tree yet.
+    /// it. Asserted through `is_blocked` — the predicate the reader actually branches on —
+    /// as well as through `available`, because a previous version of this test checked only
+    /// the second and the loop shipped broken.
     #[test]
     fn a_flood_with_no_acknowledgement_stops_at_the_ceiling() {
         let window = CreditWindow::DEFAULT;
         let mut ledger = CreditLedger::new(window);
-        for stream in 0..4 {
-            ledger.attach(stream, handle(stream as u8));
+        for stream in 1..=4 {
+            ledger.attach(StreamId(stream));
         }
 
         let mut accepted: u64 = 0;
         let mut refused = 0;
         // Far more than any budget could hold: 4 streams × 512 KiB is 2 MiB, and this is
         // 48 MiB of offered output.
-        for round in 0..1024 {
-            let stream = round % 4;
-            let room = ledger.available(stream);
-            if room < window.chunk {
+        for round in 0..1024u32 {
+            let stream = StreamId(round % 4 + 1);
+            if ledger.available(stream) < window.chunk {
                 refused += 1;
                 continue;
             }
@@ -433,9 +502,13 @@ mod tests {
             refused > 0,
             "the flood must have been refused, not absorbed"
         );
-        for stream in 0..4 {
+        assert!(
+            ledger.is_blocked(),
+            "the reader must have stopped reading, which is what stalls the child"
+        );
+        for stream in 1..=4 {
             assert!(
-                ledger.available(stream) < window.chunk,
+                ledger.available(StreamId(stream)) < window.chunk,
                 "stream {stream} still had room for another chunk"
             );
         }
@@ -457,19 +530,34 @@ mod tests {
         // Blocked is congestion, not failure: the reader must start again on its own.
         let window = CreditWindow::DEFAULT;
         let mut ledger = CreditLedger::new(window);
-        ledger.attach(1, handle(1));
+        ledger.attach(StreamId(1));
 
-        while ledger.available(1) >= window.chunk {
-            ledger.receive(1, window.chunk).unwrap();
+        while ledger.available(StreamId(1)) >= window.chunk {
+            ledger.receive(StreamId(1), window.chunk).unwrap();
         }
-        assert!(ledger.available(1) < window.chunk);
+        assert!(ledger.is_blocked());
 
         let grant = ledger
-            .render(1, window.ack_batch)
+            .render(StreamId(1), window.ack_batch)
             .unwrap()
             .expect("a full batch grants at once");
         assert_eq!(grant.bytes, window.ack_batch);
-        assert!(ledger.available(1) >= window.chunk, "reading may resume");
+        assert!(!ledger.is_blocked(), "reading may resume");
+    }
+
+    #[test]
+    fn a_stream_owing_a_grant_is_reported_so_any_pass_can_write_it() {
+        // Without this the only thing that ever wrote a grant was the render report that
+        // filled a batch, and a stream whose last burst fell short sat on the credit.
+        let mut ledger = ledger();
+        assert!(ledger.streams_owing_a_grant().is_empty());
+
+        ledger.receive(StreamId(1), 4096).unwrap();
+        ledger.render(StreamId(1), 4096).unwrap();
+        assert_eq!(ledger.streams_owing_a_grant(), vec![StreamId(1)]);
+
+        ledger.drain_grant(StreamId(1));
+        assert!(ledger.streams_owing_a_grant().is_empty());
     }
 
     #[test]
@@ -478,14 +566,14 @@ mod tests {
         // sessions cost 2 MiB rather than thirty times 512 KiB.
         let window = CreditWindow::DEFAULT;
         let mut ledger = CreditLedger::new(window);
-        for stream in 0..8 {
-            ledger.attach(stream, handle(stream as u8));
+        for stream in 1..=8 {
+            ledger.attach(StreamId(stream));
         }
 
         let mut total = 0u64;
-        for stream in 0..8 {
-            while ledger.available(stream) >= window.chunk {
-                ledger.receive(stream, window.chunk).unwrap();
+        for stream in 1..=8 {
+            while ledger.available(StreamId(stream)) >= window.chunk {
+                ledger.receive(StreamId(stream), window.chunk).unwrap();
                 total += u64::from(window.chunk);
             }
         }
@@ -500,18 +588,19 @@ mod tests {
     fn closing_a_stream_returns_its_share_of_the_shared_budget() {
         let window = CreditWindow::DEFAULT;
         let mut ledger = CreditLedger::new(window);
-        ledger.attach(1, handle(1));
-        ledger.attach(2, handle(2));
+        ledger.attach(StreamId(1));
+        ledger.attach(StreamId(2));
 
-        ledger.receive(1, window.per_stream_initial).unwrap();
-        let after_spending = ledger.shared_credit();
+        ledger
+            .receive(StreamId(1), window.per_stream_initial)
+            .unwrap();
         assert_eq!(
-            after_spending,
+            ledger.shared_credit(),
             window.total_initial - window.per_stream_initial
         );
 
-        ledger.detach(1);
-        assert!(!ledger.is_attached(1));
+        ledger.detach(StreamId(1));
+        assert!(!ledger.is_attached(StreamId(1)));
         assert_eq!(
             ledger.shared_credit(),
             window.total_initial,
@@ -525,16 +614,16 @@ mod tests {
         let mut ledger = ledger();
         let over = CreditWindow::DEFAULT.per_stream_initial + 1;
         assert_eq!(
-            ledger.receive(1, over),
+            ledger.receive(StreamId(1), over),
             Err(CreditError::Overrun {
-                stream: 1,
+                stream: StreamId(1),
                 sent: over,
                 credit: CreditWindow::DEFAULT.per_stream_initial,
             })
         );
         // Refused, not partially applied.
         assert_eq!(
-            ledger.available(1),
+            ledger.available(StreamId(1)),
             CreditWindow::DEFAULT.per_stream_initial
         );
         assert_eq!(ledger.unrendered(), 0);
@@ -544,11 +633,11 @@ mod tests {
     fn a_webview_claiming_to_have_rendered_bytes_it_never_saw_is_refused() {
         // Returning that credit upstream would raise the ceiling by exactly the lie.
         let mut ledger = ledger();
-        ledger.receive(1, 100).unwrap();
+        ledger.receive(StreamId(1), 100).unwrap();
         assert_eq!(
-            ledger.render(1, 101),
+            ledger.render(StreamId(1), 101),
             Err(CreditError::PhantomAck {
-                stream: 1,
+                stream: StreamId(1),
                 acked: 101,
                 unrendered: 100,
             })
@@ -559,20 +648,26 @@ mod tests {
     #[test]
     fn frames_and_acks_for_an_unattached_stream_are_refused() {
         let mut ledger = ledger();
-        assert_eq!(ledger.receive(7, 1), Err(CreditError::UnknownStream(7)));
-        assert_eq!(ledger.render(7, 1), Err(CreditError::UnknownStream(7)));
-        assert_eq!(ledger.drain_grant(7), None);
+        assert_eq!(
+            ledger.receive(StreamId(7), 1),
+            Err(CreditError::UnknownStream(StreamId(7)))
+        );
+        assert_eq!(
+            ledger.render(StreamId(7), 1),
+            Err(CreditError::UnknownStream(StreamId(7)))
+        );
+        assert_eq!(ledger.drain_grant(StreamId(7)), None);
     }
 
     #[test]
     fn attaching_twice_does_not_re_grant_credit_the_daemon_has_spent() {
         let mut ledger = ledger();
-        ledger.receive(1, 4096).unwrap();
-        let spent = ledger.available(1);
+        ledger.receive(StreamId(1), 4096).unwrap();
+        let spent = ledger.available(StreamId(1));
 
-        ledger.attach(1, handle(1));
+        ledger.attach(StreamId(1));
         assert_eq!(
-            ledger.available(1),
+            ledger.available(StreamId(1)),
             spent,
             "a reconnect must not mint credit"
         );

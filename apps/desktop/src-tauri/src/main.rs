@@ -52,6 +52,8 @@ fn main() -> ExitCode {
             commands::session_create,
             commands::session_close,
             commands::terminal_attach,
+            commands::stream_attach,
+            commands::stream_detach,
             commands::terminal_ack,
             commands::terminal_send,
             commands::terminal_resize,

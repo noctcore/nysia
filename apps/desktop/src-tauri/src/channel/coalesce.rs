@@ -21,6 +21,10 @@
 //! producing output at a rate worth optimising clears 1 KiB long before the timer fires —
 //! which is exactly what `a_burst_of_small_writes_leaves_as_one_frame` asserts.
 //!
+//! The frames it packs are `nysia-proto`'s, header and all: since stream multiplexing
+//! landed, the wire layout this leg needs is the one proto already defines, and the local
+//! copy that stood in for it while that was unmerged is gone.
+//!
 //! This type is pure and holds no clock of its own: `now` is a parameter on every method
 //! that needs one. That is what lets the tests drive sixteen milliseconds of behaviour
 //! without sleeping for sixteen milliseconds, and it is why the flush policy is testable at
@@ -28,7 +32,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::framing::{ChannelFrame, FramingError, encode_into};
+use nysia_proto::frame::{Frame, FrameError, encode_into};
 
 /// The payload size at and above which Tauri uses its fetch queue instead of `eval`.
 ///
@@ -83,14 +87,10 @@ impl Coalescer {
     ///
     /// # Errors
     ///
-    /// Propagates [`FramingError::Oversized`] for a payload past the frame ceiling. The
+    /// Propagates [`FrameError::Oversized`] for a payload past the frame ceiling. The
     /// frame is not added, and the window is left exactly as it was — a frame the writer
     /// should never have produced must not also corrupt the frames around it.
-    pub fn push(
-        &mut self,
-        frame: &ChannelFrame,
-        now: Instant,
-    ) -> Result<Option<Vec<u8>>, FramingError> {
+    pub fn push(&mut self, frame: &Frame, now: Instant) -> Result<Option<Vec<u8>>, FrameError> {
         let before = self.buffer.len();
         if let Err(error) = encode_into(frame, &mut self.buffer) {
             self.buffer.truncate(before);
@@ -154,17 +154,16 @@ impl Coalescer {
 
 #[cfg(test)]
 mod tests {
-    use nysia_proto::frame::FrameKind;
-
-    use super::super::framing::{FRAME_HEADER_BYTES, FrameDecoder};
     use super::*;
+    use nysia_proto::frame::{FRAME_HEADER_BYTES, FrameDecoder, FrameKind};
+    use nysia_proto::stream::StreamId;
 
-    fn output(stream: u32, len: usize) -> ChannelFrame {
-        ChannelFrame::new(FrameKind::Output, stream, vec![b'x'; len])
+    fn output(stream: u32, len: usize) -> Frame {
+        Frame::new(FrameKind::Output, StreamId(stream), vec![b'x'; len])
     }
 
     /// Every frame the given buffer decodes to.
-    fn frames_in(buffer: &[u8]) -> Vec<ChannelFrame> {
+    fn frames_in(buffer: &[u8]) -> Vec<Frame> {
         let mut decoder = FrameDecoder::new();
         decoder.push(buffer);
         let mut out = Vec::new();
@@ -262,7 +261,7 @@ mod tests {
         let start = Instant::now();
         let mut coalescer = Coalescer::new();
         coalescer
-            .push(&ChannelFrame::new(FrameKind::Bell, 4, Vec::new()), start)
+            .push(&Frame::new(FrameKind::Bell, StreamId(4), Vec::new()), start)
             .unwrap();
 
         assert_eq!(coalescer.poll(start + Duration::from_millis(15)), None);
@@ -271,7 +270,7 @@ mod tests {
             .expect("16 ms is the trigger");
         assert_eq!(
             frames_in(&flushed),
-            vec![ChannelFrame::new(FrameKind::Bell, 4, Vec::new())]
+            vec![Frame::new(FrameKind::Bell, StreamId(4), Vec::new())]
         );
     }
 
@@ -316,13 +315,13 @@ mod tests {
         }
 
         let flushed = coalescer.poll(start + FLUSH_INTERVAL).unwrap();
-        let streams: Vec<u32> = frames_in(&flushed)
+        let streams: Vec<StreamId> = frames_in(&flushed)
             .iter()
             .map(|frame| frame.stream)
             .collect();
         assert_eq!(
             streams,
-            vec![7, 8, 7, 9],
+            [7, 8, 7, 9].map(StreamId),
             "order within the window is preserved"
         );
     }
@@ -337,7 +336,7 @@ mod tests {
         let huge = output(1, nysia_proto::frame::MAX_FRAME_PAYLOAD_BYTES + 1);
         assert!(matches!(
             coalescer.push(&huge, start),
-            Err(FramingError::Oversized { .. })
+            Err(FrameError::Oversized { .. })
         ));
 
         assert_eq!(
