@@ -90,10 +90,18 @@ impl Stream {
             .name("nysia-stream".to_owned())
             .spawn(move || {
                 read(socket, &table, &dispatcher, window, &inbox);
-                // However this thread ends — EOF, a framing error, a stop — the connection
-                // is over. Saying so is what makes `daemon_watch` fire and the store
-                // reconnect; without it output simply stopped and the window went on
+                // However this thread ends — EOF, a framing error, a stop — *this*
+                // connection is over. Saying so is what makes `daemon_watch` fire and the
+                // store reconnect; without it output simply stopped and the window went on
                 // believing it was connected until some unrelated command happened to fail.
+                //
+                // "This connection" is the whole subtlety, and it is why the callback is
+                // handed a generation rather than a bare "tear down". A superseded reader —
+                // one replaced by a webview reload — cannot be interrupted mid-read on
+                // Windows, so it keeps its socket until the next byte or EOF and only then
+                // runs this. By that time the window may be two connections further on, and
+                // a callback that tore down whatever was live would take a healthy
+                // connection with it for no reason at all.
                 on_closed();
             })
             .map_err(|error| DaemonError::Io(error.to_string()))?;

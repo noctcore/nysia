@@ -271,20 +271,53 @@ fn describe(reason: &RejectReason) -> String {
     }
 }
 
-/// The id this window announces itself by.
+/// The id this window announces itself by, on **both** of its connections.
 ///
-/// Not an authority — §3.2 proves a caller's identity from peer credentials and the PTY
-/// process tree, never from something the peer typed. It exists so a line in the daemon's
-/// log says "the window" rather than "connection 4".
+/// ## One id, or the stream connection is orphaned
+///
+/// `nysia-proto`'s stream module states the contract exactly: "The two connections are tied
+/// together by the `ClientId` in their `hello` frames: a client uses the same id for both,
+/// and that is how the daemon knows which stream connection an attach on the control
+/// connection is talking about. Nothing else links them."
+///
+/// So announcing a different id per role — which this used to do, interpolating the role
+/// into the string — leaves the daemon with a control caller whose id matches no stream hub.
+/// It answers a retryable rejection, every `stream_attach` fails, the store throws inside
+/// connect and reconnects forever. The failure is indistinguishable from the daemon being
+/// down, which is what makes it expensive to find.
+///
+/// ## Per window, or two windows fight over one hub
+///
+/// The id is also the key the hub is bound under, so a constant would have a second window
+/// supersede the first's binding, and either window's unbind would remove whichever hub
+/// currently holds the key. The process id separates live windows — two cannot share one —
+/// and the start time separates a window from a dead predecessor whose id the OS recycled,
+/// which matters because a hub outlives the process that bound it until the daemon notices.
+///
+/// Not an authority in any case: §3.2 proves a caller's identity from peer credentials and
+/// the PTY process tree, never from something the peer typed. This only has to route and to
+/// read well in a log.
 ///
 /// # Errors
 ///
 /// [`DaemonError::Protocol`] if the composed id is not one proto accepts, which can only
-/// happen if the constant below is edited into something with whitespace in it.
-pub fn client_id(role: ClientRole) -> Result<ClientId, DaemonError> {
-    format!("nysia-desktop/{role}").parse().map_err(
-        |error: nysia_proto::handshake::HandshakeError| DaemonError::Protocol(error.to_string()),
-    )
+/// happen if the format below is edited into something carrying whitespace.
+pub fn client_id() -> Result<ClientId, DaemonError> {
+    // Composed once. Recomposing per connection would reintroduce the bug in a subtler form
+    // the moment anything in the recipe stopped being constant.
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    let id = ID.get_or_init(|| {
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        format!("nysia-desktop/{}-{started:x}", std::process::id())
+    });
+
+    id.parse()
+        .map_err(|error: nysia_proto::handshake::HandshakeError| {
+            DaemonError::Protocol(error.to_string())
+        })
 }
 
 #[cfg(test)]
@@ -351,7 +384,7 @@ mod tests {
         let learned = handshake(
             &mut socket,
             ClientRole::Control,
-            &client_id(ClientRole::Control).expect("a valid id"),
+            &client_id().expect("a valid id"),
         )
         .expect("the daemon accepted");
         assert_eq!(learned, identity());
@@ -370,7 +403,7 @@ mod tests {
         let error = handshake(
             &mut socket,
             ClientRole::Control,
-            &client_id(ClientRole::Control).expect("a valid id"),
+            &client_id().expect("a valid id"),
         )
         .expect_err("the daemon said no");
         match error {
@@ -397,7 +430,7 @@ mod tests {
         let error = handshake(
             &mut socket,
             ClientRole::Stream,
-            &client_id(ClientRole::Stream).expect("a valid id"),
+            &client_id().expect("a valid id"),
         )
         .expect_err("nothing came back");
         assert!(matches!(error, DaemonError::Io(_)), "got {error:?}");
@@ -409,7 +442,7 @@ mod tests {
         let error = handshake(
             &mut socket,
             ClientRole::Control,
-            &client_id(ClientRole::Control).expect("a valid id"),
+            &client_id().expect("a valid id"),
         )
         .expect_err("that is not a HelloResponse");
         assert!(matches!(error, DaemonError::Protocol(_)), "got {error:?}");
@@ -456,11 +489,39 @@ mod tests {
     }
 
     #[test]
-    fn both_roles_produce_an_id_proto_accepts() {
-        for role in [ClientRole::Control, ClientRole::Stream] {
-            let id = client_id(role).expect("a valid id");
-            assert!(id.as_str().contains(role.as_str()));
+    fn one_id_is_announced_on_both_connections() {
+        // The whole link between them. A per-role id leaves the daemon holding a control
+        // caller that matches no stream hub, so every attach is refused and the window
+        // reconnects forever against a daemon that is working perfectly.
+        let control = client_id().expect("a valid id");
+        let stream = client_id().expect("a valid id");
+        assert_eq!(control, stream);
+        assert!(
+            !control.as_str().contains(ClientRole::Control.as_str())
+                && !control.as_str().contains(ClientRole::Stream.as_str()),
+            "the id must not carry a role, or it cannot be the same on both: {control}"
+        );
+    }
+
+    #[test]
+    fn the_id_is_stable_for_the_life_of_the_window() {
+        // A reconnect has to rebind the same hub, so an id that changed between connections
+        // would strand the previous binding on the daemon until it timed the client out.
+        let first = client_id().expect("a valid id");
+        for _ in 0..8 {
+            assert_eq!(client_id().expect("a valid id"), first);
         }
+    }
+
+    #[test]
+    fn the_id_names_this_process_so_two_windows_cannot_share_a_hub() {
+        // A constant would have the second window supersede the first's binding, and either
+        // window's unbind would then remove whichever hub happened to hold the key.
+        let id = client_id().expect("a valid id");
+        assert!(
+            id.as_str().contains(&std::process::id().to_string()),
+            "{id} does not identify this process"
+        );
     }
 
     #[cfg(not(windows))]
