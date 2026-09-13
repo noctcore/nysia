@@ -1,14 +1,32 @@
 @import 'tailwindcss';
 
 /*
- * Ember, the default theme (design-spec §1). Every colour in the app is a token: there is
- * a runtime theme switcher, so a hardcoded hex is a bug. Graphite, the accent picker and
- * the derived --acc14 / --acc35 land with the chrome in wave 1 (W3).
+ * Self-hosted faces (design-spec.md §1). A desktop app must not reach a CDN at first
+ * paint: the mock links Google Fonts because it runs in a browser canvas, we vendor the
+ * same two families. Only the weights the spec names are pulled in.
+ */
+@import '@fontsource/space-grotesk/400.css';
+@import '@fontsource/space-grotesk/500.css';
+@import '@fontsource/space-grotesk/600.css';
+@import '@fontsource/fira-code/400.css';
+@import '@fontsource/fira-code/500.css';
+
+/*
+ * The token layer (design-spec.md §1). This file and `src/theme/themes.ts` are the only
+ * two places in `apps/web` allowed to carry a colour literal — `src/theme/hexGuard.test.ts`
+ * fails the build if a third appears.
  *
- * Status colours are deliberately absent from the accent chain — accent is identity,
- * status is semantics, and the accent picker must never recolour them.
+ * The colour values here are Ember, the default theme, so the first paint is correct
+ * before any JavaScript runs. `ThemeProvider` then writes the same custom property names
+ * as an inline style on `<html>`, which overrides these and is the entire theme switch.
+ * That is why this is a plain `@theme` and not `@theme inline`: an inline theme bakes the
+ * value into every utility at build time, and the runtime override would do nothing.
+ *
+ * The status palette is defined here and never re-emitted at runtime. Accent is identity,
+ * status is semantics — there is no code path from the accent picker to these four.
  */
 @theme {
+  /* Surfaces and text — Ember. */
   --color-bg0: #090b10;
   --color-bg1: #0c0f15;
   --color-bg2: #11151d;
@@ -18,12 +36,62 @@
   --color-fg: #dfe3ea;
   --color-fg2: #8b94a6;
   --color-fg3: #5c6577;
-  --color-acc: #f2b35b;
 
+  /* Accent and its two derived alphas (`src/theme/accent.ts` owns the derivation). */
+  --color-acc: #f2b35b;
+  --color-acc14: #f2b35b24;
+  --color-acc35: #f2b35b59;
+
+  /* Agent lifecycle. Independent of the accent, on purpose. */
   --color-status-running: oklch(78% 0.12 180);
   --color-status-needs-input: oklch(80% 0.15 70);
   --color-status-queued: #7c7c84;
   --color-status-failed: oklch(70% 0.15 25);
+
+  /* Fixed colours that are still tokens: the toggle knob and the shadow both need to be
+     switchable if a light theme ever lands, and neither belongs to a theme table. */
+  --color-knob: #ffffff;
+  --color-emphasis: #ffffff;
+  --color-shade: rgb(0 0 0 / 0.6);
+
+  /* Type. Space Grotesk for UI, Fira Code for mono, terminal and metrics. Both carry a
+     real fallback stack so a missing face degrades to a sane sans rather than a serif. */
+  --font-sans: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'Fira Code', ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
+
+  --text-ui: 13px;
+  --text-term: 12.5px;
+  --text-term--line-height: 1.65;
+  --text-chip: 11.5px;
+  --text-label: 10.5px;
+  --text-row: 14px;
+  --text-h1: 22px;
+  --text-wordmark: 15px;
+
+  --tracking-section: 0.06em;
+  --tracking-group: 0.08em;
+  --tracking-nav: 0.1em;
+  --tracking-wordmark: -0.01em;
+
+  /* Geometry. 6px rail items and chips, 7–8px buttons, inputs and cards, 10–14px
+     popovers and panels, 99px pills. */
+  --radius-chip: 6px;
+  --radius-control: 8px;
+  --radius-panel: 10px;
+  --radius-card: 14px;
+  --radius-pill: 99px;
+
+  --shadow-popover: 0 20px 50px var(--color-shade);
+  --shadow-flyout: 0 24px 60px var(--color-shade);
+  --shadow-focus: 0 0 0 3px var(--color-acc14);
+
+  /* Chrome geometry, so the three grids are stated once (design-spec.md §2). */
+  --spacing-titlebar: 40px;
+  --spacing-statusbar: 30px;
+  --spacing-rail: 48px;
+  --spacing-sidebar: 222px;
+  --spacing-wordmark: 270px;
+  --spacing-tab: 34px;
 }
 
 html,
@@ -36,4 +104,14 @@ body {
   margin: 0;
   background: var(--color-bg1);
   color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: var(--text-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom chrome on every platform (design-spec.md §6.7), so nothing is user-selectable by
+   accident and the window never shows a native scrollbar over the terminal. */
+:where(button) {
+  font: inherit;
+  color: inherit;
 }
