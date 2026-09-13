@@ -28,9 +28,17 @@
 //! | 5 | [`FrameKind::Credit`] | A credit grant or ack, as JSON. |
 //!
 //! Zero is deliberately not a kind, so a zero-filled buffer is rejected rather than read as
-//! a run of empty frames. ts-rs exports types and not values, so those numbers reach
-//! TypeScript as this table rather than as a generated constant — the one place in the wire
-//! surface where the Rust side is authoritative by documentation instead of by codegen.
+//! a run of empty frames.
+//!
+//! **Do not hand-copy those bytes into a decoder.** ts-rs exports types and not values, so
+//! the numbers do not reach TypeScript through ts-rs — they are generated instead.
+//! [`crate::bindings`] renders them into `apps/web/src/generated/wireConstants.ts` as
+//! `FRAME_KIND` and `FRAME_KIND_BY_BYTE`, in the same `cargo test export_bindings` step as
+//! the types and under the same drift guard, so a client imports them rather than restating
+//! them. The table above is a reader's summary of what that generator emits, not the
+//! authority a client should copy from: a wrong kind byte misroutes binary data instead of
+//! failing to compile, which is exactly why D-13 is enforced here by codegen and not by a
+//! comment.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
