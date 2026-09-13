@@ -62,3 +62,16 @@ export class StoreCommandError extends Error {
     this.errorId = errorId;
   }
 }
+
+/**
+ * Whether a set of recorded failures can be rendered as a list.
+ *
+ * `CommandErrors` keys its notices on `StoreError.id` and dismisses by it, so duplicate
+ * ids are not a tidiness question: React would warn on the keys, and one dismiss button
+ * would clear every notice sharing that id. A provider can satisfy every other line of the
+ * contract while reusing one id for every failure, which is why this is an invariant with
+ * a name rather than an assumption inside one assertion.
+ */
+export function hasDistinctIds(errors: readonly StoreError[]): boolean {
+  return new Set(errors.map((error) => error.id)).size === errors.length;
+}
