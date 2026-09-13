@@ -55,9 +55,15 @@
 //! | at or beyond the next id to assign | never handed out on this connection — provably a desync or a protocol violation | **drop the connection** |
 //!
 //! [`StreamId::classify_unattached`] is that table as a function, so a router does not have
-//! to re-derive it. The discard case is bounded by the in-flight window — at most what §7.3
-//! allows unacknowledged — so it cannot run away; a peer that keeps sending on a retired id
-//! is spending its own credit and will stop when the window closes.
+//! to re-derive it.
+//!
+//! How bounded the discard case is depends on direction, and only one direction is actually
+//! gated. Daemon-to-client **output** is credit-gated, so a retired id attracts at most the
+//! unacknowledged window §7.3 allows and then stops on its own. Client-to-daemon **credit**
+//! frames are gated by nothing, so a confused client could send them indefinitely. They stay
+//! harmless — a grant for a retired id credits a stream that no longer exists and goes on the
+//! floor — but that case is bounded by the client behaving, not by the protocol. Worth
+//! knowing before someone reads "bounded" as a guarantee and sizes a buffer against it.
 //!
 //! An earlier draft of this module discarded *every* unroutable frame and worried, correctly,
 //! that doing so would hide a real desynchronisation inside the routine noise. That objection
@@ -132,9 +138,14 @@ impl StreamId {
     ///
     /// Sound only because ids are never reused. With recycling this comparison would be
     /// meaningless, which is the practical reason retirement is worth a monotonic counter.
+    ///
+    /// [`RESERVED`](Self::RESERVED) is never "assigned", even though it sits below every
+    /// watermark. The codec refuses it at byte five so it cannot arrive through
+    /// [`decode`](crate::frame::decode), but a router building a [`StreamId`] by hand would
+    /// otherwise be told zero was a retired id and quietly discard frames naming it.
     #[must_use]
     pub const fn was_assigned(self, next_to_assign: Self) -> bool {
-        self.0 < next_to_assign.0
+        self.0 != Self::RESERVED.0 && self.0 < next_to_assign.0
     }
 
     /// What to do with a frame whose id the router has **no live entry** for.
@@ -145,33 +156,35 @@ impl StreamId {
     #[must_use]
     pub const fn classify_unattached(self, next_to_assign: Self) -> UnattachedFrame {
         if self.was_assigned(next_to_assign) {
-            UnattachedFrame::Discard
+            UnattachedFrame::DiscardFrame
         } else {
             UnattachedFrame::DropConnection
         }
     }
 }
 
-/// What a router does with a frame whose stream id has no live entry.
+/// What a router must do with a frame whose stream id has no live entry.
 ///
-/// Two answers rather than one, and the difference is the point: a detach races output
-/// already in flight on a separate socket, so one of these is routine and bounded while the
-/// other means the two ends disagree about what is on the connection. See the module docs
-/// for why never reusing an id is what makes them tellable apart.
+/// Both variants name what to throw away, because the difference between them is exactly
+/// *how much*: one frame, or the connection and every session riding it. A reader who gets
+/// that backwards either takes down thirty sessions for one ordinary detach, or keeps
+/// talking to a peer it no longer agrees with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum UnattachedFrame {
-    /// The id was assigned and has since been detached. Drop the frame, keep the connection.
+    /// **Throw this one frame away and keep reading.** Close nothing.
     ///
-    /// Routine, and bounded by the in-flight window: a peer still sending on a retired id is
-    /// spending credit it will not get back, so the noise stops on its own.
-    Discard,
-    /// The id was never handed out here. Drop the connection.
+    /// The id was assigned earlier on this connection and has since been detached, so this
+    /// is the tail of the detach race and nothing is wrong. Every other session on the
+    /// connection is unaffected and has to stay that way.
+    DiscardFrame,
+    /// **Close the connection.** Every session on it then has to be re-attached.
     ///
-    /// Not a race — there is no sequence of events in which a well-behaved peer names an id
-    /// the daemon has not yet minted — so it is the same class of failure as a malformed
-    /// frame and gets the same answer.
+    /// The id was never handed out here, so no sequence of events puts a well-behaved peer
+    /// in this position — it is a desync or a protocol violation, the same class as a
+    /// malformed frame, and carrying on means trusting a peer that disagrees about what is
+    /// on the wire.
     DropConnection,
 }
 
@@ -206,7 +219,12 @@ pub struct StreamAttached {
     pub stream_id: StreamId,
 }
 
-/// Stop routing a stream id, freeing it for reuse.
+/// Stop routing a stream id, retiring it for the life of the connection.
+///
+/// **The id is not freed for reuse.** It is spent: the daemon keeps counting up and never
+/// hands this number out again. That is what lets a later frame still carrying it be
+/// recognised as the tail of a detach race and discarded, rather than routed to whoever
+/// inherited the number — the whole discard-versus-drop rule in the module docs rests on it.
 ///
 /// By id rather than by handle: the id is what the stream connection is keyed on, and a
 /// session can in principle be attached more than once by a client that wants two views of
@@ -261,11 +279,11 @@ mod tests {
         // flight. Dropping the connection here would punish every other session on it.
         assert_eq!(
             StreamId(3).classify_unattached(next),
-            UnattachedFrame::Discard
+            UnattachedFrame::DiscardFrame
         );
         assert_eq!(
             StreamId(6).classify_unattached(next),
-            UnattachedFrame::Discard
+            UnattachedFrame::DiscardFrame
         );
 
         // 7 has not been minted yet, so no well-behaved peer can name it. That is a desync,
@@ -281,6 +299,20 @@ mod tests {
 
         assert!(StreamId(6).was_assigned(next));
         assert!(!StreamId(7).was_assigned(next));
+    }
+
+    #[test]
+    fn the_reserved_id_is_never_a_retired_one() {
+        // Zero sits below every watermark, so a plain `<` would call it "assigned and since
+        // detached" and have a router silently discard frames naming it. The codec refuses
+        // it at byte five, so this is only reachable by building a `StreamId` by hand — but
+        // that is exactly when a misleading answer would go unnoticed.
+        let next = StreamId(7);
+        assert!(!StreamId::RESERVED.was_assigned(next));
+        assert_eq!(
+            StreamId::RESERVED.classify_unattached(next),
+            UnattachedFrame::DropConnection
+        );
     }
 
     #[test]
@@ -300,8 +332,8 @@ mod tests {
         // Exported so a client can log or report the decision in the daemon's own words
         // rather than inventing a second vocabulary for it.
         assert_eq!(
-            serde_json::to_string(&UnattachedFrame::Discard).unwrap(),
-            "\"discard\""
+            serde_json::to_string(&UnattachedFrame::DiscardFrame).unwrap(),
+            "\"discard_frame\""
         );
         assert_eq!(
             serde_json::to_string(&UnattachedFrame::DropConnection).unwrap(),

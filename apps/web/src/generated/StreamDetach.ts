@@ -2,7 +2,12 @@
 import type { StreamId } from "./StreamId";
 
 /**
- * Stop routing a stream id, freeing it for reuse.
+ * Stop routing a stream id, retiring it for the life of the connection.
+ *
+ * **The id is not freed for reuse.** It is spent: the daemon keeps counting up and never
+ * hands this number out again. That is what lets a later frame still carrying it be
+ * recognised as the tail of a detach race and discarded, rather than routed to whoever
+ * inherited the number — the whole discard-versus-drop rule in the module docs rests on it.
  *
  * By id rather than by handle: the id is what the stream connection is keyed on, and a
  * session can in principle be attached more than once by a client that wants two views of
