@@ -773,29 +773,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::endpoint::EnvSource;
-    use nysia_proto::PROTOCOL_VERSION;
-
-    fn endpoint(tag: &str) -> Endpoint {
-        let dir = std::env::temp_dir().join(format!(
-            "nysia-server-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        Endpoint::resolve(
-            PROTOCOL_VERSION,
-            EnvSource {
-                runtime_dir_override: Some(dir),
-                endpoint_override: None,
-                home: None,
-                xdg_runtime_dir: None,
-                account: "nysia-test".to_owned(),
-                isolated: true,
-            },
-        )
-        .expect("an endpoint resolves")
-    }
 
     #[test]
     fn receipts_replay_the_first_answer_and_forget_the_oldest() {
@@ -818,7 +795,7 @@ mod tests {
 
     #[tokio::test]
     async fn binding_writes_a_lease_that_describes_the_daemon_and_removing_it_is_the_clean_path() {
-        let endpoint = endpoint("lease");
+        let endpoint = crate::rpc::endpoint::scratch("lease");
         let (daemon, listener) = Daemon::bind(DaemonConfig::new(endpoint.clone())).expect("binds");
         let lease = PidRecordFile::at(endpoint.pid_record_path());
         let record = lease.read().expect("reads").expect("is there");
@@ -835,7 +812,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_daemon_that_has_served_nobody_does_not_retire_out_from_under_its_spawner() {
-        let endpoint = endpoint("retire");
+        let endpoint = crate::rpc::endpoint::scratch("retire");
         let (daemon, listener) = Daemon::bind(DaemonConfig {
             idle_retire_after: Some(Duration::ZERO),
             ..DaemonConfig::new(endpoint.clone())
@@ -865,7 +842,7 @@ mod tests {
     async fn a_daemon_holding_a_client_or_a_request_never_retires() {
         // The whole of D-1 in one condition. An idle timer that could fire while somebody is
         // connected would make "the daemon outlives the app" a promise it does not keep.
-        let endpoint = endpoint("busy");
+        let endpoint = crate::rpc::endpoint::scratch("busy");
         let (daemon, listener) = Daemon::bind(DaemonConfig {
             idle_retire_after: Some(Duration::ZERO),
             ..DaemonConfig::new(endpoint.clone())
@@ -893,7 +870,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_daemon_told_never_to_retire_does_not() {
-        let endpoint = endpoint("forever");
+        let endpoint = crate::rpc::endpoint::scratch("forever");
         let (daemon, listener) = Daemon::bind(DaemonConfig {
             idle_retire_after: None,
             ..DaemonConfig::new(endpoint.clone())
@@ -910,7 +887,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_hello_that_is_not_acceptable_is_refused_with_the_right_retryability() {
-        let endpoint = endpoint("hello");
+        let endpoint = crate::rpc::endpoint::scratch("hello");
         let (daemon, listener) = Daemon::bind(DaemonConfig::new(endpoint.clone())).expect("binds");
         let client_id: ClientId = "nysia-test".parse().expect("a well-formed client id");
 

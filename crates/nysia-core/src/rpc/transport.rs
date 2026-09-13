@@ -418,30 +418,11 @@ fn restrict_socket_to_owner(path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nysia_proto::PROTOCOL_VERSION;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    fn endpoint(tag: &str) -> Endpoint {
-        let dir = std::env::temp_dir().join(format!(
-            "nysia-transport-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let source = crate::rpc::endpoint::EnvSource {
-            runtime_dir_override: Some(dir),
-            endpoint_override: None,
-            home: None,
-            xdg_runtime_dir: None,
-            account: "nysia-test".to_owned(),
-            isolated: true,
-        };
-        Endpoint::resolve(PROTOCOL_VERSION, source).expect("an endpoint resolves")
-    }
 
     #[tokio::test]
     async fn a_client_reaches_the_daemon_and_the_daemon_learns_who_it_is() {
-        let endpoint = endpoint("roundtrip");
+        let endpoint = crate::rpc::endpoint::scratch("roundtrip");
         let mut listener = Listener::bind(&endpoint).expect("binds");
 
         let dialling = tokio::spawn({
@@ -483,7 +464,7 @@ mod tests {
     async fn a_second_daemon_cannot_bind_an_endpoint_that_is_already_held() {
         // The race lock, and the reason two clients spawning a daemon at once cannot both
         // win (§12 Q5). It is the kernel that refuses, not a file anyone could delete.
-        let endpoint = endpoint("exclusive");
+        let endpoint = crate::rpc::endpoint::scratch("exclusive");
         let _held = Listener::bind(&endpoint).expect("the first binds");
         assert!(matches!(
             Listener::bind(&endpoint),
@@ -494,7 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn dialling_an_endpoint_nobody_holds_says_so_rather_than_hanging() {
-        let endpoint = endpoint("absent");
+        let endpoint = crate::rpc::endpoint::scratch("absent");
         assert!(matches!(
             connect(&endpoint).await,
             Err(TransportError::NotListening { .. })
@@ -507,7 +488,7 @@ mod tests {
         // On Windows an instance is consumed by the connection it accepted. If the
         // replacement were created after the connection was served, a second client dialling
         // in that gap would be told nothing is listening — by a daemon that is running.
-        let endpoint = endpoint("second-client");
+        let endpoint = crate::rpc::endpoint::scratch("second-client");
         let mut listener = Listener::bind(&endpoint).expect("binds");
 
         let first = tokio::spawn({
@@ -530,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_write_reaches_the_peer_in_both_directions() {
-        let endpoint = endpoint("duplex");
+        let endpoint = crate::rpc::endpoint::scratch("duplex");
         let mut listener = Listener::bind(&endpoint).expect("binds");
         let dialling = tokio::spawn({
             let endpoint = endpoint.clone();

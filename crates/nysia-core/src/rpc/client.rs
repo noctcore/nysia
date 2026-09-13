@@ -405,7 +405,6 @@ fn mismatched(asked: &'static str, answered: &ResponsePayload) -> ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::endpoint::EnvSource;
     use crate::rpc::lease::PidRecordFile;
     use crate::rpc::server::{Daemon, DaemonConfig};
     use nysia_proto::{
@@ -435,24 +434,8 @@ mod tests {
     impl Harness {
         /// Start a daemon that never retires, so a test's own pauses cannot kill it.
         fn start(tag: &str) -> Self {
-            let runtime_dir = std::env::temp_dir().join(format!(
-                "nysia-client-{tag}-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = std::fs::remove_dir_all(&runtime_dir);
-            let endpoint = Endpoint::resolve(
-                PROTOCOL_VERSION,
-                EnvSource {
-                    runtime_dir_override: Some(runtime_dir.clone()),
-                    endpoint_override: None,
-                    home: None,
-                    xdg_runtime_dir: None,
-                    account: "nysia-test".to_owned(),
-                    isolated: true,
-                },
-            )
-            .expect("an endpoint resolves");
+            let endpoint = crate::rpc::endpoint::scratch(tag);
+            let runtime_dir = endpoint.runtime_dir().to_path_buf();
 
             let (daemon, listener) = Daemon::bind(DaemonConfig {
                 idle_retire_after: None,

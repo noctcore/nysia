@@ -418,29 +418,6 @@ impl SpawnLock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::endpoint::EnvSource;
-    use nysia_proto::PROTOCOL_VERSION;
-
-    fn endpoint(tag: &str) -> Endpoint {
-        let dir = std::env::temp_dir().join(format!(
-            "nysia-discovery-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        Endpoint::resolve(
-            PROTOCOL_VERSION,
-            EnvSource {
-                runtime_dir_override: Some(dir),
-                endpoint_override: None,
-                home: None,
-                xdg_runtime_dir: None,
-                account: "nysia-test".to_owned(),
-                isolated: true,
-            },
-        )
-        .expect("an endpoint resolves")
-    }
 
     fn client_id() -> ClientId {
         "nysia-test".parse().expect("a well-formed client id")
@@ -448,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_listening_and_no_permission_to_spawn_says_how_to_start_one() {
-        let endpoint = endpoint("absent");
+        let endpoint = crate::rpc::endpoint::scratch("absent");
         let err = discover(
             &endpoint,
             &client_id(),
@@ -471,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_one_spawner_holds_the_lock_and_it_is_released_when_dropped() {
-        let endpoint = endpoint("lock");
+        let endpoint = crate::rpc::endpoint::scratch("lock");
         let held = SpawnLock::acquire(&endpoint).await.expect("takes the lock");
         assert!(
             SpawnLock::try_acquire(&endpoint.lock_path())
@@ -494,7 +471,7 @@ mod tests {
     async fn a_lease_that_describes_nothing_listening_is_not_taken_for_a_live_daemon() {
         // The stale case. The record is there, the pid in it may even exist — and nothing is
         // listening, which is the only question that matters.
-        let endpoint = endpoint("stale");
+        let endpoint = crate::rpc::endpoint::scratch("stale");
         let lease = PidRecordFile::at(endpoint.pid_record_path());
         lease
             .write(&nysia_proto::DaemonIdentity {

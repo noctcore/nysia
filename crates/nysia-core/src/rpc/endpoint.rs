@@ -37,9 +37,14 @@ pub const RUNTIME_DIR_VAR: &str = "NYSIA_RUNTIME_DIR";
 /// The environment variable that replaces the endpoint outright.
 pub const ENDPOINT_VAR: &str = "NYSIA_ENDPOINT";
 
-/// macOS caps `sun_path` at 104 bytes, and a socket path that overruns it is truncated
-/// rather than refused — so the bind succeeds and every client looks somewhere else.
-const UNIX_SOCKET_PATH_MAX: usize = 104;
+/// macOS caps `sun_path` at 104 *bytes including the terminating NUL*, so 103 is the longest
+/// path that fits.
+///
+/// Worth refusing rather than discovering: a path that overruns it is truncated by some
+/// kernels rather than refused, and then the bind succeeds while every client looks somewhere
+/// else. Rust's own `SocketAddr::from_pathname` errors at `len >= 104` for the same reason,
+/// which is the boundary this matches.
+const UNIX_SOCKET_PATH_MAX: usize = 103;
 
 /// Why an endpoint could not be resolved.
 #[derive(Debug, thiserror::Error)]
@@ -64,7 +69,7 @@ pub enum EndpointResolveError {
     },
     /// The composed socket path would be truncated by the kernel.
     #[error(
-        "the unix socket path {} is {actual} bytes and the kernel truncates at 104; set \
+        "the unix socket path {} is {actual} bytes and the kernel allows 103; set \
          NYSIA_RUNTIME_DIR to a shorter directory",
         path.display()
     )]
@@ -390,6 +395,49 @@ fn restrict_to_owner(dir: &Path) {
     }
 }
 
+/// An isolated endpoint for a test, on a path short enough for every platform.
+///
+/// One helper rather than one per module, because the constraint is easy to violate by
+/// accident and expensive to discover: macOS caps a socket path at 103 bytes and its `TMPDIR`
+/// is already ~49 of them, so `temp_dir().join("nysia-<module>-<tag>-<pid>-<thread>")` plus
+/// `/nysiad-v1.sock` overruns the cap and every test in the module fails to resolve an
+/// endpoint at all.
+///
+/// The name is therefore a short digest rather than anything readable. On Unix it hangs off
+/// `/tmp` — which is where the shortest writable path is, and on macOS is a symlink to
+/// `/private/tmp` that the kernel resolves for us.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn scratch(tag: &str) -> Endpoint {
+    let name = format!(
+        "nys-{}",
+        short_digest(std::ffi::OsStr::new(&format!(
+            "{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        )))
+    );
+    let base = if cfg!(unix) {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let runtime_dir = base.join(name);
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+    let source = EnvSource {
+        runtime_dir_override: Some(runtime_dir),
+        endpoint_override: None,
+        home: None,
+        xdg_runtime_dir: None,
+        account: "nysia-test".to_owned(),
+        isolated: true,
+    };
+    match Endpoint::resolve(PROTOCOL_VERSION, source) {
+        Ok(endpoint) => endpoint,
+        Err(err) => panic!("a scratch endpoint should always resolve: {err}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +520,22 @@ mod tests {
         let endpoint = Endpoint::resolve(PROTOCOL_VERSION, right).expect("resolves");
         assert!(endpoint.listening().to_string().contains("test"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scratch_endpoint_fits_on_every_platform() {
+        // The constraint that is easy to violate by accident: macOS caps a socket path at 103
+        // bytes and its TMPDIR is already about half of that.
+        let endpoint = scratch("a-tag-long-enough-to-have-been-a-problem");
+        if let Listening::UnixSocket(path) = endpoint.listening() {
+            let bytes = path.as_os_str().as_encoded_bytes().len();
+            assert!(
+                bytes <= UNIX_SOCKET_PATH_MAX,
+                "{} is {bytes} bytes",
+                path.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
     }
 
     #[test]
