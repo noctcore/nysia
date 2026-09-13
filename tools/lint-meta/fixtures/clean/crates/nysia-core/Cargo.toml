@@ -1,0 +1,9 @@
+[package]
+name = "nysia-core"
+
+[dependencies]
+nysia-proto = { path = "../nysia-proto" }
+portable-pty = { git = "https://github.com/wezterm/wezterm", branch = "main" }
+
+[target.'cfg(windows)'.dependencies]
+windows = "0.62"
