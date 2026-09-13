@@ -1,0 +1,8 @@
+# Clean on its own. The violation arrives through nysia-proto, which is the branch a
+# reviewer would otherwise have to build a scratch fixture to confirm.
+[package]
+name = "nysia-core"
+
+[dependencies]
+nysia-proto = { path = "../nysia-proto" }
+portable-pty = { workspace = true }

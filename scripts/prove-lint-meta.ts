@@ -1,10 +1,11 @@
 /**
- * Proof that both lint-meta architecture rules trip (traps register #13).
+ * Proof that every lint-meta architecture rule trips (traps register #13).
  *
  * `pnpm lint` runs the rules against the real repository, where they are expected to find
- * nothing — which on its own proves nothing at all. This points the same runner at
- * `tools/lint-meta/fixtures/trips`, where each rule is broken exactly once, and at
- * `fixtures/clean`, which exercises every carve-out the rules allow.
+ * nothing — which on its own proves nothing at all. This points the same runner at the
+ * fixture trees: `trips`, where each rule is broken directly; `trips-transitive`, which
+ * exercises the indirect branch of the crate rule; and `clean`, which exercises every
+ * carve-out the rules allow.
  */
 import { join } from 'node:path';
 import process from 'node:process';
@@ -23,14 +24,40 @@ function expectRule(violations: readonly Violation[], rule: string): void {
     failures.push(`rule \`${rule}\` did not trip on the violating fixture`);
     return;
   }
-  process.stdout.write(`  trips: ${rule} -> ${hit[0]?.file}\n`);
+  process.stdout.write(`  trips: ${rule} -> ${hit.map((v) => v.file).join(', ')}\n`);
+}
+
+/** The rule tripped, and it tripped on this exact file. */
+function expectFile(violations: readonly Violation[], rule: string, file: string): void {
+  if (!violations.some((v) => v.rule === rule && v.file === file)) {
+    failures.push(`rule \`${rule}\` did not trip on ${file}`);
+  }
+}
+
+/** The rule tripped and its message carries the detail that makes it actionable. */
+function expectMessage(violations: readonly Violation[], rule: string, fragment: string): void {
+  if (!violations.some((v) => v.rule === rule && v.message.includes(fragment))) {
+    failures.push(`rule \`${rule}\` never reported ${JSON.stringify(fragment)}`);
+  }
 }
 
 process.stdout.write('prove:lint-meta\n');
 
 const trips = runRules(fixture('trips'));
 expectRule(trips, 'no-tauri-outside-desktop');
-expectRule(trips, 'core-declares-no-tauri');
+expectRule(trips, 'no-tauri-in-rust-crates');
+
+// crates/nysia can reach tauri straight out of [workspace.dependencies] without editing a
+// single shared file, so the rule has to inspect every crate and not only the dependency
+// chain rooted at nysia-core.
+expectFile(trips, 'no-tauri-in-rust-crates', 'crates/nysia/Cargo.toml');
+
+// The transitive branch has its own fixture: nysia-core is clean and the violation arrives
+// through nysia-proto. Without it, that branch is code nobody has watched fail.
+const transitive = runRules(fixture('trips-transitive'));
+expectRule(transitive, 'no-tauri-reaching-core');
+expectFile(transitive, 'no-tauri-in-rust-crates', 'crates/nysia-proto/Cargo.toml');
+expectMessage(transitive, 'no-tauri-reaching-core', 'nysia-core -> nysia-proto');
 
 const clean = runRules(fixture('clean'));
 if (clean.length > 0) {
@@ -57,4 +84,4 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-process.stdout.write('prove:lint-meta OK — both rules trip, both carve-outs hold\n');
+process.stdout.write('prove:lint-meta OK — every rule trips, every carve-out holds\n');
