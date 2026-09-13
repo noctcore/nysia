@@ -1,0 +1,17 @@
+{
+  "cols": 120,
+  "cwd": "C:/src/nysia",
+  "envOverrides": {
+    "NYSIA_PANE_KEY": "tab_1:leaf_1",
+    "RUST_LOG": "info"
+  },
+  "kind": "shell",
+  "profile": {
+    "distro": "Ubuntu-24.04",
+    "shell": "wsl"
+  },
+  "requestId": "req_11111111-1111-4111-8111-111111111111",
+  "retryRequest": null,
+  "rows": 30,
+  "type": "session_create"
+}
