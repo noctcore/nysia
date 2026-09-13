@@ -100,10 +100,10 @@ const RUST_TAURI_PATH = new RegExp(`${RUST_TAURI_ROOT}::`, 'g');
  *   below it in the file would be silently invisible. That is a false *negative*, and the
  *   worst kind: the gate keeps reporting success.
  *
- * String literals are therefore stepped over as units — normal, byte (`b"…"`), raw
- * (`r#"…"#`) and char literals alike, the last so that `'"'` is a character and not the
- * start of a string. Their contents are blanked as well, since a `tauri::` inside a string
- * is not an import.
+ * String literals are therefore stepped over as units, in every spelling Rust has — see
+ * `STRING_OPENER` for the enumeration — plus char literals, so that `'"'` is a character
+ * and not the start of a string. Their contents are blanked as well, since a `tauri::`
+ * inside a string is not an import.
  */
 export function blankRustComments(source: string): string {
   // `split('')`, deliberately NOT `[...source]` or `Array.from(source)`.
@@ -133,6 +133,18 @@ export function blankRustComments(source: string): string {
   /** A char literal `'x'` / `'\n'` / `'"'`, as opposed to a lifetime `'a`. */
   const CHAR_LITERAL = /^'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]{1,6}\}|.)|[^'\\])'/;
 
+  /**
+   * Every string-literal opener Rust has, as one table rather than a chain of `if`s — the
+   * `c` prefix was missing from the chain, and its absence meant `c"/*"` opened a block
+   * comment that never closed and made the rest of the file invisible.
+   *
+   * In:  `"…"`  `b"…"`  `c"…"`  `r"…"`  `br"…"`  `cr"…"`  `r#"…"#`  `br#"…"#`  `cr#"…"#`
+   * Out: nothing else. Rust has no `rb"` or `rc"`; the prefix always precedes the `r`.
+   *
+   * Sticky, so it can be anchored at the current index without slicing.
+   */
+  const STRING_OPENER = /(?:[bc]?r(#*)|[bc]?)"/y;
+
   while (i < source.length) {
     if (blockDepth > 0) {
       if (source.startsWith('/*', i)) {
@@ -161,30 +173,24 @@ export function blankRustComments(source: string): string {
       continue;
     }
 
-    // A raw string, optionally a byte string: `r"…"`, `r#"…"#`, `br##"…"##`.
+    // A string literal in any of its nine spellings (see STRING_OPENER).
     if (!isWord(i - 1)) {
-      let j = i;
-      if (source[j] === 'b') j += 1;
-      if (source[j] === 'r') {
-        let k = j + 1;
-        let hashes = 0;
-        while (source[k] === '#') {
-          hashes += 1;
-          k += 1;
-        }
-        if (source[k] === '"') {
-          const terminator = `"${'#'.repeat(hashes)}`;
-          const end = source.indexOf(terminator, k + 1);
+      STRING_OPENER.lastIndex = i;
+      const opener = STRING_OPENER.exec(source);
+      if (opener !== null) {
+        const hashes = opener[1] ?? '';
+        const bodyStart = i + opener[0].length;
+
+        if (opener[0].includes('r')) {
+          // Raw: no escapes, so the terminator is the quote plus the same hash count.
+          const terminator = `"${hashes}`;
+          const end = source.indexOf(terminator, bodyStart);
           blankTo(end === -1 ? source.length : end + terminator.length);
           continue;
         }
-      }
 
-      // A normal or byte string, with backslash escapes.
-      let s = i;
-      if (source[s] === 'b') s += 1;
-      if (source[s] === '"') {
-        let k = s + 1;
+        // Non-raw: a backslash escapes the next character, including a quote.
+        let k = bodyStart;
         while (k < source.length) {
           if (source[k] === '\\') {
             k += 2;

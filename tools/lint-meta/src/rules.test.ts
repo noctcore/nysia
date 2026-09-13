@@ -114,6 +114,9 @@ describe('blankRustComments', () => {
     ['a quote inside a char literal', "const QUOTE: char = '\"';"],
     ['a raw string', 'const RAW: &str = r#"/* still code after this */"#;'],
     ['a byte string', 'const BYTES: &[u8] = b"/*";'],
+    ['a C string', 'const CSTR: &CStr = c"/*";'],
+    ['a raw C string', 'const CRAW: &CStr = cr#"/*"#;'],
+    ['a raw byte string', 'const BRAW: &[u8] = br#"/*"#;'],
     ['an escaped quote', 'const ESC: &str = "he said \\"/*\\"";'],
   ])('does not let %s swallow the code after it', (_what, literal) => {
     const source = `${literal}\nuse tauri::Builder;\n`;
@@ -187,12 +190,12 @@ describe('the architecture rules', () => {
     expect(byRule('no-tauri-outside-desktop')).toContain('apps/web/src/leak.ts');
 
     // The Rust spellings the previous line-anchored regex walked straight past:
-    // `use ::tauri::Builder;` (line 7), `use {tauri, serde};` (10), and the multi-line
-    // grouped form (13). Any of them would have put the UI toolkit in the daemon.
+    // `use ::tauri::Builder;` (line 22), `use {tauri, serde};` (25), and the multi-line
+    // grouped form (28). Any of them would have put the UI toolkit in the daemon.
     const rustLines = violations
       .filter((v) => v.rule === 'no-tauri-outside-desktop' && v.file === 'crates/nysia/src/leak.rs')
       .map((v) => v.line);
-    expect(rustLines).toEqual(expect.arrayContaining([7, 10, 13]));
+    expect(rustLines).toEqual(expect.arrayContaining([22, 25, 28]));
     // Every crate outside apps/desktop is inspected, not just the chain rooted at
     // nysia-core. crates/nysia can reach tauri straight out of [workspace.dependencies]
     // without editing a single shared file, so it has to be checked on its own.
