@@ -93,24 +93,27 @@
   --spacing-tab: 34px;
 }
 
-html,
-body,
-#root {
-  height: 100%;
+/*
+ * Base rules go in `@layer base`, never at the top level. Unlayered CSS outranks every
+ * layered rule regardless of specificity, so a bare `:where(button) { color: inherit }`
+ * here would silently beat every `text-*` utility in the app — which is exactly what it
+ * did until the live window was measured and the active rail item came back foreground
+ * instead of accent.
+ */
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-bg1);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    font-size: var(--text-ui);
+    -webkit-font-smoothing: antialiased;
+  }
 }
 
-body {
-  margin: 0;
-  background: var(--color-bg1);
-  color: var(--color-fg);
-  font-family: var(--font-sans);
-  font-size: var(--text-ui);
-  -webkit-font-smoothing: antialiased;
-}
-
-/* Custom chrome on every platform (design-spec.md §6.7), so nothing is user-selectable by
-   accident and the window never shows a native scrollbar over the terminal. */
-:where(button) {
-  font: inherit;
-  color: inherit;
-}
