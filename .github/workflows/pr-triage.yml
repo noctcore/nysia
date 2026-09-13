@@ -50,19 +50,39 @@ jobs:
       # branch that predates the config.
       - name: check the base branch carries a labeler config
         id: config
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if gh api "repos/${{ github.repository }}/contents/.github/labeler.yml?ref=$BASE_SHA" --silent 2>/dev/null; then
+          # Only a 404 means "the base branch predates the config". A rate limit, an
+          # auth failure or a network error must NOT be read as absence: treating every
+          # failure as a 404 would silently skip labelling whenever the API had a bad
+          # minute, and the notice would say the config was missing when it was not.
+          # Absence skips; anything else fails the job.
+          set +e
+          error=$(gh api "repos/$GH_REPO/contents/.github/labeler.yml?ref=$BASE_SHA" --silent 2>&1 >/dev/null)
+          status=$?
+          set -e
+
+          if [ "$status" -eq 0 ]; then
             echo 'present=true' >> "$GITHUB_OUTPUT"
-          else
+          elif printf '%s' "$error" | grep -q 'HTTP 404'; then
             echo 'present=false' >> "$GITHUB_OUTPUT"
             echo "::notice::No .github/labeler.yml on the base commit $BASE_SHA; skipping area labels. This is expected on the pull request that adds it."
+          else
+            echo "::error::Could not read .github/labeler.yml at $BASE_SHA, and it was not a 404: $error"
+            exit 1
           fi
 
       - name: apply area labels
         if: steps.config.outputs.present == 'true'
+        # v5.0.0, and v7 is current. Staying on v5 deliberately: this is the version
+        # whose matching algorithm was read at this exact commit to settle the `any`/
+        # `all` semantics below, and a pin is only worth what was verified behind it.
+        # Worth revisiting on its own, with the same reading — v5 runs on Node 20, which
+        # the runners will eventually stop supporting, and that is the clock on this pin.
         uses: actions/labeler@8558fd74291d67161a8a78ce36a881fa63b766a9 # v5.0.0
         with:
           repo-token: ${{ github.token }}
