@@ -16,15 +16,13 @@
  * still cannot see rather than let the next reader assume they are airtight. Each of these
  * is a deliberate limit, not an oversight:
  *
- * - **A `tauri::` inside a Rust string literal is reported.** Comments are blanked before
- *   the scan but strings are not. This is a false *positive*, so it fails towards noticing;
- *   the fix if it ever bites is `#[allow]`-style suppression, not a weaker rule.
+ * - **A path that only exists after macro expansion is invisible**, `include!` included.
+ *   Rust is scanned as text with comments and string literals blanked — which is why
+ *   `tauri::` mentioned in a string is correctly ignored — but nothing here expands macros.
  * - **A dependency renamed in `Cargo.lock` rather than in a manifest is invisible.** The
- *   manifest scan resolves `ui = { package = "tauri" }`, but a path or git dependency whose
- *   own manifest renames itself again would need the lock graph, which is out of scope for
- *   a text rule. `cargo tree -i tauri` is the check that would catch it.
- * - **`include!` and macro-generated paths are invisible**, because nothing here expands
- *   macros.
+ *   manifest scan resolves `ui = { package = "tauri" }` in both spellings, but a path or
+ *   git dependency whose own manifest renames itself again would need the lock graph, which
+ *   is out of scope for a text rule. `cargo tree -i tauri` is the check that catches it.
  * - **A file ESLint's `ignores` excludes is covered only by rule (a)'s line-based scan**,
  *   which is weaker than ESLint's AST. The two layers are deliberately different: ESLint
  *   owns the TypeScript and JavaScript boundary properly, lint-meta is the backstop for

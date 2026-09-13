@@ -88,16 +88,22 @@ const RUST_EXTERN_CRATE = /(?<![\w:])extern\s+crate\s+tauri(?:_[A-Za-z0-9_]+)?\b
 const RUST_TAURI_PATH = new RegExp(`${RUST_TAURI_ROOT}::`, 'g');
 
 /**
- * Blank out Rust comments, preserving every byte position.
+ * Blank out Rust comments and string literals, preserving every byte position.
  *
- * Comment bodies become spaces and newlines are kept, so a match index still maps to the
- * right line. Blanking matters twice over: the module docs in `nysia-core` discuss tauri
- * constantly and must not trip the rule, and a `;` inside a comment would otherwise
- * truncate the `use` statement that follows it.
+ * Bodies become spaces and newlines are kept, so a match index still maps to the right
+ * line. Three things depend on this:
  *
- * String literals are deliberately *not* blanked. A `"tauri::"` inside a string would be
- * reported, which is a false positive — it fails towards noticing, not towards missing, and
- * the repo has none.
+ * - the module docs in `nysia-core` discuss tauri constantly and must not trip the rule;
+ * - a `;` inside a comment would otherwise truncate the `use` statement after it;
+ * - **a string literal must not be able to open a comment.** `const OPEN: &str = "/*";`
+ *   would otherwise start a block comment that never closes, and every `use tauri::…`
+ *   below it in the file would be silently invisible. That is a false *negative*, and the
+ *   worst kind: the gate keeps reporting success.
+ *
+ * String literals are therefore stepped over as units — normal, byte (`b"…"`), raw
+ * (`r#"…"#`) and char literals alike, the last so that `'"'` is a character and not the
+ * start of a string. Their contents are blanked as well, since a `tauri::` inside a string
+ * is not an import.
  */
 export function blankRustComments(source: string): string {
   const out = [...source];
@@ -107,42 +113,97 @@ export function blankRustComments(source: string): string {
   const blank = (at: number): void => {
     if (out[at] !== '\n') out[at] = ' ';
   };
+  const blankTo = (end: number): void => {
+    for (let k = i; k < end && k < source.length; k += 1) blank(k);
+    i = Math.min(end, source.length);
+  };
+  const isWord = (at: number): boolean => {
+    const c = source[at];
+    return c !== undefined && /[A-Za-z0-9_]/.test(c);
+  };
+
+  /** A char literal `'x'` / `'\n'` / `'"'`, as opposed to a lifetime `'a`. */
+  const CHAR_LITERAL = /^'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]{1,6}\}|.)|[^'\\])'/;
 
   while (i < source.length) {
     if (blockDepth > 0) {
       if (source.startsWith('/*', i)) {
         blockDepth += 1;
-        blank(i);
-        blank(i + 1);
-        i += 2;
+        blankTo(i + 2);
         continue;
       }
       if (source.startsWith('*/', i)) {
         blockDepth -= 1;
-        blank(i);
-        blank(i + 1);
-        i += 2;
+        blankTo(i + 2);
         continue;
       }
-      blank(i);
-      i += 1;
+      blankTo(i + 1);
       continue;
     }
+
     if (source.startsWith('/*', i)) {
       blockDepth = 1;
-      blank(i);
-      blank(i + 1);
-      i += 2;
+      blankTo(i + 2);
       continue;
     }
     // Covers `//`, `///` and `//!` alike.
     if (source.startsWith('//', i)) {
-      while (i < source.length && source[i] !== '\n') {
-        blank(i);
-        i += 1;
-      }
+      const newline = source.indexOf('\n', i);
+      blankTo(newline === -1 ? source.length : newline);
       continue;
     }
+
+    // A raw string, optionally a byte string: `r"…"`, `r#"…"#`, `br##"…"##`.
+    if (!isWord(i - 1)) {
+      let j = i;
+      if (source[j] === 'b') j += 1;
+      if (source[j] === 'r') {
+        let k = j + 1;
+        let hashes = 0;
+        while (source[k] === '#') {
+          hashes += 1;
+          k += 1;
+        }
+        if (source[k] === '"') {
+          const terminator = `"${'#'.repeat(hashes)}`;
+          const end = source.indexOf(terminator, k + 1);
+          blankTo(end === -1 ? source.length : end + terminator.length);
+          continue;
+        }
+      }
+
+      // A normal or byte string, with backslash escapes.
+      let s = i;
+      if (source[s] === 'b') s += 1;
+      if (source[s] === '"') {
+        let k = s + 1;
+        while (k < source.length) {
+          if (source[k] === '\\') {
+            k += 2;
+            continue;
+          }
+          if (source[k] === '"') {
+            k += 1;
+            break;
+          }
+          k += 1;
+        }
+        blankTo(k);
+        continue;
+      }
+    }
+
+    if (source[i] === "'") {
+      const char = CHAR_LITERAL.exec(source.slice(i, i + 12));
+      if (char !== null) {
+        blankTo(i + char[0].length);
+        continue;
+      }
+      // A lifetime: nothing to blank.
+      i += 1;
+      continue;
+    }
+
     i += 1;
   }
 

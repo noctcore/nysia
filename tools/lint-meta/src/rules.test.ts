@@ -105,6 +105,32 @@ describe('blankRustComments', () => {
     const source = '/* a stray ; in a comment */\nuse {\n    tauri,\n};\n';
     expect(blankRustComments(source)).not.toContain(';\nuse');
   });
+
+  // The dangerous direction. A string that opens a comment hides everything after it, and
+  // the gate keeps reporting success — a false negative, not a false positive.
+  it.each([
+    ['a block-comment opener in a string', 'const OPEN: &str = "/*";'],
+    ['a line-comment opener in a string', 'const LINE: &str = "//";'],
+    ['a quote inside a char literal', "const QUOTE: char = '\"';"],
+    ['a raw string', 'const RAW: &str = r#"/* still code after this */"#;'],
+    ['a byte string', 'const BYTES: &[u8] = b"/*";'],
+    ['an escaped quote', 'const ESC: &str = "he said \\"/*\\"";'],
+  ])('does not let %s swallow the code after it', (_what, literal) => {
+    const source = `${literal}\nuse tauri::Builder;\n`;
+    const blanked = blankRustComments(source);
+
+    expect(blanked).toHaveLength(source.length);
+    expect(blanked).toContain('use tauri::Builder;');
+  });
+
+  it('blanks what is inside a string, since a string is not an import', () => {
+    expect(blankRustComments('let s = "tauri::Builder";')).not.toContain('tauri');
+  });
+
+  it('treats a lifetime as code rather than as an unterminated char literal', () => {
+    const source = "fn f<'a>(x: &'a str) -> &'a str { x }\nuse tauri::Builder;\n";
+    expect(blankRustComments(source)).toContain('use tauri::Builder;');
+  });
 });
 
 describe('walk', () => {
