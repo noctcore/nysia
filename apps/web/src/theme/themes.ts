@@ -3,7 +3,7 @@
  * `<script type="text/x-dc">` block and cross-checked against design-spec.md §1.
  *
  * This module and `index.css` are the **only** two files in `apps/web` allowed to contain
- * a colour literal, and `hexGuard.test.ts` fails the build if a third appears. Everything
+ * a colour literal, and `colourGuard.test.ts` fails the build if a third appears. Everything
  * else reads a token, because the theme and the accent are live user tweaks: a hardcoded
  * colour is a pixel that stops following the switcher.
  */

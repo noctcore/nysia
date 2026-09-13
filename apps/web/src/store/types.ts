@@ -205,9 +205,9 @@ export interface WindowControls {
  *
  * Every command resolves once the store has converged on the result, and rejects with a
  * `StoreCommandError` when it could not — having already appended the matching entry to
- * `snapshot.errors`. Components never call one bare: `runCommand` in `./runCommand` is the
- * only call site shape, because a bare call is an unhandled rejection waiting for the
- * first missing shell binary.
+ * `snapshot.errors`. Components never see this interface at all: `useCommands()` in
+ * `./hooks` hands them the routed surface from `./commands`, whose verbs return `void`, so
+ * a bare call with an unhandled rejection is not a shape a component can write.
  */
 export interface Store {
   /** Never null, and referentially stable between notifications. */
