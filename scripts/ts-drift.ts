@@ -19,7 +19,7 @@
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix, relative, sep } from 'node:path';
 import process from 'node:process';
 
 import { findRepoRoot } from '../tools/lint-meta/src/repoRoot.ts';
@@ -31,14 +31,36 @@ const repoRoot = findRepoRoot();
 const protoCrate = join(repoRoot, 'crates', 'nysia-proto');
 const committed = join(repoRoot, 'apps', 'web', 'src', 'generated');
 
+/**
+ * Every `.ts` file under `dir`, as a POSIX-separated path relative to it.
+ *
+ * Recursive, and that is load-bearing. `#[ts(export_to = "rpc/")]` puts a binding in a
+ * subdirectory, and a top-level-only listing drops it from *both* sides of the diff at
+ * once: the guard then reports "N bindings match" and has silently stopped checking the
+ * nested ones. `scripts/prove-ts-drift.ts` exports its probe to `drift_probe/` precisely so
+ * that this recursion is proven rather than assumed.
+ */
 function listTypeScript(dir: string): string[] {
-  try {
-    return readdirSync(dir)
-      .filter((name) => name.endsWith('.ts'))
-      .sort();
-  } catch {
-    return [];
-  }
+  const found: string[] = [];
+  const visit = (current: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const absolute = join(current, entry.name);
+      if (entry.isDirectory()) {
+        visit(absolute);
+      } else if (entry.isFile() && entry.name.endsWith('.ts')) {
+        found.push(relative(dir, absolute).split(sep).join(posix.sep));
+      }
+    }
+  };
+  visit(dir);
+  // Sorted so the report reads the same on both runners.
+  return found.sort();
 }
 
 /** Normalise line endings so a CRLF checkout is not reported as drift. */
@@ -81,7 +103,7 @@ function main(): number {
     }
 
     const problems: string[] = [];
-    for (const name of new Set([...fresh, ...onDisk])) {
+    for (const name of [...new Set([...fresh, ...onDisk])].sort()) {
       const inFresh = fresh.includes(name);
       const inCommitted = onDisk.includes(name);
       if (!inCommitted) {
