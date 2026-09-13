@@ -1,6 +1,5 @@
 import type { StoreError } from '../store/errors';
 import { useCommands, useSnapshot, useUnexpectedFailures } from '../store/hooks';
-import { unexpectedFailures } from '../store/unexpectedFailures';
 import { GLYPH } from '../ui/glyphs';
 
 /**
@@ -27,7 +26,7 @@ export function CommandErrors() {
   const escaped = useUnexpectedFailures();
   const commands = useCommands();
 
-  if (errors.length === 0 && escaped.length === 0) {
+  if (errors.length === 0 && escaped.failures.length === 0) {
     return null;
   }
 
@@ -45,12 +44,8 @@ export function CommandErrors() {
           onDismiss={() => commands.dismissError(error.id)}
         />
       ))}
-      {escaped.map((error) => (
-        <Notice
-          key={error.id}
-          error={error}
-          onDismiss={() => unexpectedFailures.dismiss(error.id)}
-        />
+      {escaped.failures.map((error) => (
+        <Notice key={error.id} error={error} onDismiss={() => escaped.dismiss(error.id)} />
       ))}
     </div>
   );
