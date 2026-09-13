@@ -96,6 +96,44 @@ const TS_TAURI_IMPORTS = [
 ];
 
 /**
+ * Where the raw store provider may be reached.
+ *
+ * Mirrors the two carve-outs in `eslint.config.js` (`BAN_STORE_CONTEXT`): the store module
+ * itself, and `main.tsx`, which composes the provider. If the two ever disagree, one layer
+ * bans what the other allows, so they are written to match and the proof checks both.
+ */
+export const STORE_CONTEXT_ALLOWLIST: readonly string[] = [
+  'apps/web/src/store/',
+  // `main.` and not `main.tsx`, so the carve-out survives the file changing extension —
+  // it matches the ESLint block's `main.{ts,tsx,mts,cts,js,jsx,mjs,cjs}`.
+  'apps/web/src/main.',
+];
+
+/** The allowlist as a reader expects to see it, since `main.` alone reads like a typo. */
+const STORE_CONTEXT_ALLOWED_FOR_HUMANS = 'apps/web/src/store/** and apps/web/src/main.*';
+
+/**
+ * Reaching `StoreContext` through a call rather than an `import` statement.
+ *
+ * ESLint's `no-restricted-imports` owns `import` and `export … from`; it does not see
+ * `require()` or dynamic `import()`, and `no-restricted-modules` was removed in ESLint 9.
+ * The config header in `eslint.config.js` assigns those two to lint-meta — and until now
+ * lint-meta had no store rule, so the boundary was half-implemented in exactly the way that
+ * header described. A top-level `await import('../store/StoreContext')` followed by
+ * `useContext` handed a component the raw provider back, whose commands return promises
+ * that `void` silently drops, and it passed typecheck, ESLint, lint-meta and the build.
+ *
+ * The specifier test matches any path ending in `StoreContext`, with or without a file
+ * extension — the same reach as the ESLint glob patterns, which deliberately do not
+ * require `store/` next to the filename. So `../store/./StoreContext` and
+ * `../store//StoreContext` are caught here too.
+ */
+const TS_STORE_CONTEXT_CALLS = [
+  /(?:^|[^\w.$])import\s*\(\s*['"][^'"]*StoreContext(?:\.[A-Za-z0-9]+)?['"]/,
+  /(?:^|[^\w.$])require\s*\(\s*['"][^'"]*StoreContext(?:\.[A-Za-z0-9]+)?['"]/,
+];
+
+/**
  * The crate root, in any of the spellings a `use` path can start with.
  *
  * `tauri`, and also `tauri_plugin_opener` and friends — a leading `::` is optional because
@@ -390,6 +428,52 @@ export function noTauriOutsideDesktop(root: string, files: readonly string[]): V
   return violations;
 }
 
+/**
+ * Rule (d): nothing in the webview may reach `StoreContext` through a call.
+ *
+ * The other half of the boundary ESLint enforces on `import` statements. `useCommands()`
+ * hands components verbs that return `void` so there is no promise left to drop; that is
+ * only true while the provider itself is out of reach, and a dynamic `import()` reached it
+ * without tripping anything.
+ *
+ * Scoped to `apps/web/` because that is the scope of the ESLint ban it completes, with the
+ * same two carve-outs.
+ */
+export function noStoreContextOutsideStore(root: string, files: readonly string[]): Violation[] {
+  const violations: Violation[] = [];
+
+  for (const file of files) {
+    if (!file.startsWith('apps/web/')) continue;
+    if (STORE_CONTEXT_ALLOWLIST.some((prefix) => file.startsWith(prefix))) continue;
+
+    const extension = file.slice(file.lastIndexOf('.'));
+    if (!SOURCE_EXTENSIONS.includes(extension) || extension === '.rs') continue;
+
+    // Line-based for the same reason rule (a) is: a statement-level scan would fire on the
+    // sample specifiers inside `scripts/prove-eslint-bans.ts`, where they are test input.
+    read(root, file)
+      .split(/\r?\n/)
+      .forEach((text, index) => {
+        const trimmed = text.trim();
+        if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) {
+          return;
+        }
+        if (TS_STORE_CONTEXT_CALLS.some((pattern) => pattern.test(text))) {
+          violations.push({
+            rule: 'no-store-context-outside-store',
+            file,
+            line: index + 1,
+            message:
+              'reaches StoreContext through a call; components use useCommands() from ' +
+              `store/hooks. Only ${STORE_CONTEXT_ALLOWED_FOR_HUMANS} may touch the provider`,
+          });
+        }
+      });
+  }
+
+  return violations;
+}
+
 /** Which crate a dependency is, spelled for a message — `ui (package = "tauri")` renamed. */
 function describe(edge: CargoDependencyEdge): string {
   return edge.rename === null
@@ -507,7 +591,8 @@ function shortestChainToTauri(
  * trees, which are deliberately not buildable crates.
  */
 export function runSourceRules(root: string, includeFixtures = false): Violation[] {
-  return noTauriOutsideDesktop(root, walk(root, includeFixtures));
+  const files = walk(root, includeFixtures);
+  return [...noTauriOutsideDesktop(root, files), ...noStoreContextOutsideStore(root, files)];
 }
 
 /**

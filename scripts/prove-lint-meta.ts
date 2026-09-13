@@ -103,8 +103,29 @@ expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/astral_matches.r
 expectFile(trips, 'no-tauri-outside-desktop', 'apps/web/src/legacy.js');
 expectFile(trips, 'no-tauri-outside-desktop', 'apps/web/src/legacy.cjs');
 
+// ---------------------------------------------------------------------------------------
+// Rule (d) — reaching StoreContext through a call rather than an import statement.
+//
+// ESLint owns `import` and `export … from`; it cannot see `require()` or dynamic
+// `import()`, which `eslint.config.js` says in its own header are lint-meta's half. Until
+// rule (d) existed that half was missing, so a top-level
+// `await import('../store/StoreContext')` reached the raw provider while passing typecheck,
+// eslint, lint-meta and the Vite build.
+// ---------------------------------------------------------------------------------------
+expectRule(trips, 'no-store-context-outside-store');
+
+// Both spellings, at their exact lines. The second puts a segment between `store` and the
+// filename, which the ESLint patterns deliberately tolerate — a rule here that required the
+// two to be adjacent would report the first and miss the second.
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dynstore.ts', 10); // await import(...)
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dynstore.ts', 11); // require('../store/./StoreContext')
+
 expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
 process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');
+// The clean fixture also reaches StoreContext by call from store/ and from main.tsx. If
+// rule (d) stopped honouring its allowlist those two would report and the line above would
+// fail, which is what stops the carve-out silently becoming a ban.
+process.stdout.write('  clean: store/** and main.tsx may reach the provider by call\n');
 
 // ---------------------------------------------------------------------------------------
 // Rules (b) and (c) — cargo's own resolution of a real workspace.
