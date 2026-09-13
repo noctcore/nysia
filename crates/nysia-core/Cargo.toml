@@ -28,3 +28,8 @@ uuid = { workspace = true }
 # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (traps register #7).
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
+
+# ConPTY has no signals and `portable-pty`'s `ChildKiller` signals only the direct child,
+# so a Unix tree-kill is `killpg` against the `setsid` session leader (§7.1).
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
