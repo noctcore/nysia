@@ -9,7 +9,7 @@ import type {
   Tab,
   WindowControls,
 } from '../types';
-import { SEED_SNAPSHOT } from './seed';
+import { createSeedSnapshot } from './seed';
 
 /**
  * The wave-1 store: the design mock's seed data, plus the state transitions the chrome
@@ -28,7 +28,7 @@ export class MockStore implements Store {
   readonly #listeners = new Set<() => void>();
   #nextTab: number;
 
-  constructor(initial: StoreSnapshot = SEED_SNAPSHOT) {
+  constructor(initial: StoreSnapshot = createSeedSnapshot()) {
     this.#snapshot = initial;
     this.#nextTab = initial.tabs.length + 1;
   }

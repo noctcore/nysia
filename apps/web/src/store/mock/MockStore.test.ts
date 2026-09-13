@@ -2,16 +2,19 @@ import { describe, expect, it } from 'vitest';
 
 import { describeStoreContract } from '../storeContract';
 import { createMockStore } from './MockStore';
-import { SEED_ACTIVE_PROJECT, SEED_ACTIVE_TAB, SEED_PROJECTS, SEED_TABS } from './seed';
+import {
+  SEED_ACTIVE_PROJECT,
+  SEED_ACTIVE_TAB,
+  SEED_PROJECT_NAMES,
+  SEED_TABS,
+} from './seed';
 
 describeStoreContract('MockStore', () => createMockStore());
 
 describe('MockStore seed', () => {
   it('serves the projects and tabs the design mock shows', () => {
     const snapshot = createMockStore().getSnapshot();
-    expect(snapshot.projects.map((project) => project.name)).toEqual(
-      SEED_PROJECTS.map((project) => project.name),
-    );
+    expect(snapshot.projects.map((project) => project.name)).toEqual(SEED_PROJECT_NAMES);
     expect(snapshot.tabs.map((tab) => tab.title)).toEqual(SEED_TABS.map((tab) => tab.title));
     expect(snapshot.activeTab).toBe(SEED_ACTIVE_TAB);
     expect(snapshot.activeProjectId).toBe(SEED_ACTIVE_PROJECT);

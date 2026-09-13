@@ -1,12 +1,6 @@
 import type { PaneKey } from '../../generated/PaneKey';
 import type { SessionHandle } from '../../generated/SessionHandle';
-import type {
-  LauncherGroup,
-  Project,
-  SessionSummary,
-  StoreSnapshot,
-  Tab,
-} from '../types';
+import type { LauncherGroup, Project, StoreSnapshot, Tab } from '../types';
 
 /**
  * The seed data from the design mock, transcribed from the `renderVals()` block in
@@ -16,16 +10,14 @@ import type {
  * whole store boundary exists to enforce. Wave 2 deletes nothing here; it just stops
  * constructing the mock.
  *
- * Ages are stored as offsets from a fixed reference instant rather than as the mock's
- * pre-formatted `21h`, because the daemon will send timestamps and the sidebar has to do
- * the arithmetic either way.
+ * Session ages are offsets from the moment the store is built rather than the mock's
+ * pre-formatted `21h`. Two reasons: the daemon will send timestamps, so the sidebar has to
+ * do the arithmetic either way; and a fixed epoch would make the seeded ages drift further
+ * from the design every day the repository sits there.
  */
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
-
-/** Midday on the day the design was pulled, so the seeded ages are stable to read. */
-export const SEED_NOW = Date.parse('2026-09-13T12:16:00Z');
 
 function pane(tab: number, leaf: number): PaneKey {
   return `tab_${tab}:leaf_${leaf}`;
@@ -40,23 +32,25 @@ const PWSH_PANE = pane(2, 1);
 const CODEX_PANE = pane(3, 1);
 const WSL_PANE = pane(4, 1);
 
-const SHIROANI_SESSIONS: readonly SessionSummary[] = [
-  {
-    paneKey: KIREI_PANE,
-    handle: handle('9f1c0a4e-0f2b-4d21-9a70-1d2b3c4d5e6f'),
-    kind: 'agent',
-    title: 'Kirei deps but we already did…',
-    status: 'running',
-    startedAt: SEED_NOW - 21 * HOUR,
-  },
-  {
-    paneKey: PWSH_PANE,
-    handle: handle('2b7d81c3-5e44-4f0a-8c19-7a6b5c4d3e2f'),
-    kind: 'shell',
-    title: 'pwsh',
-    status: 'idle',
-    startedAt: SEED_NOW - 3 * MINUTE,
-  },
+const KIREI_HANDLE = handle('9f1c0a4e-0f2b-4d21-9a70-1d2b3c4d5e6f');
+const PWSH_HANDLE = handle('2b7d81c3-5e44-4f0a-8c19-7a6b5c4d3e2f');
+const CODEX_HANDLE = handle('c4e5f607-1829-4a3b-b5c6-d7e8f90a1b2c');
+const WSL_HANDLE = handle('7d6e5f40-3b2a-4190-8e7d-6c5b4a392817');
+
+export const SEED_ACTIVE_PROJECT = 'D:/dev/shiroani';
+
+/** Project names in sidebar order, which is the order the mock lists them in. */
+export const SEED_PROJECT_NAMES: readonly string[] = [
+  'Settly',
+  'nightcore',
+  'shiranami',
+  'shiroani',
+  'omniscribe',
+  'portfolio',
+  'vr-chat-invite-desktop',
+  'deskmate',
+  'szlak',
+  'mat-majka',
 ];
 
 /**
@@ -64,31 +58,47 @@ const SHIROANI_SESSIONS: readonly SessionSummary[] = [
  *
  * The mock lists four projects, expands the fourth into its worktree block, then lists six
  * more below it — so `shiroani` is the active project and every other row is collapsed.
+ * Only the active project carries worktrees here, which is exactly what a daemon would
+ * send: enumerating branches and sessions for ten repositories nobody is looking at is
+ * work for nothing.
  */
-export const SEED_PROJECTS: readonly Project[] = [
-  { id: 'D:/dev/Settly', name: 'Settly', group: 'Dev', worktrees: [] },
-  { id: 'D:/dev/nightcore', name: 'nightcore', group: 'Dev', worktrees: [] },
-  { id: 'D:/dev/shiranami', name: 'shiranami', group: 'Dev', worktrees: [] },
-  {
-    id: 'D:/dev/shiroani',
-    name: 'shiroani',
-    group: 'Dev',
-    worktrees: [{ branch: 'master', isPrimary: true, sessions: SHIROANI_SESSIONS }],
-  },
-  { id: 'D:/dev/omniscribe', name: 'omniscribe', group: 'Dev', worktrees: [] },
-  { id: 'D:/dev/portfolio', name: 'portfolio', group: 'Dev', worktrees: [] },
-  {
-    id: 'D:/dev/vr-chat-invite-desktop',
-    name: 'vr-chat-invite-desktop',
-    group: 'Dev',
-    worktrees: [],
-  },
-  { id: 'D:/dev/deskmate', name: 'deskmate', group: 'Dev', worktrees: [] },
-  { id: 'D:/dev/szlak', name: 'szlak', group: 'Dev', worktrees: [] },
-  { id: 'D:/dev/mat-majka', name: 'mat-majka', group: 'Dev', worktrees: [] },
-];
-
-export const SEED_ACTIVE_PROJECT = 'D:/dev/shiroani';
+function seedProjects(now: number): readonly Project[] {
+  return SEED_PROJECT_NAMES.map((name) => {
+    const id = `D:/dev/${name}`;
+    if (id !== SEED_ACTIVE_PROJECT) {
+      return { id, name, group: 'Dev', worktrees: [] };
+    }
+    return {
+      id,
+      name,
+      group: 'Dev',
+      worktrees: [
+        {
+          branch: 'master',
+          isPrimary: true,
+          sessions: [
+            {
+              paneKey: KIREI_PANE,
+              handle: KIREI_HANDLE,
+              kind: 'agent' as const,
+              title: 'Kirei deps but we already did…',
+              status: 'running' as const,
+              startedAt: now - 21 * HOUR,
+            },
+            {
+              paneKey: PWSH_PANE,
+              handle: PWSH_HANDLE,
+              kind: 'shell' as const,
+              title: 'pwsh',
+              status: 'idle' as const,
+              startedAt: now - 3 * MINUTE,
+            },
+          ],
+        },
+      ],
+    };
+  });
+}
 
 /**
  * The four tabs in the mock's strip.
@@ -100,28 +110,13 @@ export const SEED_ACTIVE_PROJECT = 'D:/dev/shiroani';
 export const SEED_TABS: readonly Tab[] = [
   {
     paneKey: KIREI_PANE,
-    handle: handle('9f1c0a4e-0f2b-4d21-9a70-1d2b3c4d5e6f'),
+    handle: KIREI_HANDLE,
     kind: 'agent',
     title: 'Kirei deps but we already did…',
   },
-  {
-    paneKey: PWSH_PANE,
-    handle: handle('2b7d81c3-5e44-4f0a-8c19-7a6b5c4d3e2f'),
-    kind: 'shell',
-    title: 'pwsh · shiroani',
-  },
-  {
-    paneKey: CODEX_PANE,
-    handle: handle('c4e5f607-1829-4a3b-b5c6-d7e8f90a1b2c'),
-    kind: 'agent',
-    title: 'codex · deskmate',
-  },
-  {
-    paneKey: WSL_PANE,
-    handle: handle('7d6e5f40-3b2a-4190-8e7d-6c5b4a392817'),
-    kind: 'shell',
-    title: 'wsl · szlak',
-  },
+  { paneKey: PWSH_PANE, handle: PWSH_HANDLE, kind: 'shell', title: 'pwsh · shiroani' },
+  { paneKey: CODEX_PANE, handle: CODEX_HANDLE, kind: 'agent', title: 'codex · deskmate' },
+  { paneKey: WSL_PANE, handle: WSL_HANDLE, kind: 'shell', title: 'wsl · szlak' },
 ];
 
 export const SEED_ACTIVE_TAB = KIREI_PANE;
@@ -153,22 +148,24 @@ export const SEED_LAUNCHERS: readonly LauncherGroup[] = [
   },
 ];
 
-export const SEED_SNAPSHOT: StoreSnapshot = {
-  nav: 'session',
-  projects: SEED_PROJECTS,
-  activeProjectId: SEED_ACTIVE_PROJECT,
-  tabs: SEED_TABS,
-  activeTab: SEED_ACTIVE_TAB,
-  launchers: SEED_LAUNCHERS,
-  daemon: {
-    connected: true,
-    memoryBytes: 4_294_967_296,
-    terminalCount: 9,
-    worktreeCount: 3,
-  },
-  usage: [
-    { label: '5h', percentLeft: 100 },
-    { label: '6d', percentLeft: 97 },
-    { label: 'Fable', percentLeft: 99 },
-  ],
-};
+export function createSeedSnapshot(now: number = Date.now()): StoreSnapshot {
+  return {
+    nav: 'session',
+    projects: seedProjects(now),
+    activeProjectId: SEED_ACTIVE_PROJECT,
+    tabs: SEED_TABS,
+    activeTab: SEED_ACTIVE_TAB,
+    launchers: SEED_LAUNCHERS,
+    daemon: {
+      connected: true,
+      memoryBytes: 4 * 1024 ** 3,
+      terminalCount: 9,
+      worktreeCount: 3,
+    },
+    usage: [
+      { label: '5h', percentLeft: 100 },
+      { label: '6d', percentLeft: 97 },
+      { label: 'Fable', percentLeft: 99 },
+    ],
+  };
+}
