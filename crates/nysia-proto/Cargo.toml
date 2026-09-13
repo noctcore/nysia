@@ -1,0 +1,18 @@
+[package]
+name = "nysia-proto"
+description = "Nysia wire types. Rust is the sole authority; TypeScript is generated from here (D-13)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ts-rs = { workspace = true }
+uuid = { workspace = true }
