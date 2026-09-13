@@ -10,7 +10,7 @@
 //! - the `hello` handshake and `daemonIdentity` response, with `retryable` set so a client
 //!   knows whether to back off or die;
 //! - newline-delimited JSON for control, length-prefixed binary
-//!   (`[kind:u8][len:u32 BE][payload]`) for terminal output;
+//!   (`[kind:u8][streamId:u32 BE][len:u32 BE][payload]`) for terminal output;
 //! - caller authentication from kernel-supplied peer credentials plus PTY process-tree
 //!   ancestry, never from an echoed token — the daemon spawned the process, so it can
 //!   prove the caller's identity directly;
