@@ -49,6 +49,31 @@ const BAN_NODE_BUILTINS = {
 };
 
 /**
+ * The store's command surface, made unreachable rather than merely relocated.
+ *
+ * `useStore()` is gone and `useCommands()` hands components verbs that return `void`, so
+ * there is no promise left for a call site to drop. But a component could still reach past
+ * that with `useContext(StoreContext)` and get the raw provider back, whose commands return
+ * promises — and `void store.closeTab(key)` compiles, lints clean and produces an unhandled
+ * rejection with nothing on screen. That is the exact failure `useCommands` exists to
+ * remove, walking back in through a side door on the tenth call site.
+ *
+ * `store/commands.ts` says the door "cannot be locked from here" because the lint config
+ * lives outside that package. This is that lock, from here.
+ *
+ * Two carve-outs, and only two: `store/**` is the module itself, and `main.tsx` composes
+ * the provider — the one line wave 2 changes when the mock store becomes the daemon-backed
+ * one. Everything else goes through `useCommands()`.
+ */
+const BAN_STORE_CONTEXT = {
+  group: ['**/store/StoreContext', '**/store/StoreContext.*'],
+  message:
+    'Components reach the store through useCommands() / useSnapshot() from store/hooks, ' +
+    'never through StoreContext. The context hands back the raw provider, whose commands ' +
+    'return promises that a call site can drop silently; the routed verbs return void.',
+};
+
+/**
  * Wire types come from `nysia-proto` via ts-rs. A hand-written copy is a second authority
  * on the wire, which is exactly what D-13 removes.
  */
@@ -106,7 +131,7 @@ export default tseslint.config(
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
       'no-restricted-imports': [
         'error',
-        { patterns: [BAN_TAURI, BAN_NODE_BUILTINS, BAN_GENERATED_COPIES] },
+        { patterns: [BAN_TAURI, BAN_NODE_BUILTINS, BAN_GENERATED_COPIES, BAN_STORE_CONTEXT] },
       ],
     },
   },
@@ -116,14 +141,37 @@ export default tseslint.config(
   //
   // Trap 10: this block replaces the block above for these files, so it must repeat every
   // ban it still wants. Dropping BAN_NODE_BUILTINS here would silently allow `node:fs`
-  // into the bundle.
+  // into the bundle, and dropping BAN_STORE_CONTEXT would make the transport the one place
+  // that could still reach the raw provider. The transport is not a store carve-out.
   // ---------------------------------------------------------------------------------
   {
     files: ['apps/web/src/transport/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
     rules: {
       'no-restricted-imports': [
         'error',
-        { patterns: [BAN_NODE_BUILTINS, BAN_GENERATED_COPIES] },
+        { patterns: [BAN_NODE_BUILTINS, BAN_GENERATED_COPIES, BAN_STORE_CONTEXT] },
+      ],
+    },
+  },
+
+  // ---------------------------------------------------------------------------------
+  // The two store carve-outs: the module itself, and the entry point that composes the
+  // provider. Both must come after the apps/web block to replace it.
+  //
+  // Trap 10 again, and this is the block where dropping a ban would be least visible:
+  // these files are allowed to name StoreContext, so the temptation is to write the rule
+  // as "just that one off". Written that way it would also re-open Tauri, node builtins
+  // and the generated barrel for `store/**` — the full set is repeated for that reason.
+  // ---------------------------------------------------------------------------------
+  {
+    files: [
+      'apps/web/src/store/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}',
+      'apps/web/src/main.{ts,tsx,mts,cts,js,jsx,mjs,cjs}',
+    ],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        { patterns: [BAN_TAURI, BAN_NODE_BUILTINS, BAN_GENERATED_COPIES] },
       ],
     },
   },
