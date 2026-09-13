@@ -4,13 +4,23 @@
 //! its `xterm.js` parser reconstructs the same state the Rust grid already holds. That is
 //! what makes reattach replay scrollback, which is half the v0.1 acceptance criterion.
 //!
-//! The ring stores raw bytes, escape sequences included. Trimming therefore has to be
-//! careful: cutting mid-sequence corrupts the parser on the other end (§7.3). The ring
-//! cannot know where sequence boundaries are without parsing, so it does the next best
-//! thing — after trimming to the cap it advances the head past the next newline, which is
-//! a boundary no escape sequence spans. The scan is bounded so that a single very long
-//! line cannot cause the ring to discard everything.
-
+//! The ring stores raw bytes, escape sequences included. Trimming therefore has to cut
+//! somewhere, and §7.3 is clear that cutting mid-sequence corrupts the parser on the other
+//! end. The ring cannot find sequence boundaries without parsing, so after trimming to the
+//! cap it advances the head past the next newline.
+//!
+//! **That is a heuristic, not a guarantee, and the limit is worth stating exactly.** A
+//! newline is a reliable boundary in the output that dominates a terminal — printable text,
+//! `CSI` cursor moves, `SGR` colour runs — because none of those can contain one. It is
+//! *not* a boundary inside a string-type sequence: `0x0A` inside a `DCS` payload is passed
+//! through as data, and inside `OSC` or `APC` it is ignored and the sequence continues. A
+//! trimmed replay can therefore still resume in the middle of one of those, and a client
+//! that starts parsing there will mis-read until the terminator arrives.
+//!
+//! The complete answer is not this ring's to give: §7.3 says that on overflow the whole
+//! transient buffer is dropped and `ESC c` is injected, so the client resets rather than
+//! resynchronises. That is transport-side, and it is W4's. What this ring owes is a cheap
+//! trim that is right for ordinary output and honest about the rest.
 use std::collections::VecDeque;
 
 /// How far past the raw trim point the ring will look for a newline to align on. A line
@@ -94,6 +104,8 @@ impl ReplayRing {
         let over = self.bytes.len() - self.capacity;
         self.discard_front(over);
 
+        // Bounded: a single line longer than this keeps the raw cut, because discarding
+        // the whole buffer to find a boundary is worse than resuming inside a line.
         let scan = ALIGN_SCAN_LIMIT.min(self.bytes.len());
         if let Some(offset) = self.bytes.iter().take(scan).position(|&b| b == b'\n') {
             self.discard_front(offset + 1);
@@ -129,6 +141,22 @@ mod tests {
         assert_eq!(ring.len(), 4);
         assert_eq!(ring.snapshot(), b"efgh");
         assert_eq!(ring.dropped_bytes(), 4);
+    }
+
+    #[test]
+    fn the_newline_alignment_is_a_heuristic_and_does_not_span_a_string_sequence() {
+        // Stated as a test so the limit in the module docs cannot quietly stop being true:
+        // an OSC payload may contain a newline, and the alignment will happily cut there.
+        let mut ring = ReplayRing::with_capacity(8);
+        ring.push(b"\x1b]0;ti\ntle\x07AAAAAAAA");
+        let snapshot = ring.snapshot();
+        assert!(
+            !snapshot.starts_with(b"\x1b]"),
+            "the head was trimmed, as expected"
+        );
+        // What survives begins after a newline that was inside the OSC string, which is
+        // exactly the case §7.3's `ESC c` reset exists to cover on the transport side.
+        assert_eq!(snapshot, b"AAAAAAAA");
     }
 
     #[test]
