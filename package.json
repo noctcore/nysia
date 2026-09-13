@@ -13,7 +13,7 @@
     "build": "pnpm --filter @nysia/web build",
     "build:app": "pnpm --filter @nysia/desktop build",
     "typecheck": "tsc -p tsconfig.json && pnpm -r --if-present typecheck",
-    "lint": "eslint . && node tools/lint-meta/src/cli.ts",
+    "lint": "eslint . --max-warnings 0 && node tools/lint-meta/src/cli.ts",
     "test": "vitest run",
     "ts-drift": "node scripts/ts-drift.ts",
     "prove:ts-drift": "node scripts/prove-ts-drift.ts",
