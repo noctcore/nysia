@@ -288,9 +288,14 @@ impl PtySession {
         #[cfg(windows)]
         let job = {
             let job = teardown::JobObject::new().map_err(SpawnError::Confinement)?;
-            if let Some(handle) = child.as_raw_handle() {
-                job.assign(handle).map_err(SpawnError::Confinement)?;
-            }
+            // Without the handle there is no way to put the child in the job, and a session
+            // with no tree-kill is worse than one that failed to start.
+            let handle = child.as_raw_handle().ok_or_else(|| {
+                SpawnError::Confinement(std::io::Error::other(
+                    "the spawned child exposed no process handle",
+                ))
+            })?;
+            job.assign(handle).map_err(SpawnError::Confinement)?;
             job
         };
 
@@ -444,7 +449,11 @@ impl PtySession {
         }
         #[cfg(unix)]
         {
-            let Some(pgid) = self.pid else {
+            // The child called `setsid`, so its pid is both its process-group id and its
+            // session id. The group catches the shell; the session sweep catches the `&`
+            // jobs an interactive shell put into groups of their own, which is the macOS
+            // answer to having no subreaper (§7.1).
+            let Some(leader) = self.pid else {
                 let _ = self
                     .killer
                     .lock()
@@ -452,14 +461,21 @@ impl PtySession {
                     .kill();
                 return;
             };
-            if let Err(err) = teardown::signal_group(pgid, teardown::SIGTERM) {
-                tracing::warn!(%err, pgid, "SIGTERM to the process group failed");
+            if let Err(err) = teardown::signal_group(leader, teardown::SIGTERM) {
+                tracing::warn!(%err, leader, "SIGTERM to the process group failed");
             }
-            // Give the shell its exit traps, then stop asking.
-            if !teardown::wait_for(grace, || teardown::tree_is_gone(pgid))
-                && let Err(err) = teardown::signal_group(pgid, teardown::SIGKILL)
-            {
-                tracing::warn!(%err, pgid, "SIGKILL to the process group failed");
+            teardown::signal_session(leader, teardown::SIGTERM);
+
+            // Give the shell its exit traps, then stop asking. An interactive `bash`
+            // ignores SIGTERM, so this grace is usually burned in full.
+            if !teardown::wait_for(grace, || teardown::session_is_gone(leader)) {
+                if let Err(err) = teardown::signal_group(leader, teardown::SIGKILL) {
+                    tracing::warn!(%err, leader, "SIGKILL to the process group failed");
+                }
+                let swept = teardown::signal_session(leader, teardown::SIGKILL);
+                if swept > 0 {
+                    tracing::debug!(swept, leader, "swept the session for surviving jobs");
+                }
             }
         }
     }
@@ -776,13 +792,14 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_child_that_exits_is_reported_even_though_the_master_is_still_open() {
-        // Traps register #11. The backgrounded `sleep` keeps a slave fd open, so EOF does
-        // not arrive — but the shell's exit status must still be reported promptly.
+        // Traps register #11. The `sleep` inherits the pty, so a slave fd stays open and
+        // EOF does not arrive — but the shell's exit status must still be reported. The
+        // subshell matters: started as a plain `&` job it would still belong to the
+        // interactive shell, and zsh refuses the first `exit` while a job is running and
+        // then HUPs it.
         let (session, _output) = PtySession::spawn(SessionSpec::new(ShellProfile::Posix))
             .expect("a posix shell must spawn");
-        session
-            .write(b"sleep 30 </dev/null >/dev/null 2>&1 &\nexit 5\n")
-            .expect("write");
+        session.write(b"( sleep 30 & )\nexit 5\n").expect("write");
 
         let status = session
             .wait_for_exit(DEADLINE)
