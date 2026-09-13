@@ -31,27 +31,49 @@
 # Combining a positive glob with a negated one always needs `all:`.
 # .github/scripts/check-labeler-config.mjs fails CI if that is ever dropped.
 
+# A Rust module is either `foo.rs` or `foo/mod.rs`, and which one a module uses changes
+# over its life. Every area below therefore matches both spellings. `area:git` matched
+# only `src/git/**` while the crate actually has `src/git.rs`, so the label could never
+# fire at all — a dead rule that looked fine in review.
 'area:daemon':
   - changed-files:
       - any-glob-to-any-file:
           - 'crates/nysia/**'
           - 'crates/nysia-core/src/rpc/**'
+          - 'crates/nysia-core/src/rpc.rs'
+      # Everything else in the core that no narrower area owns: the manifest, lib.rs,
+      # store.rs, and any module added later that has not yet earned its own label. A
+      # catch-all so that a new file in the core cannot end up with no area at all.
+      - all-globs-to-any-file:
+          - 'crates/nysia-core/**'
+          - '!crates/nysia-core/src/pty/**'
+          - '!crates/nysia-core/src/pty.rs'
+          - '!crates/nysia-core/src/vt/**'
+          - '!crates/nysia-core/src/vt.rs'
+          - '!crates/nysia-core/src/git/**'
+          - '!crates/nysia-core/src/git.rs'
+          - '!crates/nysia-core/src/worktree/**'
+          - '!crates/nysia-core/src/worktree.rs'
 
 'area:pty':
   - changed-files:
       - any-glob-to-any-file:
           - 'crates/nysia-core/src/pty/**'
+          - 'crates/nysia-core/src/pty.rs'
 
 'area:vt':
   - changed-files:
       - any-glob-to-any-file:
           - 'crates/nysia-core/src/vt/**'
+          - 'crates/nysia-core/src/vt.rs'
 
 'area:git':
   - changed-files:
       - any-glob-to-any-file:
           - 'crates/nysia-core/src/git/**'
+          - 'crates/nysia-core/src/git.rs'
           - 'crates/nysia-core/src/worktree/**'
+          - 'crates/nysia-core/src/worktree.rs'
 
 # D-13: Rust is the sole wire authority and the TypeScript under apps/web/src/generated
 # is ts-rs output, so a change to either side is a change to the same contract.
@@ -98,6 +120,18 @@
           - 'pnpm-lock.yaml'
           - 'pnpm-workspace.yaml'
           - 'rust-toolchain.toml'
+          # Root tooling config. Enumerated rather than matched with '*', because
+          # README.md and CLAUDE.md also sit at the root and are not build files.
+          - '.editorconfig'
+          - '.gitattributes'
+          - '.gitignore'
+          - '.npmrc'
+          - 'clippy.toml'
+          - 'rustfmt.toml'
+          - 'eslint.config.js'
+          - 'tsconfig.json'
+          - 'tsconfig.base.json'
+          - 'vitest.config.ts'
 
 # `dependencies` is an Extra, not a type: a manifest change is a fact about the diff, so
 # a path can decide it. A PR can be an `enhancement` that also bumps a lockfile.
