@@ -12,6 +12,7 @@ pub mod handshake;
 pub mod identity;
 mod newtype;
 pub mod session;
+pub mod terminal;
 pub mod version;
 
 pub use handshake::{
@@ -22,6 +23,10 @@ pub use identity::{IdentityError, Incarnation, PaneKey, SessionHandle, SessionKi
 pub use session::{
     ExitStatus, SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary,
     ShellProfile,
+};
+pub use terminal::{
+    LineCursor, ReadMode, TerminalError, TerminalRead, TerminalReadResult, TerminalResize,
+    TerminalSend, TerminalWait, TerminalWaitResult, WaitFor, WaitOutcome,
 };
 pub use version::{
     EndpointError, MIN_ATTACHABLE_PROTOCOL_VERSION, PROTOCOL_VERSION, ProtocolRange,
