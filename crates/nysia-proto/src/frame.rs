@@ -205,9 +205,10 @@ impl Frame {
 /// state, and modelling it as an error would have callers logging it thousands of times a
 /// second.
 ///
-/// A frame naming a stream id that is *syntactically* fine but not currently attached is the
-/// same class of failure and gets the same response — see [`decode`], which cannot detect it,
-/// and [`crate::stream`], which says who does.
+/// A frame naming a stream id that is *syntactically* fine but has no live entry is **not**
+/// in here, and must not be treated like this. Most such frames are the routine detach race
+/// and are discarded; only an id that was never minted is fatal.
+/// [`StreamId::classify_unattached`] decides which, and [`crate::stream`] says why.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FrameError {
     /// The first byte named no kind.
@@ -279,10 +280,14 @@ pub fn encode(frame: &Frame) -> Result<Vec<u8>, FrameError> {
 /// for a length it could not trust would sit on a dead connection until the buffer ceiling
 /// stopped it, reporting nothing.
 ///
-/// **What this cannot check.** A stream id that is well formed but names no attached session
-/// is indistinguishable here from one that does: the decoder is pure and holds no session
-/// table. The router owns that check, and the answer is the same one every other malformed
-/// frame gets — drop the connection. See [`crate::stream`] for why it is not softer.
+/// **What this cannot check, and what not to assume.** A stream id that is well formed but
+/// names no attached session is indistinguishable here from one that does: the decoder is
+/// pure and holds no router table. That miss is **not** a malformed frame and must not be
+/// handled like one. A detach races output already in flight on a separate socket, so most
+/// misses are routine and the frame is discarded; dropping the connection on every miss
+/// would take down every other session for one ordinary detach. Only an id at or beyond the
+/// next one to assign is fatal. Call [`StreamId::classify_unattached`] rather than deciding
+/// here — [`crate::stream`] carries the reasoning.
 ///
 /// # Errors
 ///
