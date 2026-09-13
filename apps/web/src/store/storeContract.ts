@@ -289,14 +289,20 @@ export function describeStoreContract(name: string, create: StoreFactory): void 
         expect(after.tabs.some((tab) => tab.paneKey === after.activeTab)).toBe(true);
       });
 
-      it('leaves no tab focused once the last one closes', async () => {
+      it('never leaves activeTab pointing at nothing, even after closing them all', async () => {
+        // Not `tabs.length === 0`: a daemon that opens a fresh shell when the last session
+        // closes would fail that, and which sessions exist is its business — the same
+        // over-specification that was removed from the close-policy case above. What the
+        // chrome needs is only that `activeTab` is null or names a tab that is there.
         const store = await ready();
         for (const tab of [...store.getSnapshot().tabs]) {
           await store.closeTab(tab.paneKey);
         }
         const after = store.getSnapshot();
-        expect(after.tabs).toHaveLength(0);
-        expect(after.activeTab).toBeNull();
+        expect(
+          after.activeTab === null ||
+            after.tabs.some((tab) => tab.paneKey === after.activeTab),
+        ).toBe(true);
       });
 
       it('closing an unfocused tab leaves focus where it was', async () => {
