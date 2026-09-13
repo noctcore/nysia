@@ -56,14 +56,24 @@ const PALETTE_CLASS = new RegExp(
 );
 
 /**
- * Rule 4: a bare CSS colour name inside an arbitrary value.
+ * Rule 4: a bare CSS colour name, in either of the two places one can be written.
  *
- * Scoped to the inside of square brackets, because these words are ordinary English and
- * scanning whole files for them would report every sentence that mentions one. The span
- * pattern rejects brackets containing a quote: a Tailwind arbitrary value never carries
- * one, and excluding them keeps ordinary array and index expressions out of the scan.
+ * It cannot scan whole files the way the hex and function rules do — these words are
+ * ordinary English, and "the red build turned green" is not a violation. So it looks in
+ * the two syntactic positions where a bare word *is* a colour:
+ *
+ *  - inside a Tailwind arbitrary value, which is bracketed and never carries a quote;
+ *  - as the entire content of a quoted string, which is what an inline style is. The rule
+ *    used to stop at brackets, so an inline style naming a colour shipped with every gate
+ *    green — while the same style naming a hex or a colour function was caught, because
+ *    those two rules scan the whole file. The scope is consistent now.
+ *
+ * Requiring the *whole* string to be the colour name is what keeps prose out: a comment
+ * mentioning one is not a one-word string literal. Backticks are excluded for the same
+ * reason, since a doc comment marks up code with them.
  */
 const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
+const WHOLE_STRING = /'\s*([a-zA-Z]+)\s*'|"\s*([a-zA-Z]+)\s*"/g;
 const NAMED_COLOURS = new Set(
   ('aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue ' +
     'blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue ' +
@@ -110,6 +120,12 @@ export function findColourLiterals(source: string): readonly ColourLiteral[] {
         found.push({ kind: 'named-colour', text: span[0] });
         break;
       }
+    }
+  }
+  for (const match of source.matchAll(WHOLE_STRING)) {
+    const word = (match[1] ?? match[2] ?? '').toLowerCase();
+    if (NAMED_COLOURS.has(word)) {
+      found.push({ kind: 'named-colour', text: match[0] });
     }
   }
 
