@@ -853,56 +853,53 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn eof_does_not_mean_the_child_exited() {
-        // Traps register #11, tested from the side that is a property of Nysia rather than
-        // of the kernel. The first version of this test asserted the converse — that a
-        // grandchild holding the slave keeps the master open after the shell exits — and it
-        // failed on macOS, because when EOF arrives is a BSD-versus-Linux kernel question
-        // and not ours to assert. This direction is deterministic on both: the child closes
-        // every slave fd there is and then keeps running, so EOF has to arrive first and
-        // the exit status must still be reported afterwards, by the waiter thread.
+    fn eof_and_exit_are_reported_independently() {
+        // Traps register #11, expressed as what this crate guarantees rather than as what a
+        // kernel happens to do. Which of the two arrives first is not portable, and both
+        // directions were measured on CI rather than assumed:
         //
-        // `exec sh -c` first, so the process doing the redirect is a plain non-interactive
-        // shell with its whole script already in argv: an interactive shell reacting to its
-        // own stdin going away would make the timing a shell question too.
-        let (session, output) = PtySession::spawn(SessionSpec::new(ShellProfile::Posix))
-            .expect("a posix shell must spawn");
+        // - Linux keeps the master readable while *any* slave fd is open, so a backgrounded
+        //   grandchild can hold EOF off long after the shell has exited.
+        // - Darwin does not. Closing every slave fd from a child that keeps running
+        //   produced no EOF at all, and EOF instead arrived when the child exited — so on
+        //   macOS the two effectively coincide and no test can separate them by timing.
+        //
+        // Asserting either ordering therefore pins a kernel, not this code. What is Nysia's
+        // to promise is that neither fact is *derived* from the other: the exit status comes
+        // from `wait()` on the waiter thread and EOF from the read loop on the reader
+        // thread, and that is what this pins.
+        let (session, output) = shell();
         let mut state = grid();
         wait_until_ready(&session, &output, &mut state);
 
+        // Output has flowed and the reader has gone quiet again. Neither is an exit, and an
+        // implementation that inferred one from an idle reader would fail here.
+        assert!(
+            session.exit_status().is_none(),
+            "a live child has no exit status"
+        );
+        assert!(
+            !session.is_at_eof(),
+            "a live child's master has not reached EOF"
+        );
+
         session
-            .write(b"exec sh -c 'exec </dev/null >/dev/null 2>&1; sleep 30; exit 7'\n")
+            .write(format!("exit 7{}", line_end()).as_bytes())
             .expect("write");
 
-        // Sample the exit status at the instant EOF is noticed, not after the loop: leaving
-        // it until the end would turn "EOF never arrived" into "the child had exited by
-        // then", which are different findings and must not share a failure message.
-        let deadline = Instant::now() + DEADLINE;
-        let mut exit_at_eof = None;
-        let mut saw_eof = false;
-        while Instant::now() < deadline {
-            let chunk = output.recv_timeout(Duration::from_millis(50));
-            if session.is_at_eof() || chunk == Output::Eof {
-                saw_eof = true;
-                exit_at_eof = session.exit_status();
-                break;
-            }
-        }
-
-        assert!(
-            saw_eof,
-            "closing every slave fd must be seen as EOF on the master"
-        );
-        assert!(
-            exit_at_eof.is_none(),
-            "EOF must not be reported as the child having exited"
-        );
-
+        // A real `wait()` result: EOF carries no exit code, so a 7 here cannot have been
+        // synthesised from the reader ending.
         let status = session
             .wait_for_exit(DEADLINE)
-            .expect("the exit status must still arrive after EOF");
+            .expect("the child must report an exit status");
         assert_eq!(status.exit_code(), 7);
+
+        // And EOF, whenever it turns up, does not overwrite what `wait()` reported.
+        let _ = teardown::wait_for(Duration::from_secs(5), || session.is_at_eof());
+        assert_eq!(
+            session.exit_status().map(|status| status.exit_code()),
+            Some(7)
+        );
     }
 
     #[test]
