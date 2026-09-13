@@ -40,6 +40,7 @@
  * are reading this because you found that block committed, delete it.
  */
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -172,10 +173,40 @@ const probes: readonly Probe[] = [
   },
 ];
 
-/** Mutate, and say so. The marker is what the restore test keys on. */
+/** A short digest — enough to tell two versions of one file apart in a log line. */
+function digest(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex').slice(0, 12);
+}
+
+/**
+ * Mutate, prove the bytes on disk actually moved, and only then say so.
+ *
+ * The marker used to be printed unconditionally right after the write, which made it
+ * evidence of nothing. A probe whose `mutated` returned the original bytes, and a marker
+ * printed with no write at all, both left the restore test passing every case: it could not
+ * tell "mutated and restored" from "never mutated". Normal-mode `prove:ts-drift` would still
+ * have caught either, because a probe that moves nothing cannot trip the guard — but the
+ * test that exists to check the restore could not check its own premise, which is the
+ * vacuity shape this repo keeps finding.
+ *
+ * Reading the file back is what turns the marker into a claim. The digests are what let the
+ * restore test verify that claim instead of trusting it.
+ */
 function applyProbe(probe: Probe): void {
+  const before = digest(probe.original);
   writeFileSync(probe.file, probe.mutated());
-  process.stderr.write(`prove:ts-drift: mutated ${probe.file}\n`);
+
+  const written = readFileSync(probe.file);
+  if (written.equals(probe.original)) {
+    fail(
+      `the ${probe.name} probe left ${probe.file} byte-identical. It is mutating nothing, ` +
+        'so everything after this point would pass without exercising the guard.',
+    );
+  }
+
+  process.stderr.write(
+    `prove:ts-drift: mutated ${probe.file} (sha256 ${before} -> ${digest(written)})\n`,
+  );
 }
 
 /**
