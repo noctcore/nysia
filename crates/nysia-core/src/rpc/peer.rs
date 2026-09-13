@@ -207,34 +207,34 @@ mod platform {
     pub(super) fn parent_of(pid: u32) -> Option<u32> {
         use std::mem::size_of;
 
+        // `proc_pidinfo` rather than a `KERN_PROC_PID` sysctl: `libc` does not expose
+        // `kinfo_proc` on apple, and this asks the kernel for exactly the one field the
+        // ancestry walk needs instead of a record whose layout would have to be reproduced by
+        // hand.
         let pid = i32::try_from(pid).ok()?;
-        let mut info = std::mem::MaybeUninit::<libc::kinfo_proc>::zeroed();
-        let mut size = size_of::<libc::kinfo_proc>();
-        let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+        let size = i32::try_from(size_of::<libc::proc_bsdinfo>()).ok()?;
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
 
-        // SAFETY: `mib` is a four-element array and the length passed matches it; the output
-        // buffer is a correctly sized, zeroed `kinfo_proc` and `size` is its byte length, so
-        // the kernel cannot write past it. The new-value pointer is null with a zero length,
-        // which is how `sysctl` is told this is a read.
-        let rc = unsafe {
-            libc::sysctl(
-                mib.as_mut_ptr(),
-                4,
-                info.as_mut_ptr().cast::<libc::c_void>(),
-                &raw mut size,
-                std::ptr::null_mut(),
+        // SAFETY: the buffer is a correctly sized, zeroed `proc_bsdinfo` and `size` is its
+        // byte length, so the kernel cannot write past it. `arg` is unused for this flavour.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
                 0,
+                info.as_mut_ptr().cast::<libc::c_void>(),
+                size,
             )
         };
         // A short answer means the kernel did not fill the record — most often because the
-        // process exited between the connect and this call — and reading `e_ppid` out of a
+        // process exited between the connect and this call — and reading `pbi_ppid` out of a
         // partly written struct would invent an ancestor.
-        if rc != 0 || size < size_of::<libc::kinfo_proc>() {
+        if written != size {
             return None;
         }
-        // SAFETY: `sysctl` returned success and filled the whole record, so it is initialised.
+        // SAFETY: the call reported writing the whole record, so it is initialised.
         let info = unsafe { info.assume_init() };
-        u32::try_from(info.kp_eproc.e_ppid).ok()
+        Some(info.pbi_ppid)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
