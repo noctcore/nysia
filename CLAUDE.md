@@ -17,6 +17,18 @@ here. A commit or PR carrying one of those lines is rejected.
   verified. No attribution, no emoji headers.
 - PRs are **rebase-merged**, so every commit you write stays in `main`'s history.
 
+**Every PR is labelled and assigned at creation.** Pass them to `gh pr create` directly:
+`--assignee Shironex` plus `--label` with one type, one priority, and at least one area.
+
+| Facet | Pick | Values |
+|---|---|---|
+| Type | exactly one | `bug` `enhancement` `chore` `refactor` `performance` `security` `dx` `documentation` `test` `dependencies` |
+| Priority | exactly one | `P0-critical` `P1-high` `P2-medium` `P3-low` |
+| Area | one or more | `area:daemon` `area:pty` `area:vt` `area:proto` `area:desktop` `area:web` `area:build` `area:git` `area:agent` `area:tasks` `area:orchestration` |
+| Extra | when it applies | `gate` for anything touching a CI gate or its prove-it-trips proof; `design-system` for design spec adoption |
+
+Run `gh label list` if you are unsure; never invent a label, and never open a PR with none.
+
 ## 2. Stay inside your task's owned paths
 
 Your task spec names the paths you own. Do not edit anything outside them — other workers
