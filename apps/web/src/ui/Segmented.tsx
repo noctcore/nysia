@@ -40,7 +40,13 @@ export function Segmented<T extends string>({
       return;
     }
     pendingFocus.current = null;
-    buttons.current.get(target)?.focus();
+    // Only if the parent actually took the change. A controlled component whose owner
+    // ignores `onChange` — a disabled group, a form that vetoes the value — would
+    // otherwise keep the request pending until some unrelated render, and steal focus
+    // then, long after the key that asked for it.
+    if (target === value) {
+      buttons.current.get(target)?.focus();
+    }
   });
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
