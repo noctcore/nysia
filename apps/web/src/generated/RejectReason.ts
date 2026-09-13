@@ -21,4 +21,4 @@ detail: string, } | { "kind": "shutting_down" } | { "kind": "malformed",
 /**
  * What could not be read.
  */
-detail: string, };
+detail: string, } | { "kind": "unknown" };
