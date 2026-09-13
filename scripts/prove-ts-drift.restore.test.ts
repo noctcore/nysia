@@ -51,8 +51,23 @@ describe('the ts-rs drift proof', () => {
 
       const output = (result.stdout ?? '') + (result.stderr ?? '');
 
-      // The mutation really happened, to the file this case is about...
-      expect(output).toContain(`prove:ts-drift: mutated ${probe.file}`);
+      // The mutation really happened, to the file this case is about. The marker alone
+      // used to be the whole of that evidence, and it was printed unconditionally after the
+      // write — so a probe that mutated nothing still passed. The script now reads the file
+      // back before printing, and reports what it read: two digests that have to differ.
+      const prefix = `prove:ts-drift: mutated ${probe.file} (sha256 `;
+      const marker = output.split('\n').find((line) => line.startsWith(prefix));
+      expect(marker, `no mutation marker for ${probe.label}`).toBeDefined();
+
+      const [beforeDigest, afterDigest] = (marker ?? '')
+        .slice(prefix.length)
+        .replace(')', '')
+        .split('->')
+        .map((part) => part.trim());
+      expect(beforeDigest).toMatch(/^[0-9a-f]{12}$/);
+      expect(afterDigest).toMatch(/^[0-9a-f]{12}$/);
+      expect(beforeDigest).not.toBe(afterDigest);
+
       // ...the proof really reported failure...
       expect(result.status).toBe(1);
       expect(output).toContain('prove:ts-drift FAILED');
