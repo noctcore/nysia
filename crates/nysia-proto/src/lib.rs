@@ -8,6 +8,7 @@
 //! The generated TypeScript is committed under `apps/web/src/generated/` and a drift guard
 //! (`pnpm ts-drift`) fails the build when it stops matching what this crate produces.
 
+pub mod bindings;
 pub mod credit;
 pub mod envelope;
 pub mod error;
@@ -19,6 +20,7 @@ pub mod session;
 pub mod terminal;
 pub mod version;
 
+pub use bindings::{CONSTANTS_FILE_NAME, typescript_constants};
 pub use credit::{CreditAck, CreditFrame, CreditGrant, CreditWindow};
 pub use envelope::{
     EnvelopeError, MutationReceipt, RequestEnvelope, RequestId, RequestPayload, ResponseEnvelope,
