@@ -1,38 +1,62 @@
-import { sessionLabel } from './sessionLabel';
-import type { PaneKey } from './generated/PaneKey';
-import type { SessionKind } from './generated/SessionKind';
+import { useCallback, useState } from 'react';
 
-const KINDS: readonly SessionKind[] = ['shell', 'agent'];
-const EXAMPLE_PANE: PaneKey = 'tab_1:leaf_1';
+import { IconRail } from './chrome/IconRail';
+import { StatusBar } from './chrome/StatusBar';
+import { Titlebar } from './chrome/Titlebar';
+import { SessionPane } from './session/SessionPane';
+import { SettingsScreen } from './settings/SettingsScreen';
+import { ProjectsSidebar } from './sidebar/ProjectsSidebar';
+import { useSnapshot } from './store/useStore';
+import { ComingSoon } from './ui/ComingSoon';
 
 /**
- * The wave-0 placeholder. It exists to prove one thing: a type generated from Rust by
- * ts-rs is importable, typechecked and usable here. The real chrome — the 40/1fr/30 rows,
- * the 48/222/1fr body, the tab strip and the projects sidebar — lands in wave 1 (W3).
+ * The window: 40px titlebar, 1fr body, 30px status bar (design-spec.md §2).
+ *
+ * Settings is a **mode**, not a modal — it replaces the body and the tab strip and keeps
+ * the titlebar and status bar in place, so nothing about the window appears to move when
+ * you enter it. That is why `settingsOpen` lives here and not inside the settings screen,
+ * and why it is local state rather than store state: which screen this particular window is
+ * showing is not something the daemon knows or should be told.
  */
 export function App() {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+
   return (
-    <main className="flex h-full flex-col items-center justify-center gap-4 bg-bg1 px-6 text-fg">
-      <h1 className="text-2xl font-medium">Nysia</h1>
-      <p className="text-fg2 text-sm">
-        Wave 0 scaffold. The daemon, the PTYs and the chrome are not built yet.
-      </p>
-      <dl className="border-line bg-bg0 grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 rounded-lg border p-5 text-sm">
-        <dt className="text-fg3">PaneKey</dt>
-        <dd className="font-mono">{EXAMPLE_PANE}</dd>
-        {KINDS.map((kind) => (
-          <div key={kind} className="contents">
-            <dt className="text-fg3">SessionKind</dt>
-            <dd>
-              <span className="font-mono">{kind}</span>
-              <span className="text-fg2"> → {sessionLabel(kind)}</span>
-            </dd>
-          </div>
-        ))}
-      </dl>
-      <p className="text-fg3 text-xs">
-        Those types are generated from <code>crates/nysia-proto</code> by ts-rs.
-      </p>
-    </main>
+    <div className="bg-bg1 text-fg grid h-full grid-rows-[var(--spacing-titlebar)_1fr_var(--spacing-statusbar)] overflow-hidden">
+      <Titlebar settingsOpen={settingsOpen} onCloseSettings={closeSettings} />
+      {settingsOpen ? <SettingsScreen /> : <AppBody onOpenSettings={openSettings} />}
+      <StatusBar />
+    </div>
+  );
+}
+
+/** The 48px rail / 222px sidebar / 1fr body grid (design-spec.md §2). */
+function AppBody({ onOpenSettings }: { readonly onOpenSettings: () => void }) {
+  const { nav } = useSnapshot();
+
+  return (
+    <div className="grid min-h-0 grid-cols-[var(--spacing-rail)_var(--spacing-sidebar)_1fr]">
+      <IconRail onOpenSettings={onOpenSettings} />
+      <ProjectsSidebar />
+      <main className="flex min-h-0 flex-col">
+        {nav === 'session' ? <SessionPane /> : null}
+        {nav === 'tasks' ? (
+          <ComingSoon
+            title="Tasks"
+            version="v0.3"
+            detail="Tasks are GitHub Issues, queried live — there is no local task model to build first (D-5)."
+          />
+        ) : null}
+        {nav === 'history' ? (
+          <ComingSoon
+            title="History"
+            version="a later version"
+            detail="Past sessions and their scrollback, once the daemon's store is the authority on both."
+          />
+        ) : null}
+      </main>
+    </div>
   );
 }
