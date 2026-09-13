@@ -4,8 +4,10 @@ import { routeCommands } from './commands';
 import { StoreCommandError } from './errors';
 import { createMockStore } from './mock/MockStore';
 import type { Store } from './types';
+import { unexpectedFailures } from './unexpectedFailures';
 
 afterEach(() => {
+  unexpectedFailures.clear();
   vi.restoreAllMocks();
 });
 
@@ -49,18 +51,25 @@ describe('routeCommands', () => {
     });
 
     expect(store.getSnapshot().errors.at(-1)?.command).toBe('closeTab');
+    expect(unexpectedFailures.getSnapshot()).toEqual([]);
     expect(console_).not.toHaveBeenCalled();
   });
 
-  it('reports anything else rather than swallowing it', async () => {
-    const console_ = vi.spyOn(console, 'error').mockImplementation(() => {});
+  it('sends anything else to the failure sink rather than only the console', async () => {
+    // `errors.ts` promises a dropped connection reaches the user. A provider that lets a
+    // raw error out has broken that, and a console line nobody has open is not a surface.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     const commands = routeCommands(throwingStore(new TypeError('socket closed')));
 
     await new Promise<void>((resolve) => {
       commands.closeTab('tab_1:leaf_1', resolve);
     });
 
-    expect(console_).toHaveBeenCalledOnce();
+    const reported = unexpectedFailures.getSnapshot();
+    expect(reported).toHaveLength(1);
+    expect(reported[0]?.command).toBe('closeTab');
+    expect(reported[0]?.message).toContain('socket closed');
+    expect(reported[0]?.message).toContain('connection may have dropped');
   });
 
   it('still calls back when the command failed', async () => {

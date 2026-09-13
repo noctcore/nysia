@@ -3,6 +3,8 @@ import { useContext, useMemo, useSyncExternalStore } from 'react';
 import { routeCommands, type StoreCommands } from './commands';
 import { StoreContext } from './StoreContext';
 import type { Store, StoreSnapshot } from './types';
+import { unexpectedFailures } from './unexpectedFailures';
+import type { StoreError } from './errors';
 
 /** The provider itself. Module-private: components are handed `useCommands()` instead. */
 function useProvider(): Store {
@@ -40,4 +42,18 @@ export function useCommands(): StoreCommands {
 export function useSnapshot(): StoreSnapshot {
   const store = useProvider();
   return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+}
+
+/**
+ * Failures that escaped a provider without being wrapped.
+ *
+ * Read separately from the snapshot because they are a statement about the provider rather
+ * than part of its state — see `unexpectedFailures.ts`.
+ */
+export function useUnexpectedFailures(): readonly StoreError[] {
+  return useSyncExternalStore(
+    unexpectedFailures.subscribe,
+    unexpectedFailures.getSnapshot,
+    unexpectedFailures.getSnapshot,
+  );
 }

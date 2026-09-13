@@ -1,6 +1,7 @@
 import type { PaneKey } from '../generated/PaneKey';
 import { StoreCommandError } from './errors';
 import type { StoreCommandName } from './errors';
+import { reportUnexpectedFailure } from './unexpectedFailures';
 import type { LauncherId, NavSection, ProjectId, Store, StoreSnapshot } from './types';
 
 /**
@@ -48,8 +49,11 @@ export interface StoreCommands {
  *
  * A `StoreCommandError` is an expected outcome the provider has *already* written into
  * `snapshot.errors`, so there is a notice on screen and nothing left to do here. Anything
- * else is a provider bug, and is reported rather than swallowed — the whole point of this
- * layer is that failures stop being silent, so it must not become a new way to be silent.
+ * else is a provider bug or a transport failure that was not wrapped — `errors.ts` says a
+ * dropped connection mid-request has to reach the user, and a provider that lets a raw
+ * `TypeError` out has broken that promise. It goes to the failure sink rather than only to
+ * the console, because the whole point of this layer is that failures stop being silent
+ * and it must not become a new way to be silent.
  *
  * `onSettled` runs after either outcome, for the caller that has to move DOM focus once
  * the store has converged.
@@ -64,7 +68,7 @@ export function runCommand(
       if (cause instanceof StoreCommandError) {
         return;
       }
-      console.error(`Store command ${command} failed unexpectedly`, cause);
+      reportUnexpectedFailure(command, cause);
     })
     .finally(() => onSettled?.());
 }
