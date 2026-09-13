@@ -38,6 +38,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nysia-shim"
+version = "0.0.0"
+dependencies = [
+ "third",
+]
+
+[[package]]
 name = "tauri"
 version = "0.0.0"
 

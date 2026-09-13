@@ -1,0 +1,10 @@
+# Rule (b), the other half of a rename. The key is `tauri` and the crate behind it is not:
+# `use tauri::…` then compiles here, and anyone skimming the manifest reads a tauri
+# dependency. Only the key gives that away, and the check read only the resolved name.
+[package]
+name = "nysia-shim"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+tauri = { package = "third", path = "../../vendor/third" }
