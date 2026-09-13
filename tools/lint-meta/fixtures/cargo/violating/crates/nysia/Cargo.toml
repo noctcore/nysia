@@ -1,0 +1,8 @@
+[package]
+name = "nysia"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies."ui"]   # a quoted table header, and a rename
+path = "../../vendor/tauri"
+package = "tauri"

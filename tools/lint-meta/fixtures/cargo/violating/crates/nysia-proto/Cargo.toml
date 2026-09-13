@@ -1,0 +1,7 @@
+[package]
+name = "nysia-proto"
+version = "0.0.0"
+edition = "2021"
+
+[ dependencies ]   # whitespace inside the header, and a trailing comment after it
+"tauri" = { path = "../../vendor/tauri" }   # a quoted key

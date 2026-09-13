@@ -1,8 +1,0 @@
-# Rule (b): the runtime linking the UI toolkit.
-[package]
-name = "nysia-core"
-
-[dependencies]
-nysia-proto = { path = "../nysia-proto" }
-# A rename pulls the same crate under another key. Reading keys alone never saw it.
-ui = { package = "tauri", version = "2.11" }

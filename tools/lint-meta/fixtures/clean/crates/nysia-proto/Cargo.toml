@@ -1,6 +1,0 @@
-[package]
-name = "nysia-proto"
-
-[dependencies]
-serde = "1.0"
-ts-rs = "12.0"

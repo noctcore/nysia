@@ -1,79 +1,12 @@
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { CargoMetadataError } from './cargoGraph.ts';
 import { findRepoRoot } from './repoRoot.ts';
-import { blankRustComments, cargoDependencies, runRules, walk } from './rules.ts';
+import { blankRustComments, runCargoRules, runSourceRules, walk } from './rules.ts';
 
 const repoRoot = findRepoRoot();
 const fixture = (name: string): string => join(repoRoot, 'tools/lint-meta/fixtures', name);
-
-describe('cargoDependencies', () => {
-  it('reads every dependency table shape cargo accepts', () => {
-    const manifest = [
-      '[package]',
-      'name = "x"',
-      'tauri = "this is a package key, not a dependency"',
-      '',
-      '[dependencies]',
-      'serde = { workspace = true }',
-      '# tauri = "2.11"',
-      'anyhow.workspace = true',
-      '',
-      '[dev-dependencies]',
-      'tempfile = "3"',
-      '',
-      "[target.'cfg(windows)'.dependencies]",
-      'windows = "0.62"',
-      '',
-      '[dependencies.rusqlite]',
-      'version = "0.40"',
-    ].join('\n');
-
-    expect(cargoDependencies(manifest).map((d) => d.key).sort()).toEqual([
-      'anyhow',
-      'rusqlite',
-      'serde',
-      'tempfile',
-      'windows',
-    ]);
-  });
-
-  it('resolves renamed dependencies to the crate they actually pull', () => {
-    const manifest = [
-      '[package]',
-      'name = "x"',
-      '',
-      '[dependencies]',
-      'ui = { package = "tauri", version = "2.11" }',
-      'serde = { workspace = true }',
-      '',
-      '[dependencies.shell]',
-      'package = "tauri-plugin-opener"',
-      'version = "2"',
-    ].join('\n');
-
-    const byKey = new Map(cargoDependencies(manifest).map((d) => [d.key, d.package]));
-    expect(byKey.get('ui')).toBe('tauri');
-    expect(byKey.get('shell')).toBe('tauri-plugin-opener');
-    // An entry without a `package` key keeps its own name.
-    expect(byKey.get('serde')).toBe('serde');
-  });
-
-  it('ignores [workspace.dependencies], which is a version table and not a dependency', () => {
-    const manifest = [
-      '[workspace]',
-      'members = ["crates/nysia"]',
-      '',
-      '[workspace.dependencies]',
-      'tauri = { version = "2.11" }',
-      '',
-      '[workspace.dependencies.windows]',
-      'version = "0.62"',
-    ].join('\n');
-
-    expect(cargoDependencies(manifest)).toEqual([]);
-  });
-});
 
 describe('blankRustComments', () => {
   it('keeps every byte position so line numbers stay right', () => {
@@ -175,48 +108,68 @@ describe('walk', () => {
   });
 });
 
-describe('the architecture rules', () => {
+describe('the source rules', () => {
   it('accept the carve-outs the clean fixture exercises', () => {
-    // The clean fixture links tauri from apps/desktop, both in its manifest and its
-    // source, and imports it from apps/web/src/transport. All of that is allowed.
-    expect(runRules(fixture('clean'))).toEqual([]);
+    // The clean fixture imports tauri from apps/web/src/transport and links it from
+    // apps/desktop, and its nysia-core lib.rs discusses tauri in doc comments, a nested
+    // block comment and a `crate::tauri_helpers` path. All of that is allowed.
+    expect(runSourceRules(fixture('clean'))).toEqual([]);
   });
 
-  it('trip on the violating fixture', () => {
-    const violations = runRules(fixture('trips'));
+  it('trip on the violating fixture, at the exact lines', () => {
+    const violations = runSourceRules(fixture('trips'));
     const byRule = (rule: string): string[] =>
       violations.filter((v) => v.rule === rule).map((v) => v.file);
 
     expect(byRule('no-tauri-outside-desktop')).toContain('apps/web/src/leak.ts');
 
-    // The Rust spellings the previous line-anchored regex walked straight past:
     // `use ::tauri::Builder;` (line 22), `use {tauri, serde};` (25), and the multi-line
-    // grouped form (28). Any of them would have put the UI toolkit in the daemon.
+    // grouped form (28). Every literal spelling and 20 astral characters sit above them, so
+    // these three assertions are what catch a scanner that stops scanning.
     const rustLines = violations
       .filter((v) => v.rule === 'no-tauri-outside-desktop' && v.file === 'crates/nysia/src/leak.rs')
       .map((v) => v.line);
     expect(rustLines).toEqual(expect.arrayContaining([22, 25, 28]));
-    // Every crate outside apps/desktop is inspected, not just the chain rooted at
-    // nysia-core. crates/nysia can reach tauri straight out of [workspace.dependencies]
-    // without editing a single shared file, so it has to be checked on its own.
-    expect(byRule('no-tauri-in-rust-crates').sort()).toEqual([
-      'crates/nysia-core/Cargo.toml',
-      'crates/nysia/Cargo.toml',
-    ]);
-  });
-
-  it('trip on the transitive fixture and name the chain', () => {
-    const violations = runRules(fixture('trips-transitive'));
-
-    const direct = violations.find((v) => v.rule === 'no-tauri-in-rust-crates');
-    expect(direct?.file).toBe('crates/nysia-proto/Cargo.toml');
-
-    const chain = violations.find((v) => v.rule === 'no-tauri-reaching-core');
-    expect(chain?.file).toBe('crates/nysia-proto/Cargo.toml');
-    expect(chain?.message).toContain('nysia-core -> nysia-proto');
   });
 
   it('pass against the real repository', () => {
-    expect(runRules(repoRoot)).toEqual([]);
+    expect(runSourceRules(repoRoot)).toEqual([]);
+  });
+});
+
+describe('the cargo dependency rules', () => {
+  it('read every manifest spelling cargo accepts', () => {
+    const violations = runCargoRules(fixture('cargo/violating'));
+    const byRule = (rule: string): string[] =>
+      violations.filter((v) => v.rule === rule).map((v) => v.file).sort();
+
+    // A quoted key in a `[ dependencies ]` header with whitespace and a trailing comment,
+    // and a rename under a quoted table header. The hand-written parser saw neither.
+    expect(byRule('no-tauri-in-rust-crates')).toEqual([
+      'crates/nysia-proto/Cargo.toml',
+      'crates/nysia/Cargo.toml',
+    ]);
+    expect(violations.some((v) => v.message.includes('package = "tauri"'))).toBe(true);
+  });
+
+  it('name the transitive chain through a crate whose [package] carries a comment', () => {
+    const chain = runCargoRules(fixture('cargo/violating')).find(
+      (v) => v.rule === 'no-tauri-reaching-core',
+    );
+    expect(chain?.message).toContain('nysia-core -> nysia-proto -> tauri');
+  });
+
+  it('stay silent when only apps/desktop links tauri', () => {
+    expect(runCargoRules(fixture('cargo/clean'))).toEqual([]);
+  });
+
+  it('refuse to report zero when cargo cannot read the workspace', () => {
+    // The failure this whole tool exists to prevent: a check that did not happen looking
+    // exactly like a check that passed.
+    expect(() => runCargoRules(fixture('cargo/unresolvable'))).toThrow(CargoMetadataError);
+  });
+
+  it('pass against the real repository', () => {
+    expect(runCargoRules(repoRoot)).toEqual([]);
   });
 });

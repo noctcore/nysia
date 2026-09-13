@@ -1,6 +1,13 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, posix, relative, sep } from 'node:path';
 
+import {
+  isTauriPackage,
+  loadCargoWorkspace,
+  type CargoDependencyEdge,
+  type CargoWorkspace,
+} from './cargoGraph.ts';
+
 /**
  * A broken architecture rule, located precisely enough to click on.
  */
@@ -348,152 +355,36 @@ export function noTauriOutsideDesktop(root: string, files: readonly string[]): V
   return violations;
 }
 
-/** One entry of a Cargo dependency table. */
-export interface CargoDependency {
-  /** The key as written, which is the name the crate is `use`d by. */
-  readonly key: string;
-  /**
-   * The crate actually pulled from the registry.
-   *
-   * Differs from `key` when the entry is renamed — `ui = { package = "tauri" }` links
-   * tauri under the name `ui`, and a scan that only read keys would never see it.
-   */
-  readonly package: string;
+/** Which crate a dependency is, spelled for a message — `ui (package = "tauri")` renamed. */
+function describe(edge: CargoDependencyEdge): string {
+  return edge.rename === null
+    ? `\`${edge.name}\``
+    : `\`${edge.rename}\` (package = "${edge.name}")`;
 }
 
 /**
- * Every dependency a Cargo manifest declares, across every dependency table.
+ * Rule (b): no Rust crate outside `apps/desktop` may depend on tauri.
  *
- * `[workspace.dependencies]` is deliberately excluded: it is a table of *available*
- * versions for members to opt into, not a dependency of anything. The root manifest lists
- * tauri there on purpose, and a scan that counted it would fire on the workspace itself and
- * teach everyone to ignore the rule.
+ * This is the load-bearing rule of the three. If no crate outside `apps/desktop` depends on
+ * tauri then `use tauri::…` in those crates cannot compile, which makes the Rust text scan
+ * belt and braces rather than the guard. It is kept because it reports a file and a line
+ * that a developer can act on in ten seconds, where this rule reports a manifest.
+ *
+ * Every dependency kind counts — normal, dev and build alike. A runtime crate has no reason
+ * to link the UI toolkit even in a test.
  */
-export function cargoDependencies(manifest: string): CargoDependency[] {
-  const found = new Map<string, string>();
-  let inDependencyTable = false;
-  /** Set while inside `[dependencies.<key>]`, so a later bare `package = "x"` binds to it. */
-  let nestedKey: string | undefined;
-
-  const record = (key: string, pkg?: string): void => {
-    found.set(key, pkg ?? found.get(key) ?? key);
-  };
-
-  for (const raw of manifest.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (line.startsWith('#')) continue;
-
-    const header = /^\[([^\]]+)\]$/.exec(line);
-    if (header?.[1] !== undefined) {
-      const section = header[1];
-      const isWorkspaceTable = section.startsWith('workspace.');
-      // `[dependencies]`, `[dev-dependencies]`, `[target.'cfg(windows)'.dependencies]`.
-      inDependencyTable =
-        !isWorkspaceTable && /(^|\.)(dev-|build-)?dependencies$/.test(section);
-      // `[dependencies.tauri]` names the crate in the header itself.
-      const nested = /(^|\.)(dev-|build-)?dependencies\.([A-Za-z0-9_-]+)$/.exec(section);
-      nestedKey = isWorkspaceTable ? undefined : nested?.[3];
-      if (nestedKey !== undefined) record(nestedKey);
-      continue;
-    }
-
-    // Inside `[dependencies.ui]` every line describes that one entry, so the only thing
-    // worth reading is a `package = "tauri"` rename. Treating these as new keys would
-    // invent dependencies called `version` and `features`.
-    if (nestedKey !== undefined) {
-      const rename = /^package\s*=\s*['"]([A-Za-z0-9_-]+)['"]/.exec(line);
-      if (rename?.[1] !== undefined) record(nestedKey, rename[1]);
-      continue;
-    }
-    if (!inDependencyTable) continue;
-
-    const key = /^([A-Za-z0-9_-]+)\s*(?:\.[A-Za-z0-9_-]+\s*)?=/.exec(line);
-    if (key?.[1] === undefined) continue;
-    // `ui = { package = "tauri", version = "2" }` on one line.
-    const inlineRename = /\bpackage\s*=\s*['"]([A-Za-z0-9_-]+)['"]/.exec(line);
-    record(key[1], inlineRename?.[1]);
-  }
-
-  return [...found].map(([key, pkg]) => ({ key, package: pkg }));
-}
-
-function isTauri(name: string): boolean {
-  return name === 'tauri' || name.startsWith('tauri-');
-}
-
-/** How a dependency is named in a message — `ui (package = "tauri")` when renamed. */
-function describe(dependency: CargoDependency): string {
-  return dependency.key === dependency.package
-    ? `\`${dependency.key}\``
-    : `\`${dependency.key}\` (package = "${dependency.package}")`;
-}
-
-/**
- * The `name` of a manifest's `[package]` table, if it has one.
- *
- * Scoped to that table on purpose: `[[bin]]` and `[lib]` also carry a `name`, and matching
- * the first one in the file would mis-key a crate whose sections are ordered unusually.
- */
-function packageName(manifest: string): string | undefined {
-  let inPackage = false;
-  for (const raw of manifest.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (line.startsWith('#')) continue;
-    const header = /^\[([^\]]+)\]$/.exec(line);
-    if (header !== null) {
-      inPackage = header[1] === 'package';
-      continue;
-    }
-    if (!inPackage) continue;
-    const name = /^name\s*=\s*['"]([A-Za-z0-9_-]+)['"]/.exec(line);
-    if (name?.[1] !== undefined) return name[1];
-  }
-  return undefined;
-}
-
-/** Package name → manifest path, for every Cargo manifest in the tree. */
-function manifestsByPackage(
-  root: string,
-  files: readonly string[],
-): Map<string, { path: string; text: string }> {
-  const found = new Map<string, { path: string; text: string }>();
-  for (const file of files) {
-    if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) continue;
-    const text = readFileSync(join(root, file), 'utf8');
-    const name = packageName(text);
-    // A virtual manifest — the workspace root — has no [package] and owns no code, so
-    // there is nothing to link tauri into. Its [workspace.dependencies] table is excluded
-    // by `cargoDependencies` for the same reason.
-    if (name !== undefined) found.set(name, { path: file, text });
-  }
-  return found;
-}
-
-/**
- * Rule (b): no Rust crate outside `apps/desktop` may declare a tauri dependency.
- *
- * This used to walk only the dependency chain rooted at `nysia-core`, which meant
- * `crates/nysia/Cargo.toml` was never inspected at all. `tauri` is already in
- * `[workspace.dependencies]`, so the worker who owns `crates/nysia/**` could add
- * `tauri = { workspace = true }` without touching a single shared file, and the daemon
- * binary would link the UI toolkit with nothing tripping.
- *
- * The runtime outliving the UI is the founding constraint (D-1). A process that links the
- * UI toolkit cannot honour it.
- */
-export function noTauriInRustCrates(root: string, files: readonly string[]): Violation[] {
+export function noTauriInRustCrates(workspace: CargoWorkspace): Violation[] {
   const violations: Violation[] = [];
 
-  for (const [, manifest] of manifestsByPackage(root, files)) {
-    if (TAURI_ALLOWLIST.some((prefix) => manifest.path.startsWith(prefix))) continue;
-    for (const dependency of cargoDependencies(manifest.text)) {
-      if (!isTauri(dependency.package)) continue;
+  for (const member of workspace.members) {
+    if (TAURI_ALLOWLIST.some((prefix) => member.manifestPath.startsWith(prefix))) continue;
+    for (const edge of member.dependencies) {
+      if (!isTauriPackage(edge.name)) continue;
       violations.push({
         rule: 'no-tauri-in-rust-crates',
-        file: manifest.path,
+        file: member.manifestPath,
         line: 0,
-        message:
-          `declares ${describe(dependency)}; only apps/desktop may link the UI toolkit (D-1)`,
+        message: `declares ${describe(edge)}; only apps/desktop may link the UI toolkit (D-1)`,
       });
     }
   }
@@ -502,55 +393,86 @@ export function noTauriInRustCrates(root: string, files: readonly string[]): Vio
 }
 
 /**
- * Rule (c): `nysia-core` must not reach tauri *through* another Nysia crate.
+ * Rule (c): `nysia-core` must not *reach* tauri through anything.
  *
- * Rule (b) catches the crate that declares the dependency. This one says what it costs:
- * it names the chain, so the reviewer of a `nysia-proto` change can see that it has just
- * put the UI toolkit inside the runtime. `tools/lint-meta/fixtures/trips-transitive`
- * exercises this branch specifically — without a committed fixture it is dead code that
- * nobody has watched fail.
+ * Rule (b) names the crate that declares the dependency. This one says what it costs, by
+ * walking the resolved graph and reporting the shortest chain — so the reviewer of a
+ * `nysia-proto` change can see that it has just put the UI toolkit inside the runtime.
+ *
+ * The graph is cargo's own resolution, so this holds for a chain through a third-party
+ * crate too, not only through another Nysia one.
  */
-export function noTauriReachingCore(root: string, files: readonly string[]): Violation[] {
-  const violations: Violation[] = [];
-  const manifests = manifestsByPackage(root, files);
+export function noTauriReachingCore(workspace: CargoWorkspace): Violation[] {
+  const core = workspace.members.find((m) => m.name === 'nysia-core');
+  if (core === undefined) return [];
 
-  const seen = new Set<string>();
-  const inspect = (crate: string, via: readonly string[]): void => {
-    if (seen.has(crate)) return;
-    seen.add(crate);
-    const manifest = manifests.get(crate);
-    if (manifest === undefined) return;
+  // Breadth-first, so the chain reported is the shortest one.
+  const queue: string[][] = [[core.id]];
+  const seen = new Set<string>([core.id]);
 
-    for (const dependency of cargoDependencies(manifest.text)) {
-      const chain = [...via, crate];
-      if (isTauri(dependency.package)) {
-        // Only the indirect case: rule (b) already reports the crate that declares it.
+  while (queue.length > 0) {
+    const chain = queue.shift();
+    if (chain === undefined) break;
+    const tail = chain[chain.length - 1];
+    if (tail === undefined) continue;
+
+    for (const nextId of workspace.edges.get(tail) ?? []) {
+      if (seen.has(nextId)) continue;
+      seen.add(nextId);
+      const next = workspace.packages.get(nextId);
+      if (next === undefined) continue;
+
+      if (isTauriPackage(next.name)) {
+        // The direct case is rule (b)'s to report; this rule exists for the chain.
         if (chain.length > 1) {
-          violations.push({
-            rule: 'no-tauri-reaching-core',
-            file: manifest.path,
-            line: 0,
-            message:
-              `${chain.join(' -> ')} depends on ${describe(dependency)}; the runtime must ` +
-              'not link the UI toolkit (D-1)',
-          });
+          const names = [...chain, nextId]
+            .map((id) => workspace.packages.get(id)?.name ?? id)
+            .join(' -> ');
+          const via = workspace.packages.get(tail);
+          return [
+            {
+              rule: 'no-tauri-reaching-core',
+              file: via?.manifestPath ?? core.manifestPath,
+              line: 0,
+              message: `${names}; the runtime must not link the UI toolkit (D-1)`,
+            },
+          ];
         }
-      } else if (manifests.has(dependency.package)) {
-        inspect(dependency.package, chain);
+        continue;
       }
+      queue.push([...chain, nextId]);
     }
-  };
+  }
 
-  inspect('nysia-core', []);
-  return violations;
+  return [];
 }
 
-/** Run every architecture rule over the tree at `root`. */
-export function runRules(root: string, includeFixtures = false): Violation[] {
-  const files = walk(root, includeFixtures);
-  return [
-    ...noTauriOutsideDesktop(root, files),
-    ...noTauriInRustCrates(root, files),
-    ...noTauriReachingCore(root, files),
-  ];
+/**
+ * The rules that read source text: rule (a), over the tree at `root`.
+ *
+ * Separate from the cargo rules because it needs no workspace — it runs against the fixture
+ * trees, which are deliberately not buildable crates.
+ */
+export function runSourceRules(root: string, includeFixtures = false): Violation[] {
+  return noTauriOutsideDesktop(root, walk(root, includeFixtures));
+}
+
+/**
+ * The rules that read cargo's resolved dependency graph: rules (b) and (c).
+ *
+ * @throws {CargoMetadataError} if cargo cannot describe the workspace. Deliberately not
+ * caught here: a dependency rule that could not run must not report zero violations.
+ */
+export function runCargoRules(root: string): Violation[] {
+  const workspace = loadCargoWorkspace(root);
+  return [...noTauriInRustCrates(workspace), ...noTauriReachingCore(workspace)];
+}
+
+/**
+ * Every architecture rule, for a tree that is a cargo workspace.
+ *
+ * @throws {CargoMetadataError} see {@link runCargoRules}.
+ */
+export function runAllRules(root: string, includeFixtures = false): Violation[] {
+  return [...runSourceRules(root, includeFixtures), ...runCargoRules(root)];
 }

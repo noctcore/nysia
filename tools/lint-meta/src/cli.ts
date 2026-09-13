@@ -4,29 +4,35 @@
  * Three rules today (D-14 keeps the set minimal and lets it ratchet):
  *
  *   a. nothing outside `apps/desktop` and `apps/web/src/transport` may import tauri;
- *   b. no Rust crate outside `apps/desktop` may declare a tauri dependency;
- *   c. `nysia-core` must not reach tauri through another Nysia crate.
+ *   b. no Rust crate outside `apps/desktop` may depend on tauri;
+ *   c. `nysia-core` must not reach tauri through anything.
+ *
+ * (b) is the load-bearing one: if no crate outside `apps/desktop` depends on tauri then
+ * `use tauri::…` there cannot compile, which makes (a) belt and braces. (a) is kept anyway
+ * because it reports a file and a line a developer can act on in ten seconds, where (b)
+ * reports a manifest.
  *
  * Each ships a fixture proving it trips — `pnpm prove:lint-meta`. A check that passes
  * without exercising anything is worse than no check (traps register #13).
  *
+ * Exit codes: 0 clean, 1 violations, **2 the rules could not run**. Rules (b) and (c) shell
+ * out to `cargo metadata`; if that fails this exits 2 rather than reporting zero.
+ *
  * # Where the boundary actually is
  *
- * These rules are greps over text, not a compiler, and the honest thing is to say what they
- * still cannot see rather than let the next reader assume they are airtight. Each of these
- * is a deliberate limit, not an oversight:
+ * Rules (b) and (c) read `cargo metadata`, so they see exactly what cargo compiles: quoting,
+ * comments, whitespace, renames and workspace inheritance are cargo's problem, not ours.
+ * Rule (a) is a text scan, and the honest thing is to say what it cannot see:
  *
  * - **A path that only exists after macro expansion is invisible**, `include!` included.
- *   Rust is scanned as text with comments and string literals blanked — which is why
- *   `tauri::` mentioned in a string is correctly ignored — but nothing here expands macros.
- * - **A dependency renamed in `Cargo.lock` rather than in a manifest is invisible.** The
- *   manifest scan resolves `ui = { package = "tauri" }` in both spellings, but a path or
- *   git dependency whose own manifest renames itself again would need the lock graph, which
- *   is out of scope for a text rule. `cargo tree -i tauri` is the check that catches it.
- * - **A file ESLint's `ignores` excludes is covered only by rule (a)'s line-based scan**,
- *   which is weaker than ESLint's AST. The two layers are deliberately different: ESLint
- *   owns the TypeScript and JavaScript boundary properly, lint-meta is the backstop for
- *   Rust and for anything ESLint does not reach.
+ *   Rust is scanned with comments and string literals blanked — which is why a `tauri::`
+ *   mentioned in a string is correctly ignored — but nothing here expands macros. Rule (b)
+ *   still catches the dependency that would make such a path compile.
+ * - **`no-restricted-imports` does not cover `require()`.** ESLint owns `import` and
+ *   `export … from`; lint-meta owns `require()` and dynamic `import()`. Neither layer is
+ *   complete alone, and that split is deliberate rather than an oversight.
+ * - **A file ESLint's `ignores` excludes is covered only by rule (a)'s line scan**, which is
+ *   weaker than ESLint's AST.
  *
  * The allowlist itself is duplicated in `eslint.config.js`, and the two must stay in
  * agreement — if they disagree, a later wave fails a gate it cannot fix without editing
@@ -38,16 +44,32 @@ import { resolve } from 'node:path';
 import process from 'node:process';
 
 import { findRepoRoot } from './repoRoot.ts';
-import { runRules } from './rules.ts';
+import { CargoMetadataError } from './cargoGraph.ts';
+import { runAllRules, runSourceRules } from './rules.ts';
 
 const argument = process.argv[2];
 const root = argument === undefined ? findRepoRoot() : resolve(argument);
 const includeFixtures = process.argv.includes('--include-fixtures');
+/** Rule (a) alone, for a tree that is not a cargo workspace. */
+const sourceOnly = process.argv.includes('--source-only');
 
-const violations = runRules(root, includeFixtures);
+let violations;
+try {
+  violations = sourceOnly
+    ? runSourceRules(root, includeFixtures)
+    : runAllRules(root, includeFixtures);
+} catch (error) {
+  // Exit 2, never 0. Rules (b) and (c) read cargo's resolved graph, and a rule that could
+  // not run reporting "0 violations" is the exact failure this tool exists to catch.
+  if (error instanceof CargoMetadataError) {
+    process.stderr.write(`lint-meta: the dependency rules could not run\n${error.message}\n`);
+    process.exit(2);
+  }
+  throw error;
+}
 
 if (violations.length === 0) {
-  process.stdout.write('lint-meta: 3 rules, 0 violations\n');
+  process.stdout.write(`lint-meta: 3 rules, 0 violations\n`);
   process.exit(0);
 }
 
