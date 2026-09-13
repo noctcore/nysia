@@ -1,0 +1,5 @@
+# `unwrap()`/`expect()` are denied on the crate boundary (CLAUDE.md §6) but stay
+# available in tests, where a panic is the assertion.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
