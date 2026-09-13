@@ -49,6 +49,11 @@ jobs:
         run: node .github/scripts/require-pr-facets.mjs --self-test
 
       - name: require a type and a priority label
+        # `shell: bash` for pipefail. The default `bash -e` does not set it, so a failed
+        # `gh pr view` produced empty stdin and the script reported "carries no type
+        # label" — blaming the author for an API error. With pipefail the step fails on
+        # the gh error itself.
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
