@@ -17,8 +17,10 @@
 //!
 //! Owned by wave 1 (W2).
 
+mod line_log;
 mod osc;
 mod replay;
 
+pub use line_log::{LineLog, LogicalLine};
 pub use osc::{CommandState, OscSniffer, ShellState};
 pub use replay::ReplayRing;
