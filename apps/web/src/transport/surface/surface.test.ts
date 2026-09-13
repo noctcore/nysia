@@ -340,7 +340,7 @@ describe('the renderer policy', () => {
   });
 
   it('makes macOS a pooled opt-in capped well under WebKit’s app-wide limit', () => {
-    // xtermjs#5816 is open, and WebKit caps live contexts at 16 for the whole application —
+    // xtermjs issue 5816 is open, and WebKit caps live contexts at 16 for the whole application —
     // not per tab. Six leaves ten for the rest of the process, so a full pool never becomes
     // someone else's bug.
     const policy = policyFor('macos');

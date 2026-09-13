@@ -8,7 +8,7 @@ import type { StreamId } from '../frames';
  * session, WebGL is fast and, on one platform, actively dangerous.
  *
  * - **Windows (WebView2) and Linux**: WebGL on by default.
- * - **macOS**: a pooled opt-in. xtermjs#5816 — atlas corruption in WebKit — is still open,
+ * - **macOS**: a pooled opt-in. xtermjs issue 5816 — atlas corruption in WebKit — is still open,
  *   and WebKit hard-caps live WebGL contexts at **16 app-wide**. Sixteen is not per tab or
  *   per surface; it is the whole application, and Nysia is a terminal multiplexer whose
  *   entire premise is many sessions at once. Handing every pane a context would exhaust the
