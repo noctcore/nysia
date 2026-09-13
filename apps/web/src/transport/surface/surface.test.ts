@@ -59,6 +59,17 @@ class StubTerminal implements XtermLike {
     this.rows = rows;
   }
 
+  /** What a host of `measures` cells would fit. `undefined` before it has a layout. */
+  measures: { cols: number; rows: number } | undefined;
+
+  fit(): { cols: number; rows: number } | undefined {
+    if (this.measures) {
+      this.cols = this.measures.cols;
+      this.rows = this.measures.rows;
+    }
+    return this.measures;
+  }
+
   focus(): void {
     this.focused += 1;
   }
@@ -199,6 +210,30 @@ describe('the surface adapter contract', () => {
     fixture.surface.show(host());
     expect(fixture.built).toHaveLength(1);
     expect(fixture.surface.visible).toBe(false);
+  });
+
+  it('reports the size it measured, and remembers it for the next terminal', () => {
+    // A pane resized while visible, then hidden and revealed, must reopen at the size the
+    // daemon already knows about rather than snapping back to 80x24 and reflowing.
+    fixture.surface.show(host());
+    fixture.latest().measures = { cols: 132, rows: 43 };
+
+    expect(fixture.surface.fit()).toEqual({ cols: 132, rows: 43 });
+
+    fixture.surface.hide();
+    fixture.surface.show(host());
+    expect(fixture.latest().cols).toBe(132);
+    expect(fixture.latest().rows).toBe(43);
+  });
+
+  it('measures nothing when there is no renderer or no layout yet', () => {
+    // `proposeDimensions` returns undefined on the first frame after mounting; fitting then
+    // would resize to NaN cells and tell the daemon a size no PTY can take.
+    expect(fixture.surface.fit(), 'hidden panes have nothing to measure').toBeNull();
+
+    fixture.surface.show(host());
+    fixture.latest().measures = undefined;
+    expect(fixture.surface.fit()).toBeNull();
   });
 
   it('satisfies the interface it is typed against', () => {

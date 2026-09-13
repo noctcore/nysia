@@ -53,6 +53,16 @@ export interface TerminalSurface {
   /** Tell the surface the pane's size changed, in cells. */
   resize(cols: number, rows: number): void;
 
+  /**
+   * Measure the host element and resize to fit it, returning the new size in cells.
+   *
+   * On the interface rather than left to the caller because only the surface knows its own
+   * cell metrics — font, line height, padding — and a caller that computed them would be
+   * reimplementing the renderer's layout from the outside and getting it wrong by a row on
+   * every zoom level. `null` when there is no renderer to measure.
+   */
+  fit(): { readonly cols: number; readonly rows: number } | null;
+
   /** Move keyboard focus into the terminal. */
   focus(): void;
 
