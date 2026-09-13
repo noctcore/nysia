@@ -13,3 +13,6 @@ Status: design. Nothing is built yet.
 
 - [Architecture and founding decisions](docs/design/2026-09-13-nysia-architecture.md)
 - [Design system spec](docs/design/design-spec.md)
+- [Design sources and provenance](docs/design/README.md)
+- [v0.1 delivery plan](docs/plans/v0.1-delivery-plan.md)
+- [Working rules](CLAUDE.md)
