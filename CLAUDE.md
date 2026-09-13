@@ -112,8 +112,19 @@ pnpm test
 pnpm ts-drift          # ts-rs bindings match committed output
 ```
 
+Local gates are necessary, not sufficient. You develop on one platform and CI runs on
+**both** Windows and macOS, so a green local run proves nothing about the other leg —
+process teardown, path resolution and terminal behaviour all differ. After opening or
+updating a PR, wait for CI and check it:
+
+```
+gh pr checks <n> --watch
+```
+
+A PR is not done until **both legs are green**. If one is red, fix it before reporting.
+
 ## 8. If you are a dispatched worker
 
 Follow your injected preamble. Use `orca orchestration ask` for blocking questions instead
 of `AskUserQuestion`, which opens a local prompt nobody can answer. Send `worker_done`
-exactly once, with the PR number in the body.
+exactly once, with the PR number in the body — and only after CI is green on both runners.
