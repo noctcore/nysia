@@ -1,0 +1,99 @@
+# Path -> area label, read by actions/labeler in .github/workflows/pr-triage.yml.
+#
+# These are *area* labels only. Type and priority are judgement calls a path cannot
+# make, so nothing here applies them; .github/workflows/pr-facets.yml fails a PR that
+# is missing either one. The full label set lives in .github/labels.yml.
+#
+# The labeler runs with `sync-labels` off (the default), so it only ever adds. A label
+# a human put on a PR is never removed by automation.
+#
+# Matching is minimatch. Within one `changed-files` block the conditions are ANDed:
+# `any-glob-to-any-file` asks whether at least one changed file matches, and
+# `all-globs-to-all-files` asks whether *every* changed file matches — which is how a
+# negated glob carves an exception out.
+
+'area:daemon':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/nysia/**'
+          - 'crates/nysia-core/src/rpc/**'
+
+'area:pty':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/nysia-core/src/pty/**'
+
+'area:vt':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/nysia-core/src/vt/**'
+
+'area:git':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/nysia-core/src/git/**'
+          - 'crates/nysia-core/src/worktree/**'
+
+# D-13: Rust is the sole wire authority and the TypeScript under apps/web/src/generated
+# is ts-rs output, so a change to either side is a change to the same contract.
+'area:proto':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/nysia-proto/**'
+          - 'apps/web/src/generated/**'
+
+# The transport is the webview's half of the Tauri boundary, and one of the two places
+# lint-meta allows a tauri import at all.
+'area:desktop':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'apps/desktop/**'
+          - 'apps/web/src/transport/**'
+
+# The web app proper: everything under apps/web that is not generated bindings or the
+# transport, both of which are labelled above.
+#
+# Caveat worth knowing: the exclusion is evaluated over *all* the PR's files, so a PR
+# that touches App.tsx and a generated binding together gets `area:proto` and not
+# `area:web`. minimatch has no per-file AND to express this more tightly. Under-firing
+# on a mixed PR beats mislabelling every proto PR as web, and a human can add the
+# label — the labeler will not take it away again.
+'area:web':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'apps/web/**'
+      - all-globs-to-all-files:
+          - '!apps/web/src/generated/**'
+          - '!apps/web/src/transport/**'
+
+'area:build':
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - 'tools/**'
+          - 'scripts/**'
+          - 'Cargo.toml'
+          - 'Cargo.lock'
+          - 'package.json'
+          - 'pnpm-lock.yaml'
+          - 'pnpm-workspace.yaml'
+          - 'rust-toolchain.toml'
+
+'documentation':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'docs/**'
+
+# Trap 12: a gate that passes without exercising anything is worse than no gate. The
+# prove scripts and lint-meta are where that rule is enforced, so touching them is
+# worth a reviewer's attention regardless of which area it lands in.
+'gate':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'scripts/prove-*'
+          - 'tools/lint-meta/**'
+
+'design-system':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'docs/design/**'
