@@ -1,6 +1,6 @@
 import type { PaneKey } from '../../generated/PaneKey';
 import type { SessionHandle } from '../../generated/SessionHandle';
-import type { LauncherGroup, Project, StoreSnapshot, Tab } from '../types';
+import { emptySnapshot, type LauncherGroup, type Project, type StoreSnapshot, type Tab } from '../types';
 
 /**
  * The seed data from the design mock, transcribed from the `renderVals()` block in
@@ -150,6 +150,7 @@ export const SEED_LAUNCHERS: readonly LauncherGroup[] = [
 
 export function createSeedSnapshot(now: number = Date.now()): StoreSnapshot {
   return {
+    ...emptySnapshot('ready'),
     nav: 'session',
     projects: seedProjects(now),
     activeProjectId: SEED_ACTIVE_PROJECT,
@@ -157,7 +158,6 @@ export function createSeedSnapshot(now: number = Date.now()): StoreSnapshot {
     activeTab: SEED_ACTIVE_TAB,
     launchers: SEED_LAUNCHERS,
     daemon: {
-      connected: true,
       memoryBytes: 4 * 1024 ** 3,
       terminalCount: 9,
       worktreeCount: 3,
