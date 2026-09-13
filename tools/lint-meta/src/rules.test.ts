@@ -123,6 +123,31 @@ describe('blankRustComments', () => {
     expect(blanked).toContain('use tauri::Builder;');
   });
 
+  // The other direction of the same failure: not a literal that opens a comment, but an
+  // index that drifts. `[...source]` is one slot per code point while every index in the
+  // scanner is a UTF-16 code unit, so one astral character shifts every later blank right
+  // — and since newlines are skipped, the drift lands on real code.
+  //
+  // Asserting the length alone cannot catch this: rejoining the code-point array gives the
+  // same string back. The content assertion is the one that matters.
+  it.each([1, 4, 9, 20])('survives %i astral characters in an earlier comment', (count) => {
+    const source = `//! Header ${'\u{1F525}'.repeat(count)}\nuse tauri::Builder;\nuse serde::Serialize;\n`;
+    const blanked = blankRustComments(source);
+
+    expect(blanked).toHaveLength(source.length);
+    expect(blanked).toContain('use tauri::Builder;');
+    expect(blanked).toContain('use serde::Serialize;');
+    expect(blanked).not.toContain('Header');
+  });
+
+  it('refuses to return a string of a different length than it was given', () => {
+    // The invariant the whole scanner rests on. If a future edit reintroduces code-point
+    // iteration this throws instead of quietly erasing code.
+    const astral = `//! ${'\u{1F525}'.repeat(30)}\nuse tauri::Builder;\n`;
+    expect(() => blankRustComments(astral)).not.toThrow();
+    expect(blankRustComments(astral)).toHaveLength(astral.length);
+  });
+
   it('blanks what is inside a string, since a string is not an import', () => {
     expect(blankRustComments('let s = "tauri::Builder";')).not.toContain('tauri');
   });
@@ -162,12 +187,12 @@ describe('the architecture rules', () => {
     expect(byRule('no-tauri-outside-desktop')).toContain('apps/web/src/leak.ts');
 
     // The Rust spellings the previous line-anchored regex walked straight past:
-    // `use ::tauri::Builder;` (line 4), `use {tauri, serde};` (7), and the multi-line
-    // grouped form (10). Any of them would have put the UI toolkit in the daemon.
+    // `use ::tauri::Builder;` (line 7), `use {tauri, serde};` (10), and the multi-line
+    // grouped form (13). Any of them would have put the UI toolkit in the daemon.
     const rustLines = violations
       .filter((v) => v.rule === 'no-tauri-outside-desktop' && v.file === 'crates/nysia/src/leak.rs')
       .map((v) => v.line);
-    expect(rustLines).toEqual(expect.arrayContaining([4, 7, 10]));
+    expect(rustLines).toEqual(expect.arrayContaining([7, 10, 13]));
     // Every crate outside apps/desktop is inspected, not just the chain rooted at
     // nysia-core. crates/nysia can reach tauri straight out of [workspace.dependencies]
     // without editing a single shared file, so it has to be checked on its own.

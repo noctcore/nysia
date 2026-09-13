@@ -1,5 +1,8 @@
 // Rule (a): spellings a line-anchored `use tauri::` regex walked straight past.
 // The line numbers below are asserted by scripts/prove-lint-meta.ts, so do not reformat.
+// The emoji are load-bearing: they are astral, so a blanker that indexes by code point
+// instead of UTF-16 code unit drifts one slot per emoji and erases the imports below.
+// 🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥
 
 use ::tauri::Builder;
 

@@ -71,9 +71,9 @@ expectFile(trips, 'no-tauri-in-rust-crates', 'crates/nysia/Cargo.toml');
 
 // The three Rust spellings a line-anchored `use tauri::` regex walked straight past. Exact
 // lines, so the locator is proven and not just the boolean.
-expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 4); // use ::tauri::Builder;
-expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 7); // use {tauri, serde};
-expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 10); // the multi-line form
+expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 7); // use ::tauri::Builder;
+expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 10); // use {tauri, serde};
+expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 13); // the multi-line form
 
 // A multi-line grouped import in a .js file. ESLint's ban blocks were {ts,tsx} only and
 // the regex was line-anchored, so this spelling was covered by neither layer.

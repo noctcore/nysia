@@ -106,7 +106,15 @@ const RUST_TAURI_PATH = new RegExp(`${RUST_TAURI_ROOT}::`, 'g');
  * is not an import.
  */
 export function blankRustComments(source: string): string {
-  const out = [...source];
+  // `split('')`, deliberately NOT `[...source]` or `Array.from(source)`.
+  //
+  // Those iterate by code point, giving one slot per character, while every index this
+  // function computes — `i`, `source[at]`, `startsWith`, `indexOf`, `slice` — is a UTF-16
+  // code unit. One astral character (any emoji) earlier in the file would shift every
+  // later blank one slot right, cumulatively, and because `blank` skips newlines the drift
+  // lands on real code: the first characters after each later comment get erased instead.
+  // A single emoji in a doc header would quietly disarm this rule for the whole file.
+  const out = source.split('');
   let i = 0;
   let blockDepth = 0;
 
@@ -207,7 +215,18 @@ export function blankRustComments(source: string): string {
     i += 1;
   }
 
-  return out.join('');
+  const blanked = out.join('');
+  // The whole scanner is offset arithmetic, so this invariant is the thing that must never
+  // quietly break. A rule that silently stops scanning is worse than no rule: it keeps
+  // reporting success. If a future edit reintroduces code-point iteration, crash here
+  // rather than start erasing code.
+  if (blanked.length !== source.length) {
+    throw new Error(
+      `blankRustComments changed the length of its input (${source.length} -> ` +
+        `${blanked.length}); every index in this function must be a UTF-16 code unit`,
+    );
+  }
+  return blanked;
 }
 
 /** 1-indexed line of a byte offset. */
