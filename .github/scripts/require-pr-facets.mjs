@@ -17,11 +17,6 @@ import process from 'node:process';
 
 import { PRIORITY_LABELS, TYPE_LABELS } from './facets.mjs';
 
-// The facet lists live in facets.mjs so that check-labeler-config.mjs can read them
-// without importing this file and running its main(). Re-exported for callers that
-// already import them from here.
-export { TYPE_LABELS, PRIORITY_LABELS } from './facets.mjs';
-
 /**
  * Check one label set.
  *

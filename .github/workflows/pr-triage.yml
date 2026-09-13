@@ -17,8 +17,10 @@
 # configuration that runs. Adding a checkout of `github.event.pull_request.head.sha`
 # would hand a fork's code a token that can write to this repository.
 #
-# .github/scripts/check-workflow-pins.mjs fails CI if that invariant is broken here, and
-# if any `uses:` in this directory is pinned to a mutable tag instead of a commit SHA.
+# .github/scripts/check-workflow-pins.mjs catches both a head reference here and a `uses:`
+# pinned to a mutable tag. It is a lint against honest mistakes, not a boundary — read its
+# header for what it does and does not guarantee. The invariant above is the boundary; the
+# check only makes it harder to break by accident.
 
 name: pr-triage
 
