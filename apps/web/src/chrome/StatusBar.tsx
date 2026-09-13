@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 
 import { formatMemory, formatUsageWindow } from '../format';
 import type { StoreStatus } from '../store/types';
-import { useSnapshot } from '../store/useStore';
+import { useSnapshot } from '../store/hooks';
 import { GLYPH } from '../ui/glyphs';
 import { useDismiss } from '../ui/useDismiss';
 

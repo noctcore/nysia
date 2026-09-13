@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 
 import type { Project } from '../store/types';
-import { useSnapshot } from '../store/useStore';
+import { useSnapshot } from '../store/hooks';
 import { GLYPH, SETTINGS_SEARCH_HINT } from '../ui/glyphs';
 import { ComingSoon } from '../ui/ComingSoon';
 import { SectionLabel } from '../ui/SectionLabel';

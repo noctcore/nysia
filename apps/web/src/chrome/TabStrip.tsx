@@ -1,8 +1,7 @@
 import { useRef, type KeyboardEvent, type RefObject } from 'react';
 
-import { runCommand } from '../store/runCommand';
+import { useCommands, useSnapshot } from '../store/hooks';
 import type { Tab } from '../store/types';
-import { useSnapshot, useStore } from '../store/useStore';
 import { GLYPH } from '../ui/glyphs';
 import { isArrowKey, nextOption, tabbableIndex } from '../ui/roving';
 import { NewTabButton } from './NewTabButton';
@@ -32,7 +31,7 @@ import { SessionGlyph } from './SessionGlyph';
  */
 export function TabStrip() {
   const { tabs, activeTab } = useSnapshot();
-  const store = useStore();
+  const commands = useCommands();
   const paneKeys = tabs.map((tab) => tab.paneKey);
   const tabbable = tabbableIndex(paneKeys, activeTab ?? '');
 
@@ -53,7 +52,7 @@ export function TabStrip() {
    * never unmounted, so this is a plain `focus()` and needs no effect.
    */
   function focusAfterClose(): void {
-    const next = store.getSnapshot().activeTab;
+    const next = commands.getSnapshot().activeTab;
     if (next === null) {
       document.querySelector<HTMLElement>('[data-new-session]')?.focus();
       return;
@@ -67,13 +66,13 @@ export function TabStrip() {
       const next = nextOption(paneKeys, tab.paneKey, event.key);
       if (next !== undefined) {
         focusTab(next);
-        runCommand(store.selectTab(next));
+        commands.selectTab(next);
       }
       return;
     }
     if (event.key === 'Delete' || event.key === 'Backspace') {
       event.preventDefault();
-      runCommand(store.closeTab(tab.paneKey), focusAfterClose);
+      commands.closeTab(tab.paneKey, focusAfterClose);
     }
   }
 
@@ -112,7 +111,7 @@ function TabButton({
   readonly onKeyDown: (event: KeyboardEvent<HTMLDivElement>, tab: Tab) => void;
   readonly onClose: () => void;
 }) {
-  const store = useStore();
+  const commands = useCommands();
 
   return (
     // The tab is the focusable element, so the whole 34px chip takes the focus ring rather
@@ -128,7 +127,7 @@ function TabButton({
       }}
       aria-selected={active}
       tabIndex={tabbable ? 0 : -1}
-      onClick={() => runCommand(store.selectTab(tab.paneKey))}
+      onClick={() => commands.selectTab(tab.paneKey)}
       onKeyDown={(event) => onKeyDown(event, tab)}
       className={`flex h-tab cursor-pointer items-center gap-2 whitespace-nowrap px-3.5 focus-visible:shadow-focus focus-visible:outline-none ${
         active
@@ -145,7 +144,7 @@ function TabButton({
         onClick={(event) => {
           // Otherwise the click bubbles to the tab and selects what it is about to close.
           event.stopPropagation();
-          runCommand(store.closeTab(tab.paneKey), onClose);
+          commands.closeTab(tab.paneKey, onClose);
         }}
         className="text-fg3 hover:text-fg ml-1.5 cursor-pointer border-0 bg-transparent p-0"
       >
