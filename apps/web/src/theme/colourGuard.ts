@@ -140,11 +140,18 @@ const PROPERTY_INTRO =
 /**
  * Whatever sits between the separator and the literal — a ternary head, a call, nothing.
  *
- * It may not cross a quote, a semicolon or a line end, so it cannot wander into the next
- * statement, and it is length-capped so a long line cannot let it reach a literal that has
- * nothing to do with the property.
+ * It crosses line ends, because a hand-wrapped ternary is the ordinary way to write the
+ * shape this rule most needs to catch and there is no formatter in this repo to make it
+ * one line. Stopping at a line end meant the guard saw the conditional style only when it
+ * happened to fit on one, which is a coin toss rather than a rule.
+ *
+ * What bounds it instead is punctuation that means "this is a different thing": a quote,
+ * a semicolon, a comma — which separates one object property from the next — and a brace.
+ * Between them a span cannot reach out of the value it belongs to and into a sibling. The
+ * length cap is the backstop for anything those miss. The comma costs the rule an
+ * expression like a call with two arguments, which is in the residue above.
  */
-const BEFORE_VALUE = `[^'"\`;\\n]{0,80}`;
+const BEFORE_VALUE = `[^'"\`;,{}]{0,120}`;
 
 /**
  * One pattern per quote character rather than one with a backreference, so a value may

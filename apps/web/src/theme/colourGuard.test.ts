@@ -206,6 +206,28 @@ describe('findColourLiterals', () => {
     );
   });
 
+  it('finds a colour in a hand-wrapped conditional', () => {
+    // There is no formatter in this repo, so a ternary split over three lines is the
+    // ordinary way to write the shape this rule most needs to catch — stopping at a line
+    // end meant catching it only when it happened to fit on one.
+    const wrapped = `style={{
+  color: active
+    ? 'red'
+    : 'gray',
+}}`;
+    expect(findColourLiterals(wrapped).map((c) => c.kind)).toContain('named-colour');
+  });
+
+  it('does not let a multi-line span reach a sibling property', () => {
+    // A comma separates one object property from the next, so the span stops there rather
+    // than running on into a value that has nothing to do with the painting one.
+    const siblings = `{
+  color: computeColour(),
+  tier: 'gold',
+}`;
+    expect(findColourLiterals(siblings)).toEqual([]);
+  });
+
   it('does not match a painting property inside a longer word', () => {
     // `fill` in `autofill`, `stroke` in `keystroke`. Fixing the bare-string false
     // positives must not introduce an identifier-shaped set of them instead.
