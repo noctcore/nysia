@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics><meta name="design_doc_mode" content="canvas"><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&family=Fira+Code:wght@400;500&family=Manrope:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"><style>body{margin:0;background:#0a0a0b;font-family:system-ui,sans-serif;color:#e8e8e8}a{color:#9ecbff}a:hover{color:#c4dfff}.dv-turn{padding:40px 44px 32px;border-bottom:1px solid rgba(255,255,255,.08);scroll-margin-top:16px}.dv-thd{display:flex;align-items:baseline;gap:10px;margin:0 0 20px}.dv-tid{font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#fff;color:#000;border-radius:4px;text-decoration:none}.dv-tname{font:600 13px/1.2 system-ui,sans-serif;color:#e8e8e8}.dv-opts{display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start}.dv-opt{flex:none;display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px}.dv-oid{font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(255,255,255,.12);color:#fff;border-radius:5px;text-decoration:none}.dv-olabel{display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(255,255,255,.6)}.dv-card{max-width:100%;border-radius:8px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)}.dv-opt:target .dv-oid{background:#2a78d6;color:#fff}.dv-next{margin:22px 0 0;font:12px/1.5 system-ui,sans-serif;color:rgba(255,255,255,.5)}.dv-notes{max-width:760px;font:13px/1.55 system-ui,sans-serif;color:rgba(255,255,255,.7);margin:0 0 24px}</style></helmet>
+<section class="dv-turn" id="t2">
+<div class="dv-thd"><a class="dv-tid" href="#t2">2</a><span class="dv-tname">Ember, refined — themeable (Ember / Graphite) with a changeable accent; provider usage popover; terminals as tabs; Tasks = GitHub Issues; Settings after your references</span></div>
+<p class="dv-notes">Theme and accent are live tweaks (Tweaks panel → Appearance); every screen below follows them. Usage popover: Detailed only, one row per provider, hover reveals the detail flyout (both shown). The "+" tab menu shows what a tab can be: an agent or a shell.</p>
+<div style="{{ themeVars }}" class="dv-opts">
+
+<!-- ═══════════ 2a SESSION ═══════════ -->
+<div class="dv-opt" id="2a"><div class="dv-olabel"><a class="dv-oid" href="#2a">2a</a>Session — tabs are terminals or agents; usage popover with provider hover</div>
+<div class="dv-card" style="width:1440px;height:900px;background:var(--bg1);color:var(--fg);font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px;display:grid;grid-template-rows:40px 1fr 30px;border:1px solid var(--line);position:relative">
+  <div style="display:flex;align-items:center;background:var(--bg0);border-bottom:1px solid var(--line);padding-left:14px;gap:16px">
+    <div style="display:flex;align-items:center;gap:10px;width:270px;flex:none"><span style="font-weight:600;font-size:15px;letter-spacing:-.01em">nysia<span style="color:var(--acc)">.</span></span></div>
+    <div style="display:flex;align-items:flex-end;height:40px;flex:1;gap:4px;position:relative">
+      <div style="display:flex;align-items:center;gap:8px;padding:0 14px;height:34px;background:var(--bg1);border:1px solid var(--line);border-bottom-color:var(--bg1);border-radius:8px 8px 0 0;margin-bottom:-1px;white-space:nowrap"><span style="color:var(--acc);font-size:11px;text-shadow:0 0 8px var(--acc)">✱</span><span>Kirei deps but we already did…</span><span style="color:var(--fg3);margin-left:6px">×</span></div>
+      <div style="display:flex;align-items:center;gap:8px;padding:0 14px;height:34px;color:var(--fg2);white-space:nowrap"><span style="font-family:'Fira Code',monospace;font-size:11px">&gt;_</span>pwsh · shiroani</div>
+      <div style="display:flex;align-items:center;gap:8px;padding:0 14px;height:34px;color:var(--fg2);white-space:nowrap"><span style="font-size:11px">◎</span>codex · deskmate</div>
+      <div style="display:flex;align-items:center;gap:8px;padding:0 14px;height:34px;color:var(--fg2);white-space:nowrap"><span style="font-family:'Fira Code',monospace;font-size:11px">&gt;_</span>wsl · szlak</div>
+      <div style="display:grid;place-items:center;width:28px;height:28px;margin-bottom:6px;border-radius:6px;background:var(--bg3);color:var(--fg);font-size:16px">+</div>
+      <sc-if value="{{ showNewTabMenu }}" hint-placeholder-val="{{ true }}">
+      <div style="position:absolute;left:540px;top:42px;width:250px;background:var(--bg2);border:1px solid var(--line2);border-radius:10px;box-shadow:0 20px 50px rgba(0,0,0,.6);padding:6px;z-index:5;display:flex;flex-direction:column;gap:2px">
+        <sc-for list="{{ newTabItems }}" as="g" hint-placeholder-count="2">
+          <div style="padding:8px 10px 4px;font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--fg3)">{{ g.g }}</div>
+          <sc-for list="{{ g.items }}" as="it" hint-placeholder-count="4">
+            <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;color:var(--fg)" style-hover="background:var(--bg3)"><span style="width:16px;text-align:center;color:var(--fg2);font-family:'Fira Code',monospace;font-size:11px">{{ it.icon }}</span>{{ it.label }}<span style="margin-left:auto;font-size:11px;color:var(--fg3);font-family:'Fira Code',monospace">{{ it.hint }}</span></div>
+          </sc-for>
+        </sc-for>
+      </div>
+      </sc-if>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;color:var(--fg2);font-size:12px"><span style="padding:5px 10px;background:var(--bg2);border-radius:6px;font-family:'Fira Code',monospace">⌘K</span></div>
+    <div style="display:flex;height:40px"><div style="width:46px;display:grid;place-items:center;color:var(--fg2)">─</div><div style="width:46px;display:grid;place-items:center;color:var(--fg2);font-size:11px">☐</div><div style="width:46px;display:grid;place-items:center;color:var(--fg2)">✕</div></div>
+  </div>
+  <div style="display:grid;grid-template-columns:48px 222px 1fr;min-height:0">
+    <div style="background:var(--bg0);border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;padding:12px 0;gap:6px">
+      <div style="width:32px;height:32px;border-radius:8px;display:grid;place-items:center;background:var(--acc14);color:var(--acc)">▤</div>
+      <div style="width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:var(--fg2)">◉</div>
+      <div style="width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:var(--fg2)">◷</div>
+      <div style="margin-top:auto;width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:var(--fg2)">⚙</div>
+      <div style="width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:var(--fg2)">?</div>
+    </div>
+    <div style="background:var(--bg1);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:12px 10px;gap:2px;min-height:0">
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg2);border-radius:8px;color:var(--fg3);margin-bottom:10px"><span>⌕</span>Search projects</div>
+      <div style="display:flex;align-items:center;padding:6px 10px;color:var(--fg3);font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase">Dev<span style="margin-left:auto;font-size:14px;letter-spacing:0">+</span></div>
+      <sc-for list="{{ projects }}" as="p" hint-placeholder-count="4">
+        <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;color:var(--fg)"><span style="width:16px;height:16px;border-radius:50%;background:repeating-linear-gradient(135deg,var(--line) 0 2px,var(--bg3) 2px 4px)"></span>{{ p }}</div>
+      </sc-for>
+      <div style="margin:2px 0 6px 12px;padding:0 0 0 10px;border-left:2px solid var(--acc);display:flex;flex-direction:column;gap:6px">
+        <div style="display:flex;align-items:center;gap:8px;color:var(--fg2);font-size:12px"><span style="font-family:'Fira Code',monospace">⑂</span>master<span style="font-size:10px;padding:1px 6px;border-radius:99px;background:var(--line);color:var(--fg2)">primary</span></div>
+        <div style="display:flex;align-items:center;gap:8px;color:var(--fg);font-size:12px"><span style="width:6px;height:6px;border-radius:50%;background:var(--acc)"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Kirei deps but we already did…</span><span style="margin-left:auto;color:var(--fg3);font-size:11px">21h</span></div>
+        <div style="display:flex;align-items:center;gap:8px;color:var(--fg2);font-size:12px"><span style="font-family:'Fira Code',monospace;font-size:10px">&gt;_</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">pwsh</span><span style="margin-left:auto;color:var(--fg3);font-size:11px">3m</span></div>
+      </div>
+      <sc-for list="{{ projects2 }}" as="p" hint-placeholder-count="4">
+        <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;color:var(--fg)"><span style="width:16px;height:16px;border-radius:50%;background:repeating-linear-gradient(135deg,var(--line) 0 2px,var(--bg3) 2px 4px)"></span>{{ p }}</div>
+      </sc-for>
+    </div>
+    <div style="display:flex;flex-direction:column;min-height:0;padding:0 24px">
+      <div style="flex:1;overflow:hidden;font-family:'Fira Code',monospace;font-size:12.5px;line-height:1.65;color:var(--fg);padding-top:16px;display:flex;flex-direction:column;gap:16px">
+        <div style="background:var(--bg0);border:1px solid var(--line);border-radius:8px;padding:12px 14px;color:var(--fg2);white-space:pre-wrap;font-size:12px"><span style="color:var(--fg)">$</span> gh run view 34652782336 --log | grep -iE "desktop_overlay|node-gyp" | head -8
+<sc-for list="{{ logLines }}" as="l" hint-placeholder-count="6">{{ l }}
+</sc-for></div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding-left:2px">
+          <div style="display:flex;gap:10px;align-items:center;color:var(--acc);font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:12px">✱ claude</div>
+          <div>Both builds passed — the last unverified piece is now confirmed.</div>
+          <div style="color:var(--fg2)">build (windows-2022, win): <span style="color:var(--acc)">success</span><br>build (macos-latest, mac): <span style="color:var(--acc)">success</span><br>upload: <span style="color:var(--acc)">success</span></div>
+          <div><b style="font-weight:500;color:#fff">Assets live on the release:</b> <span style="color:var(--acc)">ShiroAni-1.4.0-arm64.dmg</span>, <span style="color:var(--acc)">ShiroAni-1.4.0-x64.exe</span>, <span style="color:var(--acc)">latest-mac.yml</span>, <span style="color:var(--acc)">latest.yml</span>.</div>
+          <div>The two things I'd flagged as open both came back clean:<br>– <b style="font-weight:500;color:#fff">Windows packaging</b> — N-API addon compiled via node-gyp rebuild on windows-2022; NSIS installer built and uploaded.<br>– <b style="font-weight:500;color:#fff">macOS signature guard</b> — Verify macOS code signature step passed on the Electron 44 bundle.</div>
+          <div>Full release state: version bumped, changelog entry inside the tag, notes published, both platforms built, installers attached.</div>
+          <div>Worth remembering: <b style="font-weight:500;color:#fff">macOS 12 users should not upgrade</b> — Electron 44 drops it. Happy to draft that post if you want it.</div>
+        </div>
+        <div style="color:var(--fg3);font-size:12px">✱ Brewed for 23s · done 12:16 AM</div>
+      </div>
+      <div style="margin:10px 0 0;background:var(--bg0);border:1px solid var(--line2);border-radius:10px;padding:12px 14px;font-family:'Fira Code',monospace;font-size:13px;display:flex;gap:10px;color:var(--fg);box-shadow:0 0 0 3px var(--acc14)"><span style="color:var(--acc)">❯</span><span>yes draft the discord post</span><span style="width:7px;height:16px;background:var(--acc);display:inline-block"></span></div>
+      <div style="padding:10px 0 12px;display:flex;justify-content:space-between;align-items:flex-end;gap:20px">
+        <div style="display:flex;flex-wrap:wrap;gap:6px;max-width:760px;font-family:'Fira Code',monospace;font-size:11.5px">
+          <sc-for list="{{ chips }}" as="c" hint-placeholder-count="12"><span style="white-space:nowrap;padding:3px 10px;border-radius:99px;background:var(--bg2);color:var(--fg)"><span style="color:var(--fg3)">{{ c.k }}</span> {{ c.v }}</span></sc-for>
+          <span style="width:100%;color:var(--acc);padding-top:2px">▸▸ bypass permissions on <span style="color:var(--fg3)">(shift+tab to cycle)</span></span>
+        </div>
+        <div style="text-align:right;font-family:'Fira Code',monospace;font-size:11.5px;color:var(--fg3);line-height:1.7">296 552 tokens<br>2.1.263 · <span style="color:var(--acc)">✓ up to date</span><br>new task? <span style="color:var(--fg)">/clear</span> to save 296.6k</div>
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:16px;padding:0 14px;background:var(--bg0);border-top:1px solid var(--line);font-size:11.5px;color:var(--fg2)">
+    <span style="display:flex;align-items:center;gap:8px;color:var(--acc)">✱ <span style="width:60px;height:4px;border-radius:2px;background:var(--line2);position:relative;overflow:hidden"><span style="position:absolute;inset:0;width:100%;background:var(--acc)"></span></span></span><span style="color:var(--fg)">100% left 5h · 97% left 6d · 99% left Fable</span><span style="color:var(--fg3)">↻</span>
+    <span style="margin-left:auto;display:flex;gap:16px"><span>● On</span><span>4.00 GB</span><span>&gt;_ 9</span><span>⑂ 3</span></span>
+  </div>
+  <sc-if value="{{ showUsage }}" hint-placeholder-val="{{ true }}">
+  <div style="position:absolute;left:60px;bottom:40px;width:360px;background:var(--bg2);border:1px solid var(--line2);border-radius:12px;box-shadow:0 24px 60px rgba(0,0,0,.6);padding:6px;display:flex;flex-direction:column;gap:2px;z-index:4">
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 12px 8px"><span style="font-weight:600;font-size:14px">Usage</span><span style="margin-left:auto;font-size:12px;color:var(--fg2)">all agents</span><span style="color:var(--fg3)">↻</span></div>
+    <sc-for list="{{ providers }}" as="pr" hint-placeholder-count="2">
+      <div style="display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:8px" style-hover="background:var(--bg3)">
+        <span style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;background:var(--bg0);color:var(--acc);border:1px solid var(--line)">{{ pr.icon }}</span>
+        <div style="flex:1;display:flex;flex-direction:column;gap:6px">
+          <div style="display:flex;align-items:baseline;gap:10px"><span style="font-weight:600">{{ pr.name }}</span><span style="font-size:11.5px;color:var(--fg3)">{{ pr.reset }}</span></div>
+          <div style="display:flex;gap:12px;font-size:11.5px;color:var(--fg2);font-family:'Fira Code',monospace">
+            <sc-for list="{{ pr.bars }}" as="b" hint-placeholder-count="3"><span style="display:flex;align-items:center;gap:6px;white-space:nowrap">{{ b.k }}<span style="width:34px;height:4px;border-radius:2px;background:var(--line2);overflow:hidden;display:inline-block"><span style="display:block;height:100%;width:{{ b.pct }};background:var(--acc)"></span></span><span style="color:var(--fg)">{{ b.pct }}</span></span></sc-for>
+          </div>
+        </div>
+        <span style="color:var(--fg3)">›</span>
+      </div>
+    </sc-for>
+    <div style="border-top:1px solid var(--line);margin:4px 6px 0;padding:6px 6px 4px;display:flex;flex-direction:column;font-size:12.5px"><div style="display:flex;justify-content:space-between;padding:8px 0"><span>Usage details &amp; history</span><span style="color:var(--fg3)">›</span></div><div style="display:flex;justify-content:space-between;padding:8px 0"><span>Manage accounts…</span><span style="color:var(--fg3)">›</span></div></div>
+  </div>
+  <div style="position:absolute;left:432px;bottom:118px;width:300px;background:var(--bg2);border:1px solid var(--line2);border-radius:12px;box-shadow:0 24px 60px rgba(0,0,0,.6);padding:14px 16px;display:flex;flex-direction:column;gap:14px;z-index:4">
+    <div style="display:flex;align-items:center;gap:10px"><span style="color:var(--acc)">✱</span><div><div style="font-weight:600">Claude</div><div style="font-size:11px;color:var(--fg3)">Updated just now</div></div></div>
+    <sc-for list="{{ claudeDetail }}" as="d" hint-placeholder-count="3">
+      <div style="display:flex;flex-direction:column;gap:6px"><span style="font-size:12.5px;font-weight:500">{{ d.name }}</span><div style="height:6px;border-radius:3px;background:var(--line);overflow:hidden"><div style="height:100%;width:{{ d.pct }};background:var(--acc)"></div></div><div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--fg2);font-family:'Fira Code',monospace"><span>{{ d.pct }} left</span><span>{{ d.reset }}</span></div></div>
+    </sc-for>
+    <div style="border-top:1px solid var(--line);padding-top:10px;display:flex;flex-direction:column;gap:8px;font-size:12.5px"><div style="font-size:11px;color:var(--fg3);font-weight:600;letter-spacing:.06em;text-transform:uppercase">Claude account</div><div style="display:flex;justify-content:space-between"><span>System default</span><span style="color:var(--fg3)">›</span></div><div style="display:flex;justify-content:space-between"><span>Manage accounts…</span><span style="color:var(--fg3)">›</span></div></div>
+  </div>
+  </sc-if>
+</div></div>
+
+<!-- ═══════════ 2b TASKS = GITHUB ISSUES ═══════════ -->
+<div class="dv-opt" id="2b"><div class="dv-olabel"><a class="dv-oid" href="#2b">2b</a>Tasks — GitHub Issues of the selected project, Start hands one to an agent</div>
+<div class="dv-card" style="width:1440px;height:900px;background:var(--bg1);color:var(--fg);font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px;display:grid;grid-template-rows:40px 1fr 30px;border:1px solid var(--line)">
+  <div style="display:flex;align-items:center;background:var(--bg0);border-bottom:1px solid var(--line);padding-left:14px;gap:16px">
+    <div style="display:flex;align-items:center;gap:10px;width:270px;flex:none"><span style="font-weight:600;font-size:15px">nysia<span style="color:var(--acc)">.</span></span></div>
+    <div style="display:flex;align-items:flex-end;height:40px;flex:1;gap:4px">
+      <div style="display:flex;align-items:center;gap:8px;padding:0 14px;height:34px;background:var(--bg1);border:1px solid var(--line);border-bottom-color:var(--bg1);border-radius:8px 8px 0 0;margin-bottom:-1px;white-space:nowrap"><span style="color:var(--fg2)">◉</span>Tasks · Settly<span style="color:var(--fg3);margin-left:6px">×</span></div>
+      <div style="display:flex;align-items:center;gap:8px;padding:0 14px;height:34px;color:var(--fg2);white-space:nowrap"><span style="color:var(--acc);font-size:11px">✱</span>Kirei deps but we already did…</div>
+      <div style="display:flex;align-items:center;gap:8px;padding:0 14px;height:34px;color:var(--fg2);white-space:nowrap"><span style="font-family:'Fira Code',monospace;font-size:11px">&gt;_</span>pwsh · shiroani</div>
+      <div style="display:grid;place-items:center;width:28px;height:28px;margin-bottom:6px;border-radius:6px;background:var(--bg3);font-size:16px">+</div>
+    </div>
+    <div style="display:flex;height:40px"><div style="width:46px;display:grid;place-items:center;color:var(--fg2)">─</div><div style="width:46px;display:grid;place-items:center;color:var(--fg2);font-size:11px">☐</div><div style="width:46px;display:grid;place-items:center;color:var(--fg2)">✕</div></div>
+  </div>
+  <div style="display:grid;grid-template-columns:48px 222px 1fr;min-height:0">
+    <div style="background:var(--bg0);border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;padding:12px 0;gap:6px">
+      <div style="width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:var(--fg2)">▤</div>
+      <div style="width:32px;height:32px;border-radius:8px;display:grid;place-items:center;background:var(--acc14);color:var(--acc)">◉</div>
+      <div style="width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:var(--fg2)">◷</div>
+      <div style="margin-top:auto;width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:var(--fg2)">⚙</div>
+      <div style="width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:var(--fg2)">?</div>
+    </div>
+    <div style="background:var(--bg1);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:12px 10px;gap:2px">
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg2);border-radius:8px;color:var(--fg3);margin-bottom:10px"><span>⌕</span>Search issues</div>
+      <div style="display:flex;align-items:center;padding:6px 10px;color:var(--fg3);font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase">Sources</div>
+      <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;background:var(--bg3);color:var(--fg)"><span style="color:var(--fg2)">◉</span>GitHub Issues<span style="margin-left:auto;font-size:11px;color:var(--fg3);font-family:'Fira Code',monospace">38</span></div>
+      <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;color:var(--fg)"><span style="color:var(--fg2)">⇄</span>Pull requests<span style="margin-left:auto;font-size:11px;color:var(--fg3);font-family:'Fira Code',monospace">4</span></div>
+      <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;color:var(--fg)"><span style="color:var(--fg2)">▦</span>Projects</div>
+      <div style="display:flex;align-items:center;padding:16px 10px 6px;color:var(--fg3);font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase">Repositories</div>
+      <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;color:var(--fg);font-weight:600"><span style="width:16px;height:16px;border-radius:50%;background:repeating-linear-gradient(135deg,var(--line) 0 2px,var(--bg3) 2px 4px)"></span>Settly<span style="margin-left:auto;width:6px;height:6px;border-radius:50%;background:var(--acc)"></span></div>
+      <sc-for list="{{ projects2 }}" as="p" hint-placeholder-count="4">
+        <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;color:var(--fg2)"><span style="width:16px;height:16px;border-radius:50%;background:repeating-linear-gradient(135deg,var(--line) 0 2px,var(--bg3) 2px 4px)"></span>{{ p }}</div>
+      </sc-for>
+    </div>
+    <div style="display:flex;flex-direction:column;min-height:0;padding:18px 24px;gap:14px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="padding:6px 12px;border-radius:8px;background:var(--bg2);border:1px solid var(--line);color:var(--fg2);font-family:'Fira Code',monospace;font-size:12px">◉ GitHub · Local · Shironex/vite-nestjs-template</span><span style="padding:6px 12px;border-radius:8px;border:1px solid var(--line);color:var(--fg);display:flex;gap:8px;align-items:center">Settly<span style="color:var(--fg3)">▾</span></span><span style="padding:6px 10px;border-radius:8px;border:1px solid var(--line);color:var(--fg2)">↗</span></div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="display:flex;background:var(--bg0);border-radius:8px;padding:3px;font-size:12px"><span style="padding:5px 12px;background:var(--bg3);border-radius:6px">Open</span><span style="padding:5px 12px;color:var(--fg3)">Assigned to me</span><span style="padding:5px 12px;color:var(--fg3)">Closed</span></div>
+        <span style="padding:6px 12px;border-radius:8px;border:1px solid var(--line);color:var(--fg2);white-space:nowrap">≔ Filters</span>
+        <div style="flex:1;display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:8px;background:var(--bg0);border:1px solid var(--line);font-family:'Fira Code',monospace;font-size:12px;min-width:0"><span style="color:var(--fg3)">⌕</span><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">is:issue is:open</span><span style="margin-left:auto;color:var(--fg3)">×</span></div>
+        <span style="padding:6px 10px;border-radius:8px;border:1px solid var(--line);color:var(--fg2)">+</span><span style="padding:6px 10px;border-radius:8px;border:1px solid var(--line);color:var(--fg2)">↻</span>
+      </div>
+      <div style="display:grid;grid-template-columns:80px 1fr 90px 110px 120px;gap:12px;padding:6px 14px 0;font-size:10.5px;color:var(--fg3);text-transform:uppercase;letter-spacing:.08em;font-weight:600"><span>ID</span><span>Title / context</span><span>Status</span><span>Updated</span><span></span></div>
+      <div style="display:flex;flex-direction:column;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--bg0)">
+        <sc-for list="{{ issues }}" as="i" hint-placeholder-count="10">
+          <div style="display:grid;grid-template-columns:80px 1fr 90px 110px 120px;gap:12px;align-items:center;padding:11px 14px;border-bottom:1px solid var(--line)" style-hover="background:var(--bg2)">
+            <span style="font-family:'Fira Code',monospace;font-size:12px;color:var(--fg2)">◉ {{ i.id }}</span>
+            <div style="min-width:0"><div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ i.title }}</div><div style="display:flex;gap:6px;align-items:center;margin-top:4px;font-size:11.5px;color:var(--fg2)"><span>Shironex</span><span>Settly</span><sc-for list="{{ i.labels }}" as="lb" hint-placeholder-count="1"><span style="padding:1px 8px;border-radius:99px;background:var(--bg3);border:1px solid var(--line);font-size:11px">{{ lb }}</span></sc-for></div></div>
+            <span style="font-size:11.5px;padding:3px 9px;border-radius:99px;border:1px solid var(--acc35);color:var(--acc);white-space:nowrap;justify-self:start">● Open</span>
+            <span style="font-size:12px;color:var(--fg2);white-space:nowrap">{{ i.updated }}</span>
+            <div style="display:flex;gap:6px;justify-content:flex-end;align-items:center"><span style="padding:5px 12px;border-radius:7px;background:var(--bg3);border:1px solid var(--line2);color:var(--fg);white-space:nowrap;font-size:12px">✱ Start →</span><span style="color:var(--fg3);padding:0 4px">⋮</span></div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:16px;padding:0 14px;background:var(--bg0);border-top:1px solid var(--line);font-size:11.5px;color:var(--fg2)"><span style="color:var(--acc)">✱</span><span style="color:var(--fg)">100% left 5h · 97% left 6d · 99% left Fable</span><span style="margin-left:auto;display:flex;gap:16px"><span>● On</span><span>4.00 GB</span><span>&gt;_ 9</span><span>⑂ 3</span></span></div>
+</div></div>
+
+<!-- ═══════════ 2c SETTINGS · AGENTS ═══════════ -->
+<div class="dv-opt" id="2c"><div class="dv-olabel"><a class="dv-oid" href="#2c">2c</a>Settings › Agents — default agent, behaviour, installed agents</div>
+<div class="dv-card" style="width:1440px;height:900px;background:var(--bg1);color:var(--fg);font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px;display:grid;grid-template-rows:40px 1fr 30px;border:1px solid var(--line)">
+  <div style="display:flex;align-items:center;background:var(--bg0);border-bottom:1px solid var(--line);padding-left:14px;gap:16px">
+    <div style="display:flex;align-items:center;gap:10px;width:270px;flex:none"><span style="font-weight:600;font-size:15px">nysia<span style="color:var(--acc)">.</span></span></div>
+    <div style="flex:1;color:var(--fg2);display:flex;align-items:center;gap:8px"><span style="padding:5px 10px;border-radius:6px;background:var(--bg2)">← Back to app</span></div>
+    <div style="display:flex;height:40px"><div style="width:46px;display:grid;place-items:center;color:var(--fg2)">─</div><div style="width:46px;display:grid;place-items:center;color:var(--fg2);font-size:11px">☐</div><div style="width:46px;display:grid;place-items:center;color:var(--fg2)">✕</div></div>
+  </div>
+  <div style="display:grid;grid-template-columns:270px 1fr;min-height:0">
+    <div style="background:var(--bg0);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 12px;gap:2px;overflow:hidden">
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-radius:8px;color:var(--fg3);margin-bottom:12px"><span>⌕</span>Search settings<span style="margin-left:auto;font-family:'Fira Code',monospace;font-size:10px">⌘F</span></div>
+      <sc-for list="{{ setNav }}" as="g" hint-placeholder-count="4">
+        <div style="padding:12px 12px 6px;font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--fg3)">{{ g.g }}</div>
+        <sc-for list="{{ g.items }}" as="i" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:10px;padding:7px 12px;border-radius:8px;background:{{ i.bg }};color:{{ i.fg }}">{{ i.l }}<sc-if value="{{ i.hasTag }}" hint-placeholder-val="{{ false }}"><span style="margin-left:auto;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--fg3);padding:1px 6px;border-radius:99px;background:var(--bg2)">{{ i.tag }}</span></sc-if></div>
+        </sc-for>
+      </sc-for>
+    </div>
+    <div style="overflow:hidden;padding:22px 40px;display:flex;flex-direction:column;gap:14px;max-width:980px;box-sizing:border-box">
+      <div style="border-bottom:1px solid var(--line);padding-bottom:12px"><h1 style="margin:0 0 4px;font-size:22px;font-weight:600;letter-spacing:-.01em">Agents</h1><div style="color:var(--fg2);font-size:14px">Manage AI agents, set a default, and customise commands.</div></div>
+      <div style="background:var(--bg0);border:1px solid var(--line);border-radius:14px;padding:14px 20px;display:flex;flex-direction:column;gap:12px">
+        <div style="display:flex;flex-direction:column;gap:12px"><div><div style="font-weight:600;font-size:14px">Default agent</div><div style="color:var(--fg2);font-size:12.5px;margin-top:3px">Default agent, command overrides and launch environment are client preferences. SSH and remote launches still validate host availability at run time.</div></div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            <span style="padding:7px 14px;border-radius:8px;border:1px solid var(--acc);background:var(--acc14);color:var(--fg);white-space:nowrap">✱ Claude ✓</span>
+            <span style="padding:7px 14px;border-radius:8px;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap">Auto</span><span style="padding:7px 14px;border-radius:8px;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap">&gt;_ No agent (blank terminal)</span><span style="padding:7px 14px;border-radius:8px;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap">✱ Claude Agent Teams</span><span style="padding:7px 14px;border-radius:8px;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap">◎ Codex</span><span style="padding:7px 14px;border-radius:8px;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap">✕ Grok</span><span style="padding:7px 14px;border-radius:8px;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap">▣ OpenCode</span><span style="padding:7px 14px;border-radius:8px;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap">✦ Gemini</span><span style="padding:7px 14px;border-radius:8px;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap">◇ Cursor</span>
+          </div>
+        </div>
+        <sc-for list="{{ agentRows }}" as="r" hint-placeholder-count="5">
+          <div style="display:flex;align-items:flex-start;gap:24px;border-top:1px solid var(--line);padding-top:12px"><div style="flex:1"><div style="font-weight:600;font-size:14px">{{ r.label }}</div><div style="color:var(--fg2);font-size:12.5px;margin-top:3px">{{ r.desc }}</div></div>
+            <sc-if value="{{ r.isToggle }}" hint-placeholder-val="{{ false }}"><span style="width:38px;height:22px;border-radius:11px;background:{{ r.tBg }};position:relative;display:inline-block;flex:none"><span style="position:absolute;top:3px;left:{{ r.knob }};width:16px;height:16px;border-radius:50%;background:#fff;transform:translateX(1px)"></span></span></sc-if>
+            <sc-if value="{{ r.isSeg }}" hint-placeholder-val="{{ false }}"><div style="display:flex;background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:3px;font-size:12px;flex:none"><sc-for list="{{ r.segs }}" as="s" hint-placeholder-count="2"><span style="padding:4px 12px;border-radius:6px;background:{{ s.bg }};color:{{ s.fg }}">{{ s.o }}</span></sc-for></div></sc-if>
+          </div>
+        </sc-for>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px"><span style="font-weight:600;font-size:15px">Installed</span><span style="white-space:nowrap;font-size:11px;padding:2px 8px;border-radius:99px;background:var(--bg3);border:1px solid var(--line);color:var(--fg2)">4 detected</span><span style="white-space:nowrap;margin-left:auto;color:var(--fg2);font-size:12.5px">↻ Refresh</span></div>
+      <div style="background:var(--bg0);border:1px solid var(--line);border-radius:14px;overflow:hidden">
+        <sc-for list="{{ installed }}" as="a" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:14px;padding:9px 18px;border-bottom:1px solid var(--line)"><span style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;background:var(--bg2);color:var(--acc)">{{ a.icon }}</span><div style="flex:1"><div style="font-weight:600">{{ a.name }}</div><div style="font-size:11.5px;color:var(--fg3);font-family:'Fira Code',monospace">{{ a.ver }}</div></div>
+            <div style="display:flex;background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:3px;font-size:12px"><span style="padding:4px 12px;border-radius:6px;background:var(--line2)">Enabled</span><span style="padding:4px 12px;color:var(--fg3)">Disabled</span></div>
+            <span style="padding:6px 14px;border-radius:8px;border:1px solid var(--line);background:{{ a.defBg }};color:{{ a.defFg }};font-size:12px;white-space:nowrap">{{ a.defLabel }}</span><span style="color:var(--fg3)">↗</span><span style="color:var(--fg3)">⌄</span></div>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:16px;padding:0 14px;background:var(--bg0);border-top:1px solid var(--line);font-size:11.5px;color:var(--fg2)"><span style="color:var(--acc)">✱</span><span style="color:var(--fg)">100% left 5h · 97% left 6d · 99% left Fable</span><span style="margin-left:auto;display:flex;gap:16px"><span>● On</span><span>4.00 GB</span><span>&gt;_ 9</span><span>⑂ 3</span></span></div>
+</div></div>
+
+</div>
+<p class="dv-next">Try next: "add Project Settings › Settly" · "switch to Graphite + teal" (or use Tweaks) · "show the Codex hover state instead" · "make the session interactive"</p>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;Ember&quot;,&quot;options&quot;:[&quot;Ember&quot;,&quot;Graphite&quot;],&quot;tsType&quot;:&quot;'Ember'|'Graphite'&quot;,&quot;section&quot;:&quot;Appearance&quot;},&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#f2b35b&quot;,&quot;options&quot;:[&quot;#f2b35b&quot;,&quot;#6fd6c8&quot;,&quot;#b79cf2&quot;,&quot;#ef8fa2&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Appearance&quot;},&quot;showUsage&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Session&quot;},&quot;showNewTabMenu&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Session&quot;}}">
+class Component extends DCLogic {
+  renderVals() {
+    const projects = ['Settly', 'nightcore', 'shiranami', 'shiroani'];
+    const projects2 = ['omniscribe', 'portfolio', 'vr-chat-invite-desktop', 'deskmate', 'szlak', 'mat-majka'];
+    const logLines = [
+      'build (windows-2022, win): success',
+      'build (macos-latest, mac): success',
+      'upload: success',
+      '',
+      '=== Windows native addon step ===',
+      'build (windows-2022, win)  Setup  2026-09-11T22:10:59Z ../node_modules/better-sqlite3 install$ prebuild-install || node-gyp rebuild --release',
+      'build (windows-2022, win)  Setup  2026-09-11T22:11:01Z apps/desktop install$ node-gyp rebuild',
+      'build (windows-2022, win)  Setup  2026-09-11T22:11:01Z apps/desktop install: gyp info using node-gyp@11.2.0',
+      "build (windows-2022, win)  Setup  2026-09-11T22:11:28Z apps/desktop install: gyp info spawn args '-Dnode_root_dir=C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\node-gyp\\\\Cache\\\\22.22.1'",
+    ];
+    const chips = [
+      { k: 'Model', v: 'Opus 5' }, { k: 'Ctx', v: '296.0k' }, { k: '⑂', v: 'master' }, { k: '', v: '+0 −0' }, { k: 'Thinking', v: 'xhigh' },
+      { k: 'In', v: '0.4 t/s' }, { k: 'Out', v: '155.0 t/s' }, { k: 'Total', v: '155.4 t/s' },
+      { k: 'Mem', v: '12.0G/24.0G' }, { k: 'Weekly', v: '2.0%' }, { k: 'Block', v: '3hr' }, { k: 'Reset', v: '1hr 59m' },
+    ];
+    const usage = [
+      { name: 'Session', reset: '1h 59m', pct: '96%', left: '96%' },
+      { name: 'Weekly', reset: '6d 17h', pct: '98%', left: '98%' },
+      { name: 'Fable', reset: '6d 17h', pct: '100%', left: '100%' },
+    ];
+    const teal = 'oklch(78% 0.12 180)', amber = 'oklch(80% 0.15 70)', grey = '#7c7c84', red = 'oklch(70% 0.15 25)';
+    const tasks = [
+      { title: 'Kirei deps but we already did…', sub: 'Drafting Discord release post', project: 'shiroani · master', agent: 'Opus 5', status: 'Running', age: '21h', color: teal },
+      { title: 'Migrate settings store to SQLite', sub: 'Step 3/5 — writing migration', project: 'deskmate · feat/sqlite', agent: 'Opus 5', status: 'Running', age: '42m', color: teal },
+      { title: 'Fix flaky e2e on Windows runner', sub: 'Waiting for CI', project: 'shiranami · master', agent: 'Sonnet', status: 'Running', age: '12m', color: teal },
+      { title: 'Rename Kirei → Nysia across repo', sub: 'Wants confirmation on 3 public API names', project: 'nightcore · rename', agent: 'Opus 5', status: 'Needs input', age: '8m', color: amber },
+      { title: 'Weekly dependency bump', sub: 'Queued by automation', project: 'Settly · master', agent: '—', status: 'Queued', age: '2m', color: grey },
+      { title: 'Portfolio: lighthouse regressions', sub: 'Build failed at typecheck', project: 'portfolio · master', agent: 'Sonnet', status: 'Failed', age: '3h', color: red },
+    ];
+    const settingsNavLabels = ['General', 'Appearance', 'Agents', 'Accounts & usage', 'Permissions', 'Keybindings', 'Automations', 'Advanced'];
+    const settingsNav = settingsNavLabels.map(l => ({ label: l, bg: l === 'Agents' ? '#1c1c20' : 'transparent', fg: l === 'Agents' ? '#fff' : '#c9c8c4' }));
+    const T = (on) => ({ toggle: true, toggleBg: on ? teal : '#2e2e33', knob: on ? '16px' : '2px' });
+    const settingsGroups = [
+      { title: 'Defaults', rows: [
+        { label: 'Default model', desc: 'Used when a project has no override', value: 'Opus 5' },
+        { label: 'Thinking effort', desc: 'Higher is slower and costs more', value: 'xhigh' },
+        { label: 'Permission mode', desc: 'Shift+Tab cycles per session', value: 'Bypass' },
+      ]},
+      { title: 'Behaviour', rows: [
+        { label: 'Session recaps', desc: 'Summarise goal, outcome and next action when an agent stops', ...T(true) },
+        { label: 'Auto-clear suggestion', desc: 'Suggest /clear when context passes 250k tokens', ...T(true) },
+        { label: 'Confirm destructive git', desc: 'Ask before force-push, reset --hard, branch delete', ...T(true) },
+      ]},
+      { title: 'Notifications', rows: [
+        { label: 'Needs-input alerts', desc: 'System notification when an agent is blocked on you', ...T(true) },
+        { label: 'Completion sound', desc: 'Play a chime when a task finishes', ...T(false) },
+      ]},
+    ];
+    // ── turn 2 ──
+    const themes = {
+      Ember: { bg0: '#090b10', bg1: '#0c0f15', bg2: '#11151d', bg3: '#161b25', line: '#1f2532', line2: '#2a3140', fg: '#dfe3ea', fg2: '#8b94a6', fg3: '#5c6577' },
+      Graphite: { bg0: '#0f0f11', bg1: '#141416', bg2: '#18181b', bg3: '#1c1c20', line: '#26262a', line2: '#2e2e33', fg: '#e6e4e0', fg2: '#a8a8b0', fg3: '#7c7c84' },
+    };
+    const th = themes[this.props.theme] ?? themes.Ember;
+    const acc = this.props.accent ?? '#f2b35b';
+    const themeVars = `--acc:${acc};--acc14:${acc}24;--acc35:${acc}59;--bg0:${th.bg0};--bg1:${th.bg1};--bg2:${th.bg2};--bg3:${th.bg3};--line:${th.line};--line2:${th.line2};--fg:${th.fg};--fg2:${th.fg2};--fg3:${th.fg3}`;
+    const showUsage = this.props.showUsage ?? true;
+    const showNewTabMenu = this.props.showNewTabMenu ?? true;
+    const tabs = [
+      { label: 'Kirei deps but we already did…', kind: 'agent', icon: '✱', active: true },
+      { label: 'pwsh · shiroani', kind: 'shell', icon: '>_', active: false },
+      { label: 'codex · deskmate', kind: 'agent', icon: '◎', active: false },
+      { label: 'wsl · szlak', kind: 'shell', icon: '>_', active: false },
+    ];
+    const newTabItems = [
+      { g: 'Agents', items: [{ icon: '✱', label: 'Claude', hint: 'default' }, { icon: '◎', label: 'Codex', hint: '' }, { icon: '✦', label: 'Gemini', hint: '' }, { icon: '▣', label: 'OpenCode', hint: '' }] },
+      { g: 'Terminals', items: [{ icon: '>_', label: 'PowerShell 7', hint: 'pwsh' }, { icon: '>_', label: 'Command Prompt', hint: 'cmd' }, { icon: '>_', label: 'WSL · Ubuntu', hint: 'bash' }, { icon: '>_', label: 'Git Bash', hint: '' }] },
+    ];
+    const providers = [
+      { icon: '✱', name: 'Claude', reset: 'Resets in 6d', hover: true, bars: [{ k: '5h', pct: '100%' }, { k: 'wk', pct: '97%' }, { k: 'Fable', pct: '99%' }] },
+      { icon: '◎', name: 'Codex', reset: 'Resets in 2h', hover: false, bars: [{ k: '5h', pct: '64%' }, { k: 'wk', pct: '81%' }] },
+    ];
+    const claudeDetail = [
+      { name: 'Session', pct: '100%', reset: '' }, { name: 'Weekly', pct: '97%', reset: 'Resets in 6d' }, { name: 'Fable', pct: '99%', reset: 'Resets in 6d' },
+    ];
+    const issues = [
+      { id: '#200', title: 'soft-deletable-tables-require-deleted-at: two unguarded singular-selector sites it cannot see', labels: ['enhancement'], updated: '7 days ago' },
+      { id: '#199', title: 'data-slot="agenda-show-more" ships with no consumer: the pager lookup it was added for was replaced', labels: ['bug'], updated: '7 days ago' },
+      { id: '#198', title: 'Sidebar biuro identity renders nothing while loading and disappears silently on error', labels: ['bug', 'design-adoption'], updated: '7 days ago' },
+      { id: '#197', title: 'PortalAccountRepository.findAccountsForFirma outlived the offboarding path it fronted', labels: ['bug'], updated: '7 days ago' },
+      { id: '#196', title: 'Contract.wymiarEtatu is unvalidated free text, so no working-time arithmetic can pro-rate a part-timer', labels: ['enhancement'], updated: '9 days ago' },
+      { id: '#114', title: 'Wayfinder map: attendance and working time (Czas pracy)', labels: ['wayfinder:map'], updated: '9 days ago' },
+      { id: '#161', title: 'HR export for PIP/ZUS inspections does not exist (part 1, the RODO account export, has shipped)', labels: ['enhancement'], updated: '9 days ago' },
+      { id: '#154', title: 'SME: odpowiedzi rodzicow na 52 pytania (ankiety Google Forms) — watek zbiorczy', labels: ['wayfinder:task'], updated: '9 days ago' },
+      { id: '#192', title: 'No vendor shell: nothing in the product can see across tenants', labels: ['enhancement'], updated: '15 days ago' },
+      { id: '#93', title: 'Wayfinder map: leave and absence module (urlopy i nieobecnosci)', labels: ['wayfinder:map'], updated: '49 days ago' },
+      { id: '#131', title: 'T17: SPEC-attendance assembly and sign-off', labels: ['wayfinder:grilling'], updated: '49 days ago' },
+    ];
+    const setNav = [
+      { g: 'AI capabilities', items: [{ l: 'Agents', on: true }, { l: 'AI provider accounts', tag: 'optional' }, { l: 'Orchestration' }, { l: 'Voice' }] },
+      { g: 'Set up', items: [{ l: 'Nysia account' }, { l: 'General' }, { l: 'Appearance' }, { l: 'Integrations' }] },
+      { g: 'Workflows', items: [{ l: 'Automations' }, { l: 'Git & source control' }, { l: 'Task sources' }, { l: 'Terminal' }, { l: 'Quick commands' }] },
+      { g: 'Projects', items: [{ l: 'Settly' }, { l: 'shiranami' }, { l: 'nightcore' }, { l: 'shiroani' }, { l: 'deskmate' }] },
+    ].map(g => ({ ...g, items: g.items.map(i => ({ ...i, bg: i.on ? 'var(--bg3)' : 'transparent', fg: i.on ? 'var(--fg)' : 'var(--fg2)', tag: i.tag ?? '', hasTag: !!i.tag })) }));
+    const agentChoices = ['Auto', '>_ No agent (blank terminal)', '✱ Claude ✓', '✱ Claude Agent Teams', '◎ Codex', '✕ Grok', '▣ OpenCode', '✦ Gemini', '◇ Cursor'].map(l => ({ l, sel: l.startsWith('✱ Claude ✓') }));
+    const agentRows = [
+      { label: 'Agent status hooks', desc: 'Shows working, waiting and done states in Nysia. Turn off to remove managed hooks.', kind: 'toggle', on: true },
+      { label: 'Auto-generate tab titles', desc: 'Derive short stable tab names from the first agent prompt. Manual renames always win.', kind: 'toggle', on: true },
+      { label: 'Keep computer awake', desc: 'Agent mode stays awake only while agents are working.', kind: 'seg', opts: ['On', 'Agent', 'Off'], sel: 'On' },
+      { label: 'Prompt cache timer', desc: 'Show a countdown in the sidebar after a Claude agent becomes idle, so you know when the cache expires.', kind: 'toggle', on: false },
+      { label: 'Agent permissions', desc: 'Launch agents with fewer permission prompts or with manual checks.', kind: 'seg', opts: ['Yolo', 'Manual'], sel: 'Yolo' },
+    ].map(r => ({ ...r, isToggle: r.kind === 'toggle', isSeg: r.kind === 'seg', tBg: r.on ? 'var(--acc)' : 'var(--line2)', knob: r.on ? '16px' : '2px', segs: (r.opts ?? []).map(o => ({ o, bg: o === r.sel ? 'var(--line2)' : 'transparent', fg: o === r.sel ? 'var(--fg)' : 'var(--fg2)' })) }));
+    const installed = [
+      { icon: '✱', name: 'Claude', ver: '2.1.263', def: true }, { icon: '◎', name: 'Codex', ver: '0.48.0', def: false }, { icon: '✦', name: 'Gemini', ver: '0.9.2', def: false }, { icon: '▣', name: 'OpenCode', ver: '1.2.7', def: false },
+    ].map(a => ({ ...a, defLabel: a.def ? '✓ Default' : 'Set default', defBg: a.def ? 'var(--acc14)' : 'transparent', defFg: a.def ? 'var(--acc)' : 'var(--fg2)' }));
+    return { themeVars, showUsage, showNewTabMenu, newTabItems, providers, claudeDetail, issues, setNav, agentRows, installed, projects, projects2, projectsAll: [...projects, ...projects2], logLines, chips, usage, tasks, settingsNav, settingsGroups };
+  }
+}
+</script>
+</body>
+</html>
