@@ -9,7 +9,7 @@ import { DEFAULT_ACCENT } from './themes';
  * 14%, `0x59` is 89/255 ≈ 35% — and the design mock produces them by string-appending the
  * alpha byte to the accent, which is what this reproduces.
  *
- * Doing it as `#rrggbbaa` rather than `color-mix()` matters: the result composites against
+ * Appending an alpha byte rather than mixing two colours matters: the result composites against
  * whatever is behind it, so the same token reads correctly over `bg0` chrome and over a
  * raised `bg2` popover without a second variant per surface.
  */
