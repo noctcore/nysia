@@ -167,6 +167,18 @@ export class XtermSurface implements TerminalSurface {
     this.#terminal?.resize(cols, rows);
   }
 
+  fit(): { readonly cols: number; readonly rows: number } | null {
+    const measured = this.#terminal?.fit();
+    if (!measured) {
+      return null;
+    }
+    // Remembered, so a pane resized while visible and then hidden reopens at the size the
+    // daemon already knows about rather than snapping back to the default.
+    this.#cols = measured.cols;
+    this.#rows = measured.rows;
+    return measured;
+  }
+
   focus(): void {
     this.#terminal?.focus();
   }
@@ -261,6 +273,13 @@ export interface XtermLike {
   /** `done` fires when the bytes have been parsed and painted, not when `write` returns. */
   write(data: Uint8Array | string, done?: () => void): void;
   resize(cols: number, rows: number): void;
+  /**
+   * Resize to fill the host, and report the size in cells.
+   *
+   * `undefined` when the terminal cannot measure itself — a host with no layout yet, which
+   * is the state during the first frame after mounting.
+   */
+  fit(): { readonly cols: number; readonly rows: number } | undefined;
   focus(): void;
   dispose(): void;
   onData(handler: (data: string) => void): { dispose(): void };

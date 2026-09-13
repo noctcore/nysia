@@ -229,10 +229,8 @@ export class DaemonStore implements Store {
     if (!tab) {
       return;
     }
-    const stream = streamIdFor(tab.handle, this.#order);
-    if (stream !== null) {
-      this.#router.surface(stream).resize(cols, rows);
-    }
+    // The surface has already sized itself — it is what measured the host — so this only
+    // carries the answer to the daemon, which owns the PTY.
     await this.#bridge.invoke('terminal_resize', {
       request: { handle: tab.handle, cols, rows },
     });

@@ -110,6 +110,7 @@ function stubTerminals(): TerminalFactory {
     open: () => {},
     write: (_data, done) => done?.(),
     resize: () => {},
+    fit: () => undefined,
     focus: () => {},
     dispose: () => {},
     onData: () => ({ dispose: () => {} }),

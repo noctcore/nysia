@@ -38,6 +38,27 @@ export function TerminalView() {
     surface.show(element);
     surface.focus();
 
+    // The daemon sizes the PTY, so a pane that resized without telling it leaves the shell
+    // wrapping at the old width — the commonest visible symptom of a terminal that is
+    // almost right. Measuring is the surface's job (only it knows its cell metrics); this
+    // only notices that the host changed and passes the answer on.
+    let last = '';
+    const remeasure = () => {
+      const fitted = surface.fit();
+      if (fitted === null) {
+        return;
+      }
+      const size = `${fitted.cols}x${fitted.rows}`;
+      if (size === last) {
+        return;
+      }
+      last = size;
+      void store.resize(activeTab, fitted.cols, fitted.rows).catch(() => undefined);
+    };
+    remeasure();
+    const observer = new ResizeObserver(remeasure);
+    observer.observe(element);
+
     const stopInput = surface.onInput((data) => {
       // A failed keystroke gets no notice of its own: the disconnect that caused it already
       // has one, and one notice per character typed while the daemon is down would bury
@@ -46,6 +67,7 @@ export function TerminalView() {
     });
 
     return () => {
+      observer.disconnect();
       stopInput();
       // Hidden, not disposed. The surface belongs to the router, which keeps it for as long
       // as the session does — so a tab switched away from and back keeps its place in the

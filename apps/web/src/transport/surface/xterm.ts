@@ -1,3 +1,4 @@
+import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
@@ -84,6 +85,11 @@ export const createXterm: TerminalFactory = ({
     allowProposedApi: true,
   });
 
+  // The addon that knows how many cells fit in the host. It is loaded for every renderer,
+  // because measuring is not a WebGL concern.
+  const fit = new FitAddon();
+  terminal.loadAddon(fit);
+
   if (renderer === 'webgl') {
     const addon = new WebglAddon();
     // §7.3: dispose and fall back to DOM. Disposing the addon here rather than leaving it
@@ -96,5 +102,17 @@ export const createXterm: TerminalFactory = ({
     terminal.loadAddon(addon);
   }
 
-  return terminal;
+  return Object.assign(terminal, {
+    fit: (): { cols: number; rows: number } | undefined => {
+      // `proposeDimensions` returns undefined before the host has a layout, which is the
+      // state on the first frame after mounting. Calling `fit()` then would resize the
+      // terminal to NaN cells and the daemon would be told a size no PTY can take.
+      const proposed = fit.proposeDimensions();
+      if (!proposed || !Number.isFinite(proposed.cols) || !Number.isFinite(proposed.rows)) {
+        return undefined;
+      }
+      fit.fit();
+      return { cols: proposed.cols, rows: proposed.rows };
+    },
+  });
 };
