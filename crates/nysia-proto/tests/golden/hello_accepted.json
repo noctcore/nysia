@@ -1,0 +1,9 @@
+{
+  "daemonIdentity": {
+    "appVersion": "0.1.0",
+    "launchNonce": "9f8e7d6c-5b4a-4392-8180-7f6e5d4c3b2a",
+    "pid": 4242,
+    "startedAtMs": 1757721600000
+  },
+  "ok": true
+}

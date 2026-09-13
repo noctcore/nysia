@@ -1,0 +1,12 @@
+{
+  "ok": false,
+  "reason": {
+    "attachable": {
+      "max": 1,
+      "min": 1
+    },
+    "daemon": 1,
+    "kind": "unsupported_version"
+  },
+  "retryable": false
+}

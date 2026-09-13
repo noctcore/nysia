@@ -1,0 +1,14 @@
+{
+  "bytes": 524288,
+  "credit": "grant",
+  "handle": "sess_0e2fa1f4-4f3e-4c5f-9f2a-1b2c3d4e5f60",
+  "window": {
+    "ackBatch": 196608,
+    "chunk": 49152,
+    "pendingCap": 262144,
+    "perStreamInitial": 524288,
+    "perStreamMax": 2097152,
+    "totalInitial": 2097152,
+    "totalMax": 8388608
+  }
+}
