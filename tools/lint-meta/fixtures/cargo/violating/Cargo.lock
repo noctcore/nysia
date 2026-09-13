@@ -6,7 +6,7 @@ version = 4
 name = "nysia"
 version = "0.0.0"
 dependencies = [
- "tauri",
+ "nysia-desktop",
 ]
 
 [[package]]
@@ -24,6 +24,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nysia-hook"
+version = "0.0.0"
+dependencies = [
+ "tauri",
+]
+
+[[package]]
 name = "nysia-proto"
 version = "0.0.0"
 dependencies = [
@@ -32,4 +39,8 @@ dependencies = [
 
 [[package]]
 name = "tauri"
+version = "0.0.0"
+
+[[package]]
+name = "third"
 version = "0.0.0"

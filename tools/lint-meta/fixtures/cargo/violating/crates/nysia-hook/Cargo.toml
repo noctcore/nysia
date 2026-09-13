@@ -1,0 +1,9 @@
+# Rule (b): a rename under a quoted table header. The key says `ui`; the crate is tauri.
+[package]
+name = "nysia-hook"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies."ui"]
+path = "../../vendor/tauri"
+package = "tauri"

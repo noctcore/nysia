@@ -4,8 +4,10 @@
 resolver = "3"
 members = [
   "vendor/tauri",
+  "vendor/third",
   "crates/nysia-proto",
   "crates/nysia-core",
   "crates/nysia",
+  "crates/nysia-hook",
   "apps/desktop/src-tauri",
 ]

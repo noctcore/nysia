@@ -415,22 +415,57 @@ export function noTauriInRustCrates(workspace: CargoWorkspace): Violation[] {
 }
 
 /**
- * Rule (c): `nysia-core` must not *reach* tauri through anything.
+ * Rule (c): no crate outside `apps/desktop` may *reach* tauri through anything.
  *
  * Rule (b) names the crate that declares the dependency. This one says what it costs, by
  * walking the resolved graph and reporting the shortest chain — so the reviewer of a
  * `nysia-proto` change can see that it has just put the UI toolkit inside the runtime.
  *
- * The graph is cargo's own resolution, so this holds for a chain through a third-party
- * crate too, not only through another Nysia one.
+ * Every non-allowlisted member is a seed, not `nysia-core` alone. Seeding from core only
+ * left the daemon binary able to reach tauri through `nysia-desktop`, or through any
+ * non-member crate, with nothing tripping: rule (b) sees only direct declarations, and this
+ * rule was not looking. That is the same hole round one found, one hop further out.
+ *
+ * A chain through an allowlisted crate still counts. `apps/desktop` may link the UI
+ * toolkit; a crate that depends on `apps/desktop` has linked it too.
  */
-export function noTauriReachingCore(workspace: CargoWorkspace): Violation[] {
-  const core = workspace.members.find((m) => m.name === 'nysia-core');
-  if (core === undefined) return [];
+export function noTauriReachingRustCrates(workspace: CargoWorkspace): Violation[] {
+  const violations: Violation[] = [];
 
-  // Breadth-first, so the chain reported is the shortest one.
-  const queue: string[][] = [[core.id]];
-  const seen = new Set<string>([core.id]);
+  for (const seed of workspace.members) {
+    if (TAURI_ALLOWLIST.some((prefix) => seed.manifestPath.startsWith(prefix))) continue;
+
+    const chain = shortestChainToTauri(workspace, seed.id);
+    // `[seed, tauri]` is a direct declaration, which is rule (b)'s to report. This rule
+    // exists for everything longer.
+    if (chain === undefined || chain.length < 3) continue;
+
+    const names = chain.map((id) => workspace.packages.get(id)?.name ?? id).join(' -> ');
+    violations.push({
+      rule: 'no-tauri-reaching-rust-crates',
+      file: seed.manifestPath,
+      line: 0,
+      message: `${names}; a crate outside apps/desktop must not link the UI toolkit (D-1)`,
+    });
+  }
+
+  return violations;
+}
+
+/**
+ * The shortest path from `seedId` to any tauri package, or `undefined` if there is none.
+ *
+ * Breadth-first, and with its own `seen` set per seed. Sharing one set across seeds would
+ * be faster and wrong: a tauri package first reached by a crate that declares it directly
+ * would be marked seen, and the crate that reaches the same package through two hops would
+ * then be passed over in silence.
+ */
+function shortestChainToTauri(
+  workspace: CargoWorkspace,
+  seedId: string,
+): readonly string[] | undefined {
+  const queue: string[][] = [[seedId]];
+  const seen = new Set<string>([seedId]);
 
   while (queue.length > 0) {
     const chain = queue.shift();
@@ -444,29 +479,12 @@ export function noTauriReachingCore(workspace: CargoWorkspace): Violation[] {
       const next = workspace.packages.get(nextId);
       if (next === undefined) continue;
 
-      if (isTauriPackage(next.name)) {
-        // The direct case is rule (b)'s to report; this rule exists for the chain.
-        if (chain.length > 1) {
-          const names = [...chain, nextId]
-            .map((id) => workspace.packages.get(id)?.name ?? id)
-            .join(' -> ');
-          const via = workspace.packages.get(tail);
-          return [
-            {
-              rule: 'no-tauri-reaching-core',
-              file: via?.manifestPath ?? core.manifestPath,
-              line: 0,
-              message: `${names}; the runtime must not link the UI toolkit (D-1)`,
-            },
-          ];
-        }
-        continue;
-      }
+      if (isTauriPackage(next.name)) return [...chain, nextId];
       queue.push([...chain, nextId]);
     }
   }
 
-  return [];
+  return undefined;
 }
 
 /**
@@ -521,7 +539,7 @@ export function runCargoRules(root: string, includeFixtures = false): Violation[
   const workspace = loadCargoWorkspace(root);
   return [
     ...noTauriInRustCrates(workspace),
-    ...noTauriReachingCore(workspace),
+    ...noTauriReachingRustCrates(workspace),
     ...noUnknownCrates(walk(root, includeFixtures), workspace),
   ];
 }

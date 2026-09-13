@@ -147,8 +147,8 @@ describe('the cargo dependency rules', () => {
     // and a rename under a quoted table header. The hand-written parser saw neither.
     expect(byRule('no-tauri-in-rust-crates')).toEqual([
       // Reported for declaring tauri...
+      'crates/nysia-hook/Cargo.toml',
       'crates/nysia-proto/Cargo.toml',
-      'crates/nysia/Cargo.toml',
       // ...and this one for being invisible to cargo at all; see the next test.
       'crates/orphan/Cargo.toml',
     ]);
@@ -156,10 +156,19 @@ describe('the cargo dependency rules', () => {
   });
 
   it('name the transitive chain through a crate whose [package] carries a comment', () => {
+    const chains = runCargoRules(fixture('cargo/violating'))
+      .filter((v) => v.rule === 'no-tauri-reaching-rust-crates')
+      .map((v) => v.message);
+    expect(chains.some((m) => m.includes('nysia-core -> nysia-proto -> tauri'))).toBe(true);
+  });
+
+  it('seed the reach search from every crate, not from nysia-core alone', () => {
+    // The daemon binary reaching tauri through apps/desktop. Its manifest never names
+    // tauri, so rule (b) is blind to it, and a search seeded from core alone never looked.
     const chain = runCargoRules(fixture('cargo/violating')).find(
-      (v) => v.rule === 'no-tauri-reaching-core',
+      (v) => v.rule === 'no-tauri-reaching-rust-crates' && v.file === 'crates/nysia/Cargo.toml',
     );
-    expect(chain?.message).toContain('nysia-core -> nysia-proto -> tauri');
+    expect(chain?.message).toContain('nysia -> nysia-desktop -> tauri');
   });
 
   it('report a crate cargo does not know about rather than skipping it', () => {
