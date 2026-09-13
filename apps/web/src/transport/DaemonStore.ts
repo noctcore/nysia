@@ -56,10 +56,12 @@ import type { TerminalRouter } from './terminals';
  *
  * ## Every failure reaches the user
  *
- * `runCommand` only surfaces `StoreCommandError`; anything else reaches `console.error`,
- * where nobody sees it. A socket closing mid-command is the likeliest real failure in this
- * whole file, so every path out of it — including the reconnect loop — goes through
- * {@link DaemonStore.fail}, which records *and* rejects.
+ * `routeCommands` treats a `StoreCommandError` as an expected outcome the provider has
+ * already written into `snapshot.errors`, and anything else as a provider bug it reports
+ * through `unexpectedFailures`. A socket closing mid-command is the likeliest real failure
+ * in this whole file and is emphatically not a bug, so every path out of it — including the
+ * reconnect loop — goes through {@link DaemonStore.fail}, which records *and* rejects with
+ * the right type.
  */
 export class DaemonStore implements Store {
   #snapshot: StoreSnapshot = emptySnapshot('connecting');

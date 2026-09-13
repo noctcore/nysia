@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react';
+import { useContext, useEffect, useRef } from 'react';
 
-import { useSnapshot, useStore } from '../store/useStore';
+import { useSnapshot } from '../store/hooks';
+import { StoreContext } from '../store/StoreContext';
 import { DaemonStore } from './DaemonStore';
 
 /**
@@ -20,7 +21,12 @@ import { DaemonStore } from './DaemonStore';
  * the chrome for anyone working on it without a daemon.
  */
 export function TerminalView() {
-  const store = useStore();
+  // `StoreContext` directly, rather than `useCommands()`. The hook module deliberately keeps
+  // the raw provider private so that no chrome component can reach a promise-returning
+  // command and drop it — but what this needs is not a command at all. It is the provider's
+  // own terminal router, and this component is part of the provider's implementation rather
+  // than a consumer of it. `useCommands()` cannot supply that and should not learn how to.
+  const store = useContext(StoreContext);
   const { activeTab } = useSnapshot();
   const host = useRef<HTMLDivElement>(null);
 

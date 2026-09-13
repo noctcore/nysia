@@ -10,8 +10,9 @@
 //!    reason than style: a panic inside one unwinds across wry's `extern "C"` boundary and
 //!    becomes `abort()` — the whole app dies with no message.
 //! 3. **`try_state`, never `state`.** `state()` panics when the state is absent, and a
-//!    panic in a command is the `abort()` above. `try_state` returns `None` and the command
-//!    answers with a [`CommandFailure`] the user can read.
+//!    panic in a command is the `abort()` above. Every command below takes an `AppHandle`
+//!    and resolves the client through [`client`], which calls `try_state` and turns a
+//!    missing one into a [`CommandFailure`] the user can read.
 //!
 //! Every failure is a `CommandFailure` rather than a bare string, because the webview turns
 //! it into a `StoreCommandError` — the one rejection type the store surfaces to the user.
@@ -22,8 +23,8 @@ use nysia_proto::handshake::DaemonIdentity;
 use nysia_proto::identity::SessionHandle;
 use nysia_proto::session::{SessionClose, SessionCreate, SessionList, SessionSummary};
 use nysia_proto::terminal::{TerminalResize, TerminalSend};
-use tauri::State;
 use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::{AppHandle, Manager};
 
 use crate::channel::framing::StreamId;
 use crate::daemon::{CommandFailure, DaemonError};
@@ -33,8 +34,15 @@ use crate::state::Client;
 type Failed<T> = Result<T, CommandFailure>;
 
 /// Pull the managed client out of Tauri's state without panicking.
-fn client<'a>(app: &'a State<'a, Client>) -> &'a Client {
-    app.inner()
+///
+/// `try_state`, never `state`. `state()` panics when the state is absent, and a panic in a
+/// command unwinds across wry's `extern "C"` boundary and becomes `abort()` — the whole
+/// app dies with no message (traps register #2). This returns an error the user can read
+/// instead, which is a state that should never happen and must still not be fatal.
+fn client(app: &AppHandle) -> Result<Client, DaemonError> {
+    app.try_state::<Client>()
+        .map(|state| state.inner().clone())
+        .ok_or_else(|| DaemonError::Io("the window started without a daemon client".to_owned()))
 }
 
 /// Run `work` on the blocking pool.
@@ -64,8 +72,8 @@ where
 ///
 /// Every [`DaemonError`], flattened to a [`CommandFailure`] the webview can show.
 #[tauri::command]
-pub async fn daemon_connect(app: State<'_, Client>) -> Failed<DaemonIdentity> {
-    let client = client(&app).clone();
+pub async fn daemon_connect(app: AppHandle) -> Failed<DaemonIdentity> {
+    let client = client(&app)?;
     blocking(move || client.connect()).await
 }
 
@@ -75,8 +83,8 @@ pub async fn daemon_connect(app: State<'_, Client>) -> Failed<DaemonIdentity> {
 ///
 /// Never fails — `Ok(None)` is "not connected", which is a state rather than a failure.
 #[tauri::command]
-pub async fn daemon_status(app: State<'_, Client>) -> Failed<Option<DaemonIdentity>> {
-    let client = client(&app).clone();
+pub async fn daemon_status(app: AppHandle) -> Failed<Option<DaemonIdentity>> {
+    let client = client(&app)?;
     blocking(move || Ok(client.identity())).await
 }
 
@@ -91,8 +99,8 @@ pub async fn daemon_status(app: State<'_, Client>) -> Failed<Option<DaemonIdenti
 ///
 /// Never fails: a dropped connection is the answer, not an error.
 #[tauri::command]
-pub async fn daemon_watch(app: State<'_, Client>) -> Failed<()> {
-    let client = client(&app).clone();
+pub async fn daemon_watch(app: AppHandle) -> Failed<()> {
+    let client = client(&app)?;
     blocking(move || {
         client.wait_for_disconnect();
         Ok(())
@@ -110,8 +118,8 @@ pub async fn daemon_watch(app: State<'_, Client>) -> Failed<()> {
 ///
 /// [`CommandFailure`] if the daemon is unreachable or refuses.
 #[tauri::command]
-pub async fn session_list(app: State<'_, Client>) -> Failed<Vec<SessionSummary>> {
-    let client = client(&app).clone();
+pub async fn session_list(app: AppHandle) -> Failed<Vec<SessionSummary>> {
+    let client = client(&app)?;
     blocking(
         move || match client.request(RequestPayload::SessionList(SessionList {}))? {
             ResponsePayload::SessionList { sessions } => Ok(sessions),
@@ -128,11 +136,8 @@ pub async fn session_list(app: State<'_, Client>) -> Failed<Vec<SessionSummary>>
 /// [`CommandFailure`] carrying the daemon's own `nextSteps` when the shell will not
 /// start — "pwsh is not on PATH" and what to do about it, rather than a status code.
 #[tauri::command]
-pub async fn session_create(
-    app: State<'_, Client>,
-    request: SessionCreate,
-) -> Failed<SessionHandle> {
-    let client = client(&app).clone();
+pub async fn session_create(app: AppHandle, request: SessionCreate) -> Failed<SessionHandle> {
+    let client = client(&app)?;
     blocking(
         move || match client.request(RequestPayload::SessionCreate(request))? {
             ResponsePayload::SessionCreate(created) => Ok(created.handle),
@@ -148,8 +153,8 @@ pub async fn session_create(
 ///
 /// [`CommandFailure`] if the daemon refuses or the session is already gone.
 #[tauri::command]
-pub async fn session_close(app: State<'_, Client>, handle: SessionHandle) -> Failed<()> {
-    let client = client(&app).clone();
+pub async fn session_close(app: AppHandle, handle: SessionHandle) -> Failed<()> {
+    let client = client(&app)?;
     blocking(move || {
         client.forget(&handle);
         match client.request(RequestPayload::SessionClose(SessionClose { handle }))? {
@@ -174,11 +179,8 @@ pub async fn session_close(app: State<'_, Client>, handle: SessionHandle) -> Fai
 ///
 /// [`CommandFailure`] if the client is not connected.
 #[tauri::command]
-pub async fn terminal_attach(
-    app: State<'_, Client>,
-    channel: Channel<InvokeResponseBody>,
-) -> Failed<()> {
-    let client = client(&app).clone();
+pub async fn terminal_attach(app: AppHandle, channel: Channel<InvokeResponseBody>) -> Failed<()> {
+    let client = client(&app)?;
     blocking(move || client.attach_channel(channel)).await
 }
 
@@ -192,8 +194,8 @@ pub async fn terminal_attach(
 ///
 /// [`CommandFailure`] if the client is not connected.
 #[tauri::command]
-pub async fn terminal_ack(app: State<'_, Client>, stream: StreamId, bytes: u32) -> Failed<()> {
-    let client = client(&app).clone();
+pub async fn terminal_ack(app: AppHandle, stream: StreamId, bytes: u32) -> Failed<()> {
+    let client = client(&app)?;
     blocking(move || client.rendered(stream, bytes)).await
 }
 
@@ -203,8 +205,8 @@ pub async fn terminal_ack(app: State<'_, Client>, stream: StreamId, bytes: u32) 
 ///
 /// [`CommandFailure`] if the daemon refuses or the session is gone.
 #[tauri::command]
-pub async fn terminal_send(app: State<'_, Client>, request: TerminalSend) -> Failed<()> {
-    let client = client(&app).clone();
+pub async fn terminal_send(app: AppHandle, request: TerminalSend) -> Failed<()> {
+    let client = client(&app)?;
     blocking(
         move || match client.request(RequestPayload::TerminalSend(request))? {
             ResponsePayload::TerminalSend => Ok(()),
@@ -220,8 +222,8 @@ pub async fn terminal_send(app: State<'_, Client>, request: TerminalSend) -> Fai
 ///
 /// [`CommandFailure`] if the daemon refuses or the session is gone.
 #[tauri::command]
-pub async fn terminal_resize(app: State<'_, Client>, request: TerminalResize) -> Failed<()> {
-    let client = client(&app).clone();
+pub async fn terminal_resize(app: AppHandle, request: TerminalResize) -> Failed<()> {
+    let client = client(&app)?;
     blocking(
         move || match client.request(RequestPayload::TerminalResize(request))? {
             ResponsePayload::TerminalResize => Ok(()),
