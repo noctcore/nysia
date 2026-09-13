@@ -1,0 +1,35 @@
+{
+  "name": "nysia",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.2",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @nysia/desktop dev",
+    "dev:web": "pnpm --filter @nysia/web dev",
+    "build": "pnpm --filter @nysia/web build",
+    "build:app": "pnpm --filter @nysia/desktop build",
+    "typecheck": "tsc -p tsconfig.json && pnpm -r --if-present typecheck",
+    "lint": "eslint . && node tools/lint-meta/src/cli.ts",
+    "test": "vitest run",
+    "ts-drift": "node scripts/ts-drift.ts",
+    "prove:ts-drift": "node scripts/prove-ts-drift.ts",
+    "prove:lint-meta": "node scripts/prove-lint-meta.ts",
+    "prove:eslint-bans": "node scripts/prove-eslint-bans.ts",
+    "prove": "pnpm prove:ts-drift && pnpm prove:lint-meta && pnpm prove:eslint-bans"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.19.0",
+    "eslint": "10.10.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.6",
+    "globals": "17.12.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.70.0",
+    "vitest": "5.0.0"
+  }
+}
