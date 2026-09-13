@@ -45,15 +45,26 @@ export function useSnapshot(): StoreSnapshot {
 }
 
 /**
- * Failures that escaped a provider without being wrapped.
+ * Failures that escaped a provider without being wrapped, and the way to dismiss one.
  *
  * Read separately from the snapshot because they are a statement about the provider rather
  * than part of its state — see `unexpectedFailures.ts`.
+ *
+ * Dismissal comes back with the list rather than being fetched off the singleton at the
+ * call site. That was the shape this package spent a PR removing everywhere else: a
+ * component reading through a hook and then reaching past it for the object to write to is
+ * two routes to one thing, and the second is the one that gets copied.
  */
-export function useUnexpectedFailures(): readonly StoreError[] {
-  return useSyncExternalStore(
+export interface UnexpectedFailures {
+  readonly failures: readonly StoreError[];
+  dismiss(id: string): void;
+}
+
+export function useUnexpectedFailures(): UnexpectedFailures {
+  const failures = useSyncExternalStore(
     unexpectedFailures.subscribe,
     unexpectedFailures.getSnapshot,
     unexpectedFailures.getSnapshot,
   );
+  return { failures, dismiss: unexpectedFailures.dismiss };
 }
