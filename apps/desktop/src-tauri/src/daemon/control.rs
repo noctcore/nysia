@@ -45,11 +45,8 @@ impl Control {
         let path = endpoint::endpoint()?;
         let socket = endpoint::open(&path)?;
         let mut reader = BufReader::new(socket);
-        let identity = endpoint::handshake(
-            &mut reader,
-            ClientRole::Control,
-            &endpoint::client_id(ClientRole::Control)?,
-        )?;
+        let identity =
+            endpoint::handshake(&mut reader, ClientRole::Control, &endpoint::client_id()?)?;
 
         let (calls, inbox) = mpsc::channel::<Call>();
         let worker = thread::Builder::new()
@@ -62,6 +59,29 @@ impl Control {
             worker,
             identity,
         })
+    }
+
+    /// A control plane with no socket behind it, for tests that need a `Connected` to exist.
+    ///
+    /// Every request it is handed fails with [`DaemonError::Disconnected`], because the
+    /// worker it would queue to was never started — which is exactly what a caller should
+    /// see from a connection that is not really there.
+    #[cfg(test)]
+    pub fn detached() -> Self {
+        let (calls, inbox) = mpsc::channel::<Call>();
+        drop(inbox);
+        Self {
+            calls,
+            worker: None,
+            identity: DaemonIdentity {
+                pid: 0,
+                started_at_ms: 0,
+                launch_nonce: "0e2fa1f4-4f3e-4c5f-9f2a-1b2c3d4e5f60"
+                    .parse()
+                    .expect("a well-formed nonce"),
+                app_version: "0.1.0".to_owned(),
+            },
+        }
     }
 
     /// Who answered the handshake.

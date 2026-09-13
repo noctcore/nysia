@@ -105,12 +105,21 @@ impl StreamTable {
     }
 }
 
+/// Which connection a message is about.
+///
+/// Handed to a reader thread so that when it finally ends — possibly long after it was
+/// superseded, because a parked read cannot be interrupted on Windows — it can say *which*
+/// connection died rather than tearing down whatever happens to be live.
+type Generation = u64;
+
 /// Everything one connection owns.
 struct Connected {
     control: Control,
     /// `None` until the webview has handed over its `Channel`.
     stream: Option<Stream>,
     identity: DaemonIdentity,
+    /// Which connection this is, counting from one for the life of the window.
+    generation: Generation,
 }
 
 /// The managed state every Tauri command reaches through `try_state`.
@@ -126,6 +135,8 @@ pub struct Client {
     /// while the webview's view of which pane is which did not, and the two would disagree
     /// about the same session.
     table: Arc<Mutex<StreamTable>>,
+    /// The generation of the next connection, so a superseded reader can be recognised.
+    next_generation: Arc<Mutex<Generation>>,
     /// Signalled whenever the connection is torn down, so [`Self::wait_for_disconnect`] can
     /// block instead of polling. A condvar rather than a channel because there may be more
     /// than one waiter and every one of them wants the same edge.
@@ -138,6 +149,7 @@ impl Client {
         Self {
             inner: Arc::new(Mutex::new(None)),
             table: Arc::new(Mutex::new(StreamTable::new())),
+            next_generation: Arc::new(Mutex::new(1)),
             dropped: Arc::new((Mutex::new(0), Condvar::new())),
         }
     }
@@ -155,10 +167,12 @@ impl Client {
 
         let control = Control::connect()?;
         let identity = control.identity().clone();
+        let generation = self.take_generation();
         *held = Some(Connected {
             control,
             stream: None,
             identity: identity.clone(),
+            generation,
         });
         Ok(identity)
     }
@@ -222,11 +236,22 @@ impl Client {
         };
 
         let mut reader = std::io::BufReader::new(socket);
-        endpoint::handshake(
-            &mut reader,
-            ClientRole::Stream,
-            &endpoint::client_id(ClientRole::Stream)?,
-        )?;
+        endpoint::handshake(&mut reader, ClientRole::Stream, &endpoint::client_id()?)?;
+
+        // **Every id this window held is void.** Proto scopes a `StreamId` to one stream
+        // connection — "neither id means anything on the other's connection" — so ids
+        // learned over the connection being replaced describe nothing here. Keeping them
+        // was how a reconnect left every existing pane silent for the life of the process:
+        // `attach_session` answered from the table without a round trip, the daemon was
+        // never asked to route anything on the new connection, and the chrome said ready.
+        if let Ok(mut table) = self.table.lock() {
+            *table = StreamTable::new();
+        }
+
+        let generation = {
+            let held = self.lock()?;
+            held.as_ref().ok_or(DaemonError::Disconnected)?.generation
+        };
 
         let notify = self.clone();
         let stream = Stream::spawn(
@@ -234,7 +259,7 @@ impl Client {
             Arc::clone(&self.table),
             Dispatcher::spawn(channel),
             CreditWindow::DEFAULT,
-            Box::new(move || notify.disconnect()),
+            Box::new(move || notify.disconnect_generation(generation)),
         )?;
 
         // Replacing the old reader drops it, which signals it and returns — see `Stream`'s
@@ -346,12 +371,81 @@ impl Client {
     pub fn disconnect(&self) {
         let taken = self.lock().ok().and_then(|mut held| held.take());
         drop(taken);
+        self.announce_disconnect();
+    }
 
+    /// Tear the connection down **only if** it is still the one `generation` names.
+    ///
+    /// What a dying reader calls. A reader superseded by a webview reload keeps its socket
+    /// until the next byte or EOF — a parked read cannot be interrupted on Windows — so it
+    /// can run this long after the window has moved on. Without the check it would take
+    /// whichever connection was live, and a reload followed by one frame on the old pipe was
+    /// enough to knock out a healthy one with no daemon fault anywhere.
+    pub fn disconnect_generation(&self, generation: Generation) {
+        let taken = self.lock().ok().and_then(|mut held| {
+            let live = held.as_ref().is_some_and(|c| c.generation == generation);
+            if live { held.take() } else { None }
+        });
+
+        // Nothing to announce when the generation did not match: the connection that died
+        // was already gone, and waking `daemon_watch` would have the store reconnect away
+        // from a connection that is working.
+        if taken.is_some() {
+            drop(taken);
+            self.announce_disconnect();
+        }
+    }
+
+    /// Wake everything waiting on a disconnect.
+    fn announce_disconnect(&self) {
         let (count, signal) = &*self.dropped;
         if let Ok(mut current) = count.lock() {
             *current = current.wrapping_add(1);
         }
         signal.notify_all();
+    }
+
+    /// Pretend a connection of `generation` is live, for tests that have no daemon.
+    ///
+    /// Only the generation is real; there is no control plane behind it. That is enough for
+    /// the one thing these tests ask — whether a dying reader is allowed to tear this down.
+    #[cfg(test)]
+    fn pretend_connected(&self, generation: Generation) {
+        if let Ok(mut held) = self.lock() {
+            *held = Some(Connected {
+                control: Control::detached(),
+                stream: None,
+                identity: DaemonIdentity {
+                    pid: std::process::id(),
+                    started_at_ms: 0,
+                    launch_nonce: "0e2fa1f4-4f3e-4c5f-9f2a-1b2c3d4e5f60"
+                        .parse()
+                        .expect("a well-formed nonce"),
+                    app_version: "0.1.0".to_owned(),
+                },
+                generation,
+            });
+        }
+    }
+
+    /// How many times a connection has been torn down, which is what `daemon_watch` waits on.
+    #[cfg(test)]
+    fn disconnect_count(&self) -> u64 {
+        let (count, _) = &*self.dropped;
+        count.lock().map(|held| *held).unwrap_or_default()
+    }
+
+    /// The generation for a connection being opened now.
+    fn take_generation(&self) -> Generation {
+        let Ok(mut next) = self.next_generation.lock() else {
+            // A poisoned counter can only make generations collide, which costs a
+            // superseded reader's tear-down check its precision. Refusing to connect over
+            // it would be the larger failure.
+            return 0;
+        };
+        let generation = *next;
+        *next = next.wrapping_add(1);
+        generation
     }
 
     /// The lock, with a poisoned mutex reported rather than panicked on.
@@ -411,6 +505,56 @@ mod tests {
         // `session_close` calls this, and a window closing during a disconnect is ordinary.
         let client = Client::new();
         client.detach_session(&handle(1));
+    }
+
+    /// HIGH 3: a reader that dies after being superseded must not take the live connection.
+    ///
+    /// Constructed the way it actually happens — a webview reload replaces the reader, the
+    /// old one keeps its socket because a parked read cannot be interrupted on Windows, and
+    /// it finally runs its callback when the abandoned pipe sees a byte or an EOF. The
+    /// generation it was given belongs to a connection that is already gone.
+    #[test]
+    fn a_superseded_reader_cannot_tear_down_the_connection_that_replaced_it() {
+        let client = Client::new();
+
+        // Two connections' worth of generations, as `connect` would hand out.
+        let superseded = client.take_generation();
+        let live = client.take_generation();
+        assert_ne!(superseded, live);
+
+        // Stand the live one up. The disconnect counter is what `daemon_watch` waits on, so
+        // it is also the proof that nothing woke the store.
+        client.pretend_connected(live);
+        let quiet = client.disconnect_count();
+
+        client.disconnect_generation(superseded);
+        assert!(
+            client.identity().is_some(),
+            "a dying reader from an earlier connection took the live one down with it"
+        );
+        assert_eq!(
+            client.disconnect_count(),
+            quiet,
+            "nothing may wake the reconnect loop away from a connection that is working"
+        );
+
+        // The reader that does belong to it still works.
+        client.disconnect_generation(live);
+        assert!(client.identity().is_none());
+        assert!(client.disconnect_count() > quiet);
+    }
+
+    #[test]
+    fn generations_are_distinct_for_each_connection() {
+        // They are the only thing separating a superseded reader from a live one.
+        let client = Client::new();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            assert!(
+                seen.insert(client.take_generation()),
+                "a generation repeated"
+            );
+        }
     }
 
     #[test]
