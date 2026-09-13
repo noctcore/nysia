@@ -53,7 +53,9 @@
 //!    backpressure reaches the process producing the output rather than being absorbed by a
 //!    buffer somewhere in between.
 
+pub mod client;
 pub mod control;
+pub mod discovery;
 pub mod endpoint;
 pub(crate) mod errors;
 pub mod lease;
@@ -63,7 +65,9 @@ pub mod session;
 pub mod stream;
 pub mod transport;
 
+pub use client::{Client, ClientError};
 pub use control::{ControlError, ControlReader, ControlWriter, MAX_CONTROL_LINE_BYTES};
+pub use discovery::{Discovered, DiscoveryError, SpawnPolicy, discover};
 pub use endpoint::{
     ENDPOINT_VAR, Endpoint, EndpointResolveError, EnvSource, Listening, RUNTIME_DIR_VAR,
 };
