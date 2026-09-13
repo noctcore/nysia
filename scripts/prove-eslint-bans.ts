@@ -137,15 +137,39 @@ const CASES: readonly Case[] = [
     expect: 'error',
   },
   {
+    // `store` has to sit next to the filename for `**/store/StoreContext` to match, and
+    // these two spellings put something between them while resolving to the same file on
+    // disk. Both passed eslint, tsc, lint-meta and the Vite build. No auto-import writes
+    // either, so this is about making a deliberate act deliberate rather than closing a
+    // hole a tool could fall into — but the same patterns are what make the carve-out
+    // cases above able to fail.
+    what: 'a component reaching StoreContext through a single-dot segment',
+    filePath: 'apps/web/src/chrome/TabStrip.tsx',
+    code: "import { StoreContext } from '../store/./StoreContext';\nexport const c = StoreContext;\n",
+    expect: 'error',
+  },
+  {
+    what: 'a component reaching StoreContext through a doubled slash',
+    filePath: 'apps/web/src/chrome/TabStrip.tsx',
+    code: "import { StoreContext } from '../store//StoreContext';\nexport const c = StoreContext;\n",
+    expect: 'error',
+  },
+  {
     what: 'the routed hook, which is how a component is meant to get commands',
     filePath: 'apps/web/src/chrome/TabStrip.tsx',
     code: "import { useCommands } from '../store/hooks';\nexport const u = useCommands;\n",
     expect: 'clean',
   },
   {
+    // `../store/StoreContext`, deliberately not `./StoreContext`, which resolves to the
+    // same file and is what a sibling module would actually write. `./StoreContext`
+    // matches none of the ban patterns from any path, so the case was clean everywhere
+    // and could not tell whether the carve-out existed: deleting the carve-out left this
+    // passing. A carve-out case has to use a specifier the ban would otherwise catch, or
+    // it is a green light wired to nothing (trap 12).
     what: 'the store module itself importing StoreContext (carve-out)',
     filePath: 'apps/web/src/store/hooks.ts',
-    code: "import { StoreContext } from './StoreContext';\nexport const c = StoreContext;\n",
+    code: "import { StoreContext } from '../store/StoreContext';\nexport const c = StoreContext;\n",
     expect: 'clean',
   },
   {
