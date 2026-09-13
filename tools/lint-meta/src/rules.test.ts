@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { findRepoRoot } from './repoRoot.ts';
-import { cargoDependencies, runRules, walk } from './rules.ts';
+import { blankRustComments, cargoDependencies, runRules, walk } from './rules.ts';
 
 const repoRoot = findRepoRoot();
 const fixture = (name: string): string => join(repoRoot, 'tools/lint-meta/fixtures', name);
@@ -75,6 +75,38 @@ describe('cargoDependencies', () => {
   });
 });
 
+describe('blankRustComments', () => {
+  it('keeps every byte position so line numbers stay right', () => {
+    const source = ['use std::fmt; // tauri::Builder', '/* tauri:: */ use serde;'].join('\n');
+    const blanked = blankRustComments(source);
+
+    expect(blanked).toHaveLength(source.length);
+    expect(blanked.split('\n')).toHaveLength(2);
+    // Code survives, comment bodies do not.
+    expect(blanked).toContain('use std::fmt;');
+    expect(blanked).toContain('use serde;');
+    expect(blanked).not.toContain('tauri');
+  });
+
+  it('handles doc comments and nested block comments', () => {
+    const source = [
+      '//! A module doc mentioning tauri::Builder.',
+      '/// So does an item doc: use tauri::Manager;',
+      '/* outer tauri:: /* inner tauri:: */ still outer tauri:: */',
+      'use serde::Serialize;',
+    ].join('\n');
+
+    const blanked = blankRustComments(source);
+    expect(blanked).not.toContain('tauri');
+    expect(blanked).toContain('use serde::Serialize;');
+  });
+
+  it('leaves a semicolon inside a comment from truncating the statement after it', () => {
+    const source = '/* a stray ; in a comment */\nuse {\n    tauri,\n};\n';
+    expect(blankRustComments(source)).not.toContain(';\nuse');
+  });
+});
+
 describe('walk', () => {
   it('skips the fixture tree unless asked for it', () => {
     const withoutFixtures = walk(repoRoot);
@@ -102,6 +134,14 @@ describe('the architecture rules', () => {
       violations.filter((v) => v.rule === rule).map((v) => v.file);
 
     expect(byRule('no-tauri-outside-desktop')).toContain('apps/web/src/leak.ts');
+
+    // The Rust spellings the previous line-anchored regex walked straight past:
+    // `use ::tauri::Builder;` (line 4), `use {tauri, serde};` (7), and the multi-line
+    // grouped form (10). Any of them would have put the UI toolkit in the daemon.
+    const rustLines = violations
+      .filter((v) => v.rule === 'no-tauri-outside-desktop' && v.file === 'crates/nysia/src/leak.rs')
+      .map((v) => v.line);
+    expect(rustLines).toEqual(expect.arrayContaining([4, 7, 10]));
     // Every crate outside apps/desktop is inspected, not just the chain rooted at
     // nysia-core. crates/nysia can reach tauri straight out of [workspace.dependencies]
     // without editing a single shared file, so it has to be checked on its own.

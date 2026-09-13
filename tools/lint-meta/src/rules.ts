@@ -59,11 +59,129 @@ const TS_TAURI_IMPORTS = [
   /^\s*import\s[^'"]*from\s*['"]@tauri-apps[^'"]*['"]/,
   /^\s*import\s*['"]@tauri-apps[^'"]*['"]/,
   /^\s*export\s[^'"]*from\s*['"]@tauri-apps[^'"]*['"]/,
+  // The closing line of a multi-line named import: `}` then `from '@tauri-apps/...'`.
+  /^\s*\}\s*from\s*['"]@tauri-apps[^'"]*['"]/,
   /(?:^|[^\w.$])import\s*\(\s*['"]@tauri-apps[^'"]*['"]/,
   /(?:^|[^\w.$])require\s*\(\s*['"]@tauri-apps[^'"]*['"]/,
 ];
-/** `use tauri::…`, `use tauri as …`, `extern crate tauri`, or a bare `tauri::` path. */
-const RUST_TAURI_USE = /(?:^|[^\w:])(?:use\s+tauri\b|extern\s+crate\s+tauri\b|tauri::)/;
+
+/**
+ * The crate root, in any of the spellings a `use` path can start with.
+ *
+ * `tauri`, and also `tauri_plugin_opener` and friends — a leading `::` is optional because
+ * `use ::tauri::X;` is the same import written defensively. A lookbehind rather than a
+ * consumed delimiter, for two reasons: the match index then points at the statement itself
+ * so the line number is right, and refusing a preceding word character or colon keeps
+ * `crate::tauri_helpers::X` a local module rather than a false positive.
+ */
+const RUST_TAURI_ROOT = String.raw`(?<![\w:])(?:::\s*)?tauri(?:_[A-Za-z0-9_]+)?`;
+
+/** A whole `use` statement, however many lines it spans. */
+const RUST_USE_STATEMENT = /(?<![\w:])(?:pub(?:\s*\([^)]*\))?\s+)?use\s[^;]*;/g;
+/** The crate root appearing anywhere inside such a statement. */
+const RUST_USE_NAMES_TAURI = new RegExp(
+  `${RUST_TAURI_ROOT}\\s*(?:::|,|;|\\}|\\s+as\\b|$)`,
+);
+/** `extern crate tauri;` — 2015-edition spelling, still legal. */
+const RUST_EXTERN_CRATE = /(?<![\w:])extern\s+crate\s+tauri(?:_[A-Za-z0-9_]+)?\b/g;
+/** A fully-qualified path used without a `use`: `tauri::Builder::default()`. */
+const RUST_TAURI_PATH = new RegExp(`${RUST_TAURI_ROOT}::`, 'g');
+
+/**
+ * Blank out Rust comments, preserving every byte position.
+ *
+ * Comment bodies become spaces and newlines are kept, so a match index still maps to the
+ * right line. Blanking matters twice over: the module docs in `nysia-core` discuss tauri
+ * constantly and must not trip the rule, and a `;` inside a comment would otherwise
+ * truncate the `use` statement that follows it.
+ *
+ * String literals are deliberately *not* blanked. A `"tauri::"` inside a string would be
+ * reported, which is a false positive — it fails towards noticing, not towards missing, and
+ * the repo has none.
+ */
+export function blankRustComments(source: string): string {
+  const out = [...source];
+  let i = 0;
+  let blockDepth = 0;
+
+  const blank = (at: number): void => {
+    if (out[at] !== '\n') out[at] = ' ';
+  };
+
+  while (i < source.length) {
+    if (blockDepth > 0) {
+      if (source.startsWith('/*', i)) {
+        blockDepth += 1;
+        blank(i);
+        blank(i + 1);
+        i += 2;
+        continue;
+      }
+      if (source.startsWith('*/', i)) {
+        blockDepth -= 1;
+        blank(i);
+        blank(i + 1);
+        i += 2;
+        continue;
+      }
+      blank(i);
+      i += 1;
+      continue;
+    }
+    if (source.startsWith('/*', i)) {
+      blockDepth = 1;
+      blank(i);
+      blank(i + 1);
+      i += 2;
+      continue;
+    }
+    // Covers `//`, `///` and `//!` alike.
+    if (source.startsWith('//', i)) {
+      while (i < source.length && source[i] !== '\n') {
+        blank(i);
+        i += 1;
+      }
+      continue;
+    }
+    i += 1;
+  }
+
+  return out.join('');
+}
+
+/** 1-indexed line of a byte offset. */
+function lineAt(source: string, index: number): number {
+  let line = 1;
+  for (let i = 0; i < index; i += 1) {
+    if (source[i] === '\n') line += 1;
+  }
+  return line;
+}
+
+/**
+ * Every line in a Rust file that pulls tauri in.
+ *
+ * Scanned per *statement* rather than per line, because a `use` can span lines and the
+ * previous line-anchored regex walked straight past three legal spellings:
+ * `use ::tauri::Builder;`, `use {tauri, serde};`, and the multi-line form of the second.
+ * Any of them would have put the UI toolkit in the daemon with no gate tripping.
+ */
+function rustTauriLines(source: string): number[] {
+  const code = blankRustComments(source);
+  const lines = new Set<number>();
+
+  for (const match of code.matchAll(RUST_USE_STATEMENT)) {
+    if (match.index === undefined) continue;
+    if (RUST_USE_NAMES_TAURI.test(match[0])) lines.add(lineAt(code, match.index));
+  }
+  for (const pattern of [RUST_EXTERN_CRATE, RUST_TAURI_PATH]) {
+    for (const match of code.matchAll(pattern)) {
+      if (match.index !== undefined) lines.add(lineAt(code, match.index));
+    }
+  }
+
+  return [...lines].sort((a, b) => a - b);
+}
 
 function toPosix(path: string): string {
   return path.split(sep).join(posix.sep);
@@ -89,8 +207,8 @@ export function walk(root: string, includeFixtures = false): string[] {
   return found.sort();
 }
 
-function read(root: string, file: string): string[] {
-  return readFileSync(join(root, file), 'utf8').split(/\r?\n/);
+function read(root: string, file: string): string {
+  return readFileSync(join(root, file), 'utf8');
 }
 
 /**
@@ -105,26 +223,40 @@ export function noTauriOutsideDesktop(root: string, files: readonly string[]): V
   const allowed = (file: string): boolean =>
     TAURI_ALLOWLIST.some((prefix) => file.startsWith(prefix));
 
+  const report = (file: string, line: number): void => {
+    violations.push({
+      rule: 'no-tauri-outside-desktop',
+      file,
+      line,
+      message: `imports tauri; only ${TAURI_ALLOWLIST.join(' and ')} may do that (D-1, D-2)`,
+    });
+  };
+
   for (const file of files) {
     if (allowed(file)) continue;
     const extension = file.slice(file.lastIndexOf('.'));
     if (!SOURCE_EXTENSIONS.includes(extension)) continue;
 
-    const patterns = extension === '.rs' ? [RUST_TAURI_USE] : TS_TAURI_IMPORTS;
-    read(root, file).forEach((text, index) => {
+    const source = read(root, file);
+
+    if (extension === '.rs') {
+      // Rust is scanned whole: comments blanked, then statement by statement, so a `use`
+      // that spans lines is one unit rather than three lines none of which match.
+      for (const line of rustTauriLines(source)) report(file, line);
+      continue;
+    }
+
+    // TypeScript and JavaScript stay line-based. ESLint owns this boundary properly with
+    // an AST; lint-meta is the backstop for the files ESLint's ignores exclude, and a
+    // statement-level scan here would fire on the sample code inside
+    // `scripts/prove-eslint-bans.ts`, where those imports are test input.
+    source.split(/\r?\n/).forEach((text, index) => {
       const trimmed = text.trim();
       // Comments talk about the rule constantly; only code breaks it.
       if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) {
         return;
       }
-      if (patterns.some((pattern) => pattern.test(text))) {
-        violations.push({
-          rule: 'no-tauri-outside-desktop',
-          file,
-          line: index + 1,
-          message: `imports tauri; only ${TAURI_ALLOWLIST.join(' and ')} may do that (D-1, D-2)`,
-        });
-      }
+      if (TS_TAURI_IMPORTS.some((pattern) => pattern.test(text))) report(file, index + 1);
     });
   }
   return violations;

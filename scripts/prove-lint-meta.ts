@@ -24,13 +24,30 @@ function expectRule(violations: readonly Violation[], rule: string): void {
     failures.push(`rule \`${rule}\` did not trip on the violating fixture`);
     return;
   }
-  process.stdout.write(`  trips: ${rule} -> ${hit.map((v) => v.file).join(', ')}\n`);
+  const where = [...new Set(hit.map((v) => v.file))].join(', ');
+  process.stdout.write(`  trips: ${rule} -> ${where} (${hit.length})\n`);
 }
 
 /** The rule tripped, and it tripped on this exact file. */
 function expectFile(violations: readonly Violation[], rule: string, file: string): void {
   if (!violations.some((v) => v.rule === rule && v.file === file)) {
     failures.push(`rule \`${rule}\` did not trip on ${file}`);
+  }
+}
+
+/** The rule tripped on this exact file *and* line, so the locator is real. */
+function expectLine(
+  violations: readonly Violation[],
+  rule: string,
+  file: string,
+  line: number,
+): void {
+  if (!violations.some((v) => v.rule === rule && v.file === file && v.line === line)) {
+    const seen = violations
+      .filter((v) => v.rule === rule && v.file === file)
+      .map((v) => v.line)
+      .join(', ');
+    failures.push(`rule \`${rule}\` missed ${file}:${line} (reported lines: ${seen || 'none'})`);
   }
 }
 
@@ -51,6 +68,12 @@ expectRule(trips, 'no-tauri-in-rust-crates');
 // single shared file, so the rule has to inspect every crate and not only the dependency
 // chain rooted at nysia-core.
 expectFile(trips, 'no-tauri-in-rust-crates', 'crates/nysia/Cargo.toml');
+
+// The three Rust spellings a line-anchored `use tauri::` regex walked straight past. Exact
+// lines, so the locator is proven and not just the boolean.
+expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 4); // use ::tauri::Builder;
+expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 7); // use {tauri, serde};
+expectLine(trips, 'no-tauri-outside-desktop', 'crates/nysia/src/leak.rs', 10); // the multi-line form
 
 // The transitive branch has its own fixture: nysia-core is clean and the violation arrives
 // through nysia-proto. Without it, that branch is code nobody has watched fail.
