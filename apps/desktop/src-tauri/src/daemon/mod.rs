@@ -130,9 +130,13 @@ impl DaemonError {
 /// A failure as the webview sees it.
 ///
 /// Every Tauri command returns this rather than a bare string, because the store turns it
-/// into a `StoreCommandError` — the one rejection type `runCommand` surfaces to the user.
-/// Anything else reaches `console.error` and the user sees nothing at all, which is exactly
-/// the silent failure the store's own error docs exist to prevent.
+/// into a `StoreCommandError` — the rejection type the webview's command router treats as
+/// an expected outcome already on screen. Anything else it classes as a provider bug and
+/// routes to a separate unexpected-failure channel, which is not where "the daemon went
+/// away" belongs.
+///
+/// `next_steps` is never empty. A notice that says only what broke is the notice users
+/// learn to dismiss unread.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandFailure {

@@ -49,13 +49,25 @@ pub fn endpoint() -> Result<String, DaemonError> {
     #[cfg(not(windows))]
     {
         // The daemon owns the directory, because that is where the owner-only permissions
-        // live (§7.3, traps register #14 — scrollback can contain secrets). The client
-        // only composes the same path it would have chosen.
+        // live (§7.3, traps register #14 — scrollback can contain secrets). The client only
+        // composes the same path it would have chosen.
         let base = std::env::var("XDG_RUNTIME_DIR")
             .or_else(|_| std::env::var("TMPDIR"))
             .unwrap_or_else(|_| "/tmp".to_owned());
+        let base = base.trim_end_matches('/');
+
+        // A relative base would compose a socket path relative to whatever directory the
+        // window happened to be launched from, which is not where the daemon is listening.
+        // The failure that produces is a connection refused with a plausible-looking path
+        // in the message, so it is worth refusing here where the reason is still known.
+        if !base.starts_with('/') {
+            return Err(DaemonError::Endpoint(format!(
+                "the runtime directory {base:?} is not an absolute path, so the daemon's                  socket cannot be located from it"
+            )));
+        }
+
         let name = nysia_proto::version::unix_socket_file_name(PROTOCOL_VERSION);
-        Ok(format!("{}/{name}", base.trim_end_matches('/')))
+        Ok(format!("{base}/{name}"))
     }
 }
 
@@ -179,6 +191,15 @@ fn describe(reason: &RejectReason) -> String {
         }
         RejectReason::Malformed { detail } => {
             format!("the daemon could not read this client's hello: {detail}")
+        }
+        // A `kind` this build does not know, caught by proto's `#[serde(other)]`. The point
+        // of that variant is that the client still learns it was refused instead of failing
+        // the whole untagged frame and reporting "data did not match any variant" — so the
+        // sentence here says exactly that much and no more. Inventing a specific reason
+        // would be this build claiming to have understood something it did not.
+        RejectReason::Unknown => {
+            "the daemon refused this client for a reason this build does not recognise; it              is probably newer than the window"
+                .to_owned()
         }
     }
 }
@@ -340,6 +361,10 @@ mod tests {
                 "peer credentials did not resolve",
             ),
             (RejectReason::ShuttingDown, "retiring"),
+            // Proto's `#[serde(other)]` catch-all. A daemon newer than this build can refuse
+            // for a reason that did not exist when the window was compiled, and the user is
+            // still owed a sentence rather than a blank notice.
+            (RejectReason::Unknown, "does not recognise"),
             (
                 RejectReason::Malformed {
                     detail: "hello was not json".to_owned(),
@@ -363,6 +388,43 @@ mod tests {
             let id = client_id(role).expect("a valid id");
             assert!(id.as_str().contains(role.as_str()));
         }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_relative_runtime_directory_is_refused_rather_than_composed_into_a_path() {
+        // Composing a socket path relative to the launch directory produces a connection
+        // refused with a plausible-looking path in the message, which is much harder to
+        // diagnose than a refusal here.
+        //
+        // Serial by construction: it is the only test that touches these variables, and it
+        // restores them before returning.
+        let previous = (
+            std::env::var("XDG_RUNTIME_DIR").ok(),
+            std::env::var("TMPDIR").ok(),
+        );
+        // SAFETY: single-threaded within this test, and both variables are restored below.
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", "relative/run");
+            std::env::remove_var("TMPDIR");
+        }
+
+        let refused = endpoint();
+
+        unsafe {
+            match previous.0 {
+                Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+            if let Some(value) = previous.1 {
+                std::env::set_var("TMPDIR", value);
+            }
+        }
+
+        assert!(
+            matches!(refused, Err(DaemonError::Endpoint(_))),
+            "got {refused:?}"
+        );
     }
 
     #[test]

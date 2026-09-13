@@ -18,7 +18,7 @@
 //! already works in terms of stream ids and does not move.
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
@@ -119,15 +119,12 @@ impl Stream {
     /// `attached` is the shim's parameter — see [`attach_frame`]. It disappears with the
     /// shim.
     pub fn spawn(
-        socket: Box<dyn Socket>,
+        socket: BufReader<Box<dyn Socket>>,
         attached: SessionHandle,
         dispatcher: Dispatcher,
         window: CreditWindow,
     ) -> Self {
         let (signals, inbox) = mpsc::channel::<Signal>();
-        let grants = signals.clone();
-        let _ = grants;
-
         let reader = thread::Builder::new()
             .name("nysia-stream".to_owned())
             .spawn(move || read(socket, attached, dispatcher, window, &inbox))
@@ -170,7 +167,7 @@ impl Drop for Stream {
 
 /// The reader loop.
 fn read(
-    mut socket: Box<dyn Socket>,
+    mut socket: BufReader<Box<dyn Socket>>,
     attached: SessionHandle,
     dispatcher: Dispatcher,
     window: CreditWindow,
@@ -292,16 +289,21 @@ fn adopt_window(ledger: &mut CreditLedger, payload: &[u8]) {
 }
 
 /// Send a grant back up the stream socket.
-fn send_grant(socket: &mut Box<dyn Socket>, grant: &CreditGrant) -> Result<(), DaemonError> {
+fn send_grant(
+    socket: &mut BufReader<Box<dyn Socket>>,
+    grant: &CreditGrant,
+) -> Result<(), DaemonError> {
     use std::io::Write;
 
     let payload = serde_json::to_vec(&CreditFrame::Grant(grant.clone()))
         .map_err(|error| DaemonError::Protocol(error.to_string()))?;
     let wire = nysia_proto::frame::encode(&Frame::new(FrameKind::Credit, payload))
         .map_err(|error| DaemonError::Protocol(error.to_string()))?;
-    socket
-        .write_all(&wire)
-        .and_then(|()| socket.flush())
+    // Through `get_mut`, because the reader half of this `BufReader` holds bytes the daemon
+    // has already sent and unwrapping it to write would throw them away.
+    let out = socket.get_mut();
+    out.write_all(&wire)
+        .and_then(|()| out.flush())
         .map_err(|error| DaemonError::Io(error.to_string()))
 }
 
@@ -345,6 +347,27 @@ mod tests {
         assert_eq!(table.forget(&handle(1)), Some(stream));
         assert_eq!(table.handle_for(stream), None);
         assert_eq!(table.forget(&handle(1)), None);
+    }
+
+    #[test]
+    fn a_closed_sessions_id_is_never_handed_to_a_new_one() {
+        // The webview's numbering is append-only for the life of the window, so reusing an
+        // id here would route a new session's output into the terminal the closed pane left
+        // behind — with nothing in either process to show why.
+        let mut table = StreamTable::new();
+        let first = table.id_for(&handle(1));
+        let second = table.id_for(&handle(2));
+
+        table.forget(&handle(1));
+        let third = table.id_for(&handle(3));
+
+        assert_ne!(third, first, "a closed pane's id must not come back");
+        assert_ne!(third, second);
+        assert_eq!(
+            table.id_for(&handle(2)),
+            second,
+            "a surviving session keeps the id it had"
+        );
     }
 
     #[test]

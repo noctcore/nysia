@@ -26,7 +26,6 @@ struct Connected {
     /// `None` until the webview has handed over its `Channel` — the window can be
     /// connected and listing sessions before anything is rendered.
     stream: Option<Stream>,
-    table: StreamTable,
     identity: DaemonIdentity,
 }
 
@@ -38,6 +37,14 @@ struct Connected {
 #[derive(Clone)]
 pub struct Client {
     inner: Arc<Mutex<Option<Connected>>>,
+    /// Stream ids, outside `Connected` on purpose.
+    ///
+    /// A table that lived with the connection would be rebuilt empty on every reconnect,
+    /// while the webview's copy — which is per window, not per socket — kept growing. After
+    /// one reconnect with a session closed in between, the two would number the same
+    /// session differently and output would land in the wrong pane. Both sides are
+    /// append-only for the life of the window, so both stay in step.
+    table: Arc<Mutex<StreamTable>>,
     /// Signalled whenever the connection is torn down, so [`Self::wait_for_disconnect`] can
     /// block instead of polling. A condvar rather than a channel because there may be more
     /// than one waiter and every one of them wants the same edge.
@@ -49,6 +56,7 @@ impl Client {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(None)),
+            table: Arc::new(Mutex::new(StreamTable::new())),
             dropped: Arc::new((Mutex::new(0), Condvar::new())),
         }
     }
@@ -69,7 +77,6 @@ impl Client {
         *held = Some(Connected {
             control,
             stream: None,
-            table: StreamTable::new(),
             identity: identity.clone(),
         });
         Ok(identity)
@@ -97,6 +104,19 @@ impl Client {
             let connected = held.as_ref().ok_or(DaemonError::Disconnected)?;
             connected.control.request(payload)
         };
+
+        // The session list is what assigns stream ids, on both sides. The webview indexes
+        // the same list in the same order (`streamIdFor`), so stream 0 is the first session
+        // listed for the client and for this process alike. Until W1's attach verb lands,
+        // that shared convention is the mapping — which is why it is applied in exactly one
+        // place rather than wherever a handle happens to be seen.
+        if let Ok(ResponsePayload::SessionList { sessions }) = &outcome
+            && let Ok(mut table) = self.table.lock()
+        {
+            for session in sessions {
+                table.id_for(&session.handle);
+            }
+        }
 
         if let Err(error) = &outcome
             && matches!(
@@ -133,17 +153,32 @@ impl Client {
             &endpoint::client_id(nysia_proto::handshake::ClientRole::Stream)?,
         )?;
 
-        // TODO(W1): the stream connection attaches to one session until the control-plane
-        // attach verb and the stream-tagged header land. See `daemon::stream::attach_frame`
-        // — that function and this call site are the only two places that change.
-        let attached = connected
+        // TODO(W1): the stream connection attaches to the first session the daemon listed
+        // until the control-plane attach verb and the stream-tagged header land. Stream 0
+        // is that session on both sides — see `daemon::stream::attach_frame` and
+        // `streamIdFor` in `apps/web/src/transport/terminals.ts`, which are the only two
+        // places that change.
+        let attached = self
             .table
-            .handle_for(0)
-            .cloned()
-            .unwrap_or_else(SessionHandle::generate);
+            .lock()
+            .ok()
+            .and_then(|table| table.handle_for(0).cloned());
+        let Some(attached) = attached else {
+            // No session to attach to yet. Refusing beats attaching to a handle no daemon
+            // owns: the daemon would answer nothing and the pane would sit blank forever
+            // with no error to explain it.
+            return Err(DaemonError::Protocol(
+                "the daemon reported no sessions, so there is no stream to attach to".to_owned(),
+            ));
+        };
 
+        // The `BufReader` goes to the reader thread rather than being unwrapped. `read_line`
+        // fills an 8 KiB buffer, so anything the daemon wrote *after* the hello line is
+        // already sitting in it — which is exactly what a replay-on-attach is. Calling
+        // `into_inner()` here would discard the scrollback replay and nothing downstream
+        // would ever know it had been dropped.
         connected.stream = Some(Stream::spawn(
-            Box::new(reader.into_inner()),
+            reader,
             attached,
             Dispatcher::spawn(channel),
             CreditWindow::DEFAULT,
@@ -173,12 +208,19 @@ impl Client {
 
     /// Forget a closed session, returning its share of the shared credit budget.
     pub fn forget(&self, handle: &SessionHandle) {
-        let Ok(mut held) = self.lock() else { return };
-        let Some(connected) = held.as_mut() else {
+        // The id is released from the table but the entry is not reused: the webview's
+        // numbering is append-only, so handing a closed pane's id to a new session would
+        // route the newcomer's output into the terminal the closed pane left behind.
+        let Ok(mut table) = self.table.lock() else {
             return;
         };
-        if let Some(stream) = connected.table.forget(handle)
-            && let Some(live) = connected.stream.as_ref()
+        let Some(stream) = table.forget(handle) else {
+            return;
+        };
+        drop(table);
+
+        if let Ok(held) = self.lock()
+            && let Some(live) = held.as_ref().and_then(|c| c.stream.as_ref())
         {
             live.detach(stream);
         }
