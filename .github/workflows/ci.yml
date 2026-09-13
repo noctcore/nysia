@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A stack trace is worth more than the handful of seconds it costs on a failure.
+  RUST_BACKTRACE: 1
+
+jobs:
+  gates:
+    name: gates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows-primary development, macOS as the second signing target. No Linux runner:
+        # there is no Linux build of Nysia in v1, so a green Linux job would prove nothing.
+        os: [windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # rustup honours rust-toolchain.toml, including its components, so the pin lives in
+      # one place. This runs before the cache step so the toolchain exists when it keys.
+      - name: Install the pinned rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # portable-pty comes from the wezterm git repository, which is a large clone;
+          # rust-cache covers ~/.cargo/git as well as the registry.
+          key: ${{ matrix.os }}
+
+      - name: Install node dependencies
+        run: pnpm install --frozen-lockfile
+
+      # tauri::generate_context! reads frontendDist at compile time, so apps/web/dist must
+      # exist before any cargo command that touches apps/desktop/src-tauri.
+      - name: Build the web frontend
+        run: pnpm build
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: pnpm typecheck
+        run: pnpm typecheck
+
+      - name: pnpm lint
+        run: pnpm lint
+
+      - name: pnpm test
+        run: pnpm test
+
+      - name: pnpm ts-drift
+        run: pnpm ts-drift
+
+      # Every gate ships with a proof that it trips (traps register #13). These are separate
+      # named steps, not folded into `pnpm test`, so a skipped proof is visible in the run.
+      - name: prove the ts-rs drift guard trips
+        run: pnpm prove:ts-drift
+
+      - name: prove the lint-meta architecture rules trip
+        run: pnpm prove:lint-meta
+
+      - name: prove the eslint import bans trip
+        run: pnpm prove:eslint-bans
+
+      # The proof scripts mutate tracked files and restore them. If a restore ever fails,
+      # the run must go red rather than leave the next step guessing.
+      - name: check the working tree is clean
+        shell: bash
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "A gate left the working tree dirty:"
+            git status --porcelain
+            git diff
+            exit 1
+          fi
