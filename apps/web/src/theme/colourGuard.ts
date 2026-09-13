@@ -94,9 +94,16 @@ const PALETTE_CLASS = new RegExp(
  *
  * ## What it cannot see
  *
- * This list is meant to be exhaustive, so that a reader who checks it can trust the rest of
- * the comment. Two entries below were missing while the comment claimed completeness, which
- * is worse than the gaps were:
+ * Every entry below is a real miss, and `colourGuard.test.ts` proves each one: a case per
+ * bullet, asserting the shape is not found. Widen the rule and the matching case goes red,
+ * which is what keeps the list from rotting into fiction.
+ *
+ * That is all it proves. **The list is not exhaustive, and there is no way to make it so.**
+ * It claimed to be for three rounds, and a reader was told they could trust the rest of the
+ * comment because of it — and each round found another shape that was not on it. A test can
+ * show that a listed miss is real; nothing can show that no *unlisted* miss exists, because
+ * the unlisted ones are precisely the shapes nobody thought of. Read this as the known
+ * blind spots, which is useful, and not as the boundary of them, which it never was:
  *
  *  - a colour that reaches CSS through a variable rather than a literal. Needs types.
  *  - a colour name in a string that no painting property introduces. Needs types.
@@ -112,8 +119,8 @@ const PALETTE_CLASS = new RegExp(
  *    that merely *contains* one of these words is outside it too: the boundary guard that
  *    stops `fill` matching inside `autofill` is the same guard, and the same trade.
  *
- * The hex and colour-function rules, which do scan whole files, are the backstop for all
- * five: only a *named* colour can hide in any of them.
+ * The hex and colour-function rules, which do scan whole files, are the backstop for every
+ * one of them, listed or not: only a *named* colour can hide in any of these.
  *
  * In the other direction, the rule does have false positives — a value that merely contains
  * a colour word, most obviously a url with one in the path. They are tracked separately;

@@ -319,10 +319,15 @@ describe('findColourLiterals', () => {
 /*
  * The residue list from `colourGuard.ts`, one case per entry.
  *
- * The doc claims that list is exhaustive, and a reader is told they can trust the rest of
- * the comment because of it — which only holds if the claim is checked. Twice now an entry
- * has gone missing while the claim stayed, so it is a test rather than a sentence: widen
- * the rule without updating the list and one of these goes green where it should be red.
+ * These prove that each *listed* miss is real, and that is the whole of what they prove.
+ * They cannot show the list is complete — the missing entries are by definition the shapes
+ * nobody thought to write a case for, which is the direction every round of this review has
+ * failed in. The doc says so now rather than claiming exhaustiveness.
+ *
+ * What they do buy is that the list cannot rot: widen the rule and the matching case goes
+ * red, so closing a gap costs one bullet and one case, and forgetting to is not an option.
+ * Both directions have already happened here — a gap closing, and an example quietly
+ * ceasing to demonstrate its own entry.
  */
 describe('the documented residue', () => {
   it('misses a colour that arrives through a variable', () => {
