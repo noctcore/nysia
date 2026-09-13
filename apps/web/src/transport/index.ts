@@ -1,4 +1,5 @@
 import type { Store } from '../store/types';
+import { setAttachedStore } from './attachedStore';
 import { createTauriBridge, type DaemonBridge } from './bridge';
 import { DaemonStore } from './DaemonStore';
 import { createXterm } from './surface/xterm';
@@ -29,14 +30,16 @@ export function createDaemonStore(options?: {
   const router = new TerminalRouter({
     bridge,
     createTerminal: options?.createTerminal ?? createXterm,
-    // Windows is the assumption until `host_platform` answers, because it is the primary
-    // development platform and the answer arrives within a frame. The only platform where
-    // guessing wrong is expensive is macOS, and the correction runs before any pane has
-    // asked for a renderer.
-    platform: options?.platform ?? 'windows',
+    // No platform yet on purpose: the router runs the cautious renderer policy until
+    // `host_platform` answers below. See `TerminalRouter`'s constructor for why guessing
+    // is the wrong side to err on.
+    ...(options?.platform === undefined ? {} : { platform: options.platform }),
   });
 
   const store = new DaemonStore({ bridge, router });
+  // How `TerminalView` finds the router without reaching through `StoreContext`, which the
+  // store module closed to components on purpose. See `attachedStore.ts`.
+  setAttachedStore(store);
 
   void bridge
     .invoke<string>('host_platform')

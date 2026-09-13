@@ -2,14 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import type { FrameKind } from '../generated/FrameKind';
 import { FRAME_KIND, MAX_FRAME_PAYLOAD_BYTES } from '../generated/wireConstants';
-import {
-  bySession,
-  CHANNEL_FRAME_HEADER_BYTES,
-  decodeFrames,
-  FrameDecoder,
-  FrameError,
-  type StreamId,
-} from './frames';
+import { bySession, decodeFrames, FrameDecoder, FrameError } from './frames';
+import { encodeFrame as encode, encodeHeaderOnly } from './testFrames';
 
 /**
  * The exact bytes of one frame, as hex.
@@ -22,19 +16,12 @@ import {
  * change that only one side noticed is the one bug this cannot be allowed to miss.
  *
  * Reading it: `01` output, `0000002a` stream 42, `00000003` three bytes, `686921` "hi!".
+ *
+ * This is the one place on either side that spells the layout out by hand, and that is the
+ * point of it — everything else derives from the generated constants, so a change to those
+ * that was not also a change to the wire would fail here rather than pass everywhere.
  */
 const GOLDEN_HEX = '010000002a00000003686921';
-
-/** Encode one frame the way the Rust side does, for the tests that need input. */
-function encode(kind: FrameKind, stream: StreamId, payload: Uint8Array): Uint8Array {
-  const frame = new Uint8Array(CHANNEL_FRAME_HEADER_BYTES + payload.length);
-  const header = new DataView(frame.buffer);
-  frame[0] = FRAME_KIND[kind];
-  header.setUint32(1, stream, false);
-  header.setUint32(5, payload.length, false);
-  frame.set(payload, CHANNEL_FRAME_HEADER_BYTES);
-  return frame;
-}
 
 function bytes(...parts: Uint8Array[]): Uint8Array {
   const total = parts.reduce((sum, part) => sum + part.length, 0);
@@ -196,9 +183,7 @@ describe('an unreadable channel', () => {
 
   it('refuses a length prefix past the ceiling rather than allocating for it', () => {
     // Four bytes of garbage would otherwise ask for four gigabytes.
-    const wire = new Uint8Array(CHANNEL_FRAME_HEADER_BYTES);
-    wire[0] = FRAME_KIND.output;
-    new DataView(wire.buffer).setUint32(5, MAX_FRAME_PAYLOAD_BYTES + 1, false);
+    const wire = encodeHeaderOnly(FRAME_KIND.output, MAX_FRAME_PAYLOAD_BYTES + 1);
     expect(() => decodeFrames(wire)).toThrow(/at most/);
   });
 

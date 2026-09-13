@@ -65,7 +65,7 @@ export function policyFor(platform: string): RendererPolicy {
  * unremarkable next to a context loss.
  */
 export class WebglPool {
-  readonly #policy: RendererPolicy;
+  #policy: RendererPolicy;
   /** Stream ids holding a context, least-recently-used first. */
   #holders: StreamId[] = [];
   /** Streams currently visible, which are never evicted. */
@@ -87,6 +87,22 @@ export class WebglPool {
   /** The policy in force. */
   get policy(): RendererPolicy {
     return this.#policy;
+  }
+
+  /**
+   * Adopt the platform's real policy, once the process has been asked which platform it is.
+   *
+   * The same pool rather than a replacement, because surfaces built before the answer hold a
+   * reference to this one — handing the router a new pool would leave those panes counting
+   * their contexts against a table nothing else reads, which on macOS is how the app-wide
+   * cap gets exhausted by a window that believed it was under it.
+   *
+   * Contexts already out are left alone. Narrowing the cap is honoured as holders release
+   * them, which is the same path an eviction takes; tearing live renderers down to make an
+   * arriving policy true immediately would blank panes the user is looking at.
+   */
+  adopt(policy: RendererPolicy): void {
+    this.#policy = policy;
   }
 
   /** How many contexts are out. */

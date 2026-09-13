@@ -1,4 +1,3 @@
-import type { SessionHandle } from '../generated/SessionHandle';
 import type { DaemonBridge } from './bridge';
 import { CreditLedger } from './credit';
 import { bySession, FrameDecoder, type StreamId } from './frames';
@@ -15,25 +14,6 @@ import { policyFor, WebglPool } from './surface/webglPool';
  * routing a frame to the wrong pane, and returning credit for a pane that has gone.
  */
 
-/**
- * Which stream id a session's output arrives on.
- *
- * **This is the webview half of the shim**, and the counterpart of
- * `daemon::stream::attach_frame` in Rust. `nysia-proto` has no control-plane attach verb
- * yet, so neither side is *told* the mapping; both derive it from the order sessions are
- * first seen, which is what the Rust `StreamTable` does when it assigns dense, monotonic
- * ids. Two implementations of one convention, which is exactly the arrangement that rots —
- * so it is one function on each side, named in the other's docs, and both are deleted
- * together when W1 lands the attach verb.
- */
-export function streamIdFor(
-  handle: SessionHandle,
-  order: readonly SessionHandle[],
-): StreamId | null {
-  const at = order.indexOf(handle);
-  return at < 0 ? null : at;
-}
-
 /** Owns every live surface and the flow control behind them. */
 export class TerminalRouter {
   readonly #bridge: DaemonBridge;
@@ -41,24 +21,34 @@ export class TerminalRouter {
   readonly #frameDecoder = new FrameDecoder();
   readonly #ledger = new CreditLedger();
   readonly #surfaces = new Map<StreamId, XtermSurface>();
-  #pool: WebglPool;
+  readonly #pool: WebglPool;
   #onBell: (stream: StreamId) => void = () => {};
   #onExit: (stream: StreamId) => void = () => {};
 
   constructor(options: {
     readonly bridge: DaemonBridge;
     readonly createTerminal: TerminalFactory;
-    /** `std::env::consts::OS`, from the `host_platform` command. */
-    readonly platform: string;
+    /**
+     * `std::env::consts::OS`, from the `host_platform` command.
+     *
+     * Optional because it arrives a round trip later than the first pane can. Until it
+     * does the pool runs the cautious policy — see the constructor.
+     */
+    readonly platform?: string;
   }) {
     this.#bridge = options.bridge;
     this.#createTerminal = options.createTerminal;
-    this.#pool = new WebglPool(policyFor(options.platform));
+    // The cautious policy until `host_platform` answers, not a guess at the common case.
+    // Guessing "windows" hands out an *uncapped* pool, so any pane built in that first round
+    // trip keeps an unbounded allowance — and on macOS, where the cap exists because WebKit
+    // counts contexts app-wide, being wrong that way is the expensive direction. DOM for a
+    // few milliseconds is correct everywhere and costs a frame.
+    this.#pool = new WebglPool(policyFor(options.platform ?? ''));
   }
 
   /** Adopt the renderer policy for a platform learned after construction. */
   setPlatform(platform: string): void {
-    this.#pool = new WebglPool(policyFor(platform));
+    this.#pool.adopt(policyFor(platform));
   }
 
   /** Be told when a session rings its bell or its child exits. */
@@ -124,6 +114,16 @@ export class TerminalRouter {
       }
     }
     return null;
+  }
+
+  /**
+   * Take the record of output this pane discarded while it was hidden, in bytes.
+   *
+   * Zero for a surface that has not been built, which is the ordinary case: a pane nobody
+   * has opened has nothing to have lost.
+   */
+  takeDroppedWhileHidden(stream: StreamId): number {
+    return this.#surfaces.get(stream)?.takeDroppedWhileHidden() ?? 0;
   }
 
   /** A pane closed: release its surface and return its outstanding credit. */

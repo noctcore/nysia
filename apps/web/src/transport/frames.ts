@@ -1,5 +1,6 @@
 import type { FrameKind } from '../generated/FrameKind';
 import {
+  FRAME_HEADER_BYTES,
   FRAME_KIND_BY_BYTE,
   MAX_FRAME_PAYLOAD_BYTES,
 } from '../generated/wireConstants';
@@ -22,9 +23,12 @@ import {
  *   retained buffer and the failure mode if it ever stops being true is silent corruption
  *   of a terminal's escape-sequence parser.
  *
- * The byte values are imported from `generated/wireConstants`, which `nysia-proto`'s
- * `bindings` module writes from the same Rust definitions the daemon uses (D-13). Nothing
- * here restates a number Rust already owns.
+ * Every number here — the kind bytes, the header size — is imported from
+ * `generated/wireConstants`, which `nysia-proto`'s `bindings` module writes from the same
+ * Rust definitions the daemon uses (D-13). Nothing restates a value Rust already owns: the
+ * header grew from five bytes to nine when stream multiplexing landed, and a hand-copied
+ * constant is exactly what survives that change quietly, slicing the top half of a stream id
+ * and calling it a length.
  */
 
 /**
@@ -37,16 +41,18 @@ import {
 export type StreamId = number;
 
 /**
- * The bytes a channel frame's header occupies: a kind byte, a stream id, and a length.
+ * Where the stream id starts: straight after the kind byte.
  *
- * Deliberately **not** `FRAME_HEADER_BYTES` from `generated/wireConstants`. That constant
- * is 5 and describes `nysia-proto`'s current socket header, `[kind][len][payload]`, which
- * has no session discriminator because it was written when a stream connection was assumed
- * to carry one session. This leg carries all of them over one Channel, so the header has a
- * stream id in it and is four bytes longer. When W1 lands the stream-tagged header in proto
- * the two converge and this constant is replaced by the generated one.
+ * Derived from {@link FRAME_HEADER_BYTES} rather than written down, so the layout has one
+ * authority and it is the generated one. `nysia-proto` does not export the offsets
+ * themselves, but it exports the total, and the header is a kind byte then two big-endian
+ * `u32`s — so the total is enough to place both fields without a second copy of the number
+ * that grew from 5 to 9 when stream multiplexing landed.
  */
-export const CHANNEL_FRAME_HEADER_BYTES = 9;
+const STREAM_OFFSET = 1;
+
+/** Where the payload length starts: the last four bytes of the header. */
+const LENGTH_OFFSET = FRAME_HEADER_BYTES - 4;
 
 /** One frame, as the Rust side packed it. */
 export interface ChannelFrame {
@@ -211,7 +217,7 @@ function decodeAt(
     );
   }
 
-  if (buffer.length - offset < CHANNEL_FRAME_HEADER_BYTES) {
+  if (buffer.length - offset < FRAME_HEADER_BYTES) {
     return null;
   }
 
@@ -221,10 +227,10 @@ function decodeAt(
   const header = new DataView(
     buffer.buffer,
     buffer.byteOffset + offset,
-    CHANNEL_FRAME_HEADER_BYTES,
+    FRAME_HEADER_BYTES,
   );
-  const stream = header.getUint32(1, false);
-  const length = header.getUint32(5, false);
+  const stream = header.getUint32(STREAM_OFFSET, false);
+  const length = header.getUint32(LENGTH_OFFSET, false);
 
   if (length > MAX_FRAME_PAYLOAD_BYTES) {
     throw new FrameError(
@@ -232,7 +238,7 @@ function decodeAt(
     );
   }
 
-  const start = offset + CHANNEL_FRAME_HEADER_BYTES;
+  const start = offset + FRAME_HEADER_BYTES;
   const end = start + length;
   if (end > buffer.length) {
     return null;

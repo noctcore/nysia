@@ -1,8 +1,7 @@
-import { useContext, useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 
 import { useSnapshot } from '../store/hooks';
-import { StoreContext } from '../store/StoreContext';
-import { DaemonStore } from './DaemonStore';
+import { attachedStore } from './attachedStore';
 
 /**
  * The terminal for the pane that is on screen.
@@ -21,18 +20,18 @@ import { DaemonStore } from './DaemonStore';
  * the chrome for anyone working on it without a daemon.
  */
 export function TerminalView() {
-  // `StoreContext` directly, rather than `useCommands()`. The hook module deliberately keeps
-  // the raw provider private so that no chrome component can reach a promise-returning
-  // command and drop it — but what this needs is not a command at all. It is the provider's
-  // own terminal router, and this component is part of the provider's implementation rather
-  // than a consumer of it. `useCommands()` cannot supply that and should not learn how to.
-  const store = useContext(StoreContext);
+  // Not `useCommands()`, and deliberately not `StoreContext` either — `eslint.config.js`
+  // grants that exactly two carve-outs and this is neither. What this needs is not a store
+  // command at all: it is the transport's own terminal router, and this component is part of
+  // the transport rather than a consumer of it. `attachedStore()` is how the transport
+  // reaches its own instance, without widening a door the store module closed on purpose.
+  const store = attachedStore();
   const { activeTab } = useSnapshot();
   const host = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const element = host.current;
-    if (element === null || activeTab === null || !(store instanceof DaemonStore)) {
+    if (element === null || activeTab === null || store === null) {
       return;
     }
     const stream = store.surfaceStream(activeTab);
@@ -43,6 +42,15 @@ export function TerminalView() {
     const surface = store.terminals.surface(stream);
     surface.show(element);
     surface.focus();
+
+    // A hidden pane whose buffer overflowed threw output away to stay bounded. The surface
+    // has reset the parser, but the bytes are gone, and a terminal that silently skips a
+    // stretch of its own output is worse than one that says so — the user reads what is
+    // left as if it followed on.
+    const dropped = store.terminals.takeDroppedWhileHidden(stream);
+    if (dropped > 0) {
+      store.reportDroppedOutput(dropped);
+    }
 
     // The daemon sizes the PTY, so a pane that resized without telling it leaves the shell
     // wrapping at the old width — the commonest visible symptom of a terminal that is
