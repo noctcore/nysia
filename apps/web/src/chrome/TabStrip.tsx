@@ -50,8 +50,16 @@ export function TabStrip() {
    * own decision — a daemon may well pick the most recently used — and guessing would let
    * DOM focus and `activeTab` disagree. The surviving tabs are keyed by `PaneKey` and were
    * never unmounted, so this is a plain `focus()` and needs no effect.
+   *
+   * `hadFocus` is why it takes an argument at all. Closing a tab with the pointer, while
+   * the caret sits somewhere else entirely — the prompt, the sidebar, a settings field —
+   * used to yank focus into the strip. Focus is only ours to move when we are the ones who
+   * destroyed the node holding it.
    */
-  function focusAfterClose(): void {
+  function focusAfterClose(hadFocus: boolean): void {
+    if (!hadFocus) {
+      return;
+    }
     const next = commands.getSnapshot().activeTab;
     if (next === null) {
       document.querySelector<HTMLElement>('[data-new-session]')?.focus();
@@ -72,7 +80,9 @@ export function TabStrip() {
     }
     if (event.key === 'Delete' || event.key === 'Backspace') {
       event.preventDefault();
-      commands.closeTab(tab.paneKey, focusAfterClose);
+      // The key arrived on the tab, so the caret is inside it by definition — but the node
+      // is gone by the time the callback runs, so the answer is captured now.
+      commands.closeTab(tab.paneKey, () => focusAfterClose(true));
     }
   }
 
@@ -109,7 +119,7 @@ function TabButton({
   readonly tabbable: boolean;
   readonly nodes: RefObject<Map<string, HTMLDivElement>>;
   readonly onKeyDown: (event: KeyboardEvent<HTMLDivElement>, tab: Tab) => void;
-  readonly onClose: () => void;
+  readonly onClose: (hadFocus: boolean) => void;
 }) {
   const commands = useCommands();
 
@@ -144,7 +154,13 @@ function TabButton({
         onClick={(event) => {
           // Otherwise the click bubbles to the tab and selects what it is about to close.
           event.stopPropagation();
-          commands.closeTab(tab.paneKey, onClose);
+          // Captured before the command, because the node is unmounted by the time the
+          // callback runs. A pointer close from elsewhere in the window leaves the caret
+          // where it was.
+          const hadFocus = event.currentTarget.closest('[role="tab"]')?.contains(
+            document.activeElement,
+          );
+          commands.closeTab(tab.paneKey, () => onClose(hadFocus === true));
         }}
         className="text-fg3 hover:text-fg ml-1.5 cursor-pointer border-0 bg-transparent p-0"
       >
