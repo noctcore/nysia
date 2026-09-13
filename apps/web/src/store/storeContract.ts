@@ -198,6 +198,12 @@ export function describeStoreContract(name: string, create: StoreFactory): void 
       it('keeps ids distinct when the same command fails the same way twice', async () => {
         // Two failures a second apart are two notices, not one that flickers — which only
         // holds if the id is per failure rather than per command or per message.
+        //
+        // This cannot see the failure mode a real provider is most likely to have. A
+        // millisecond clock passes, because two failures on a round trip straddle a
+        // millisecond, and only a provider fast enough to fail twice inside one — a mock —
+        // goes red. `hasDistinctIds` in ./errors carries the rule that follows from that:
+        // a counter or a uuid, never a clock.
         const store = await ready();
         await store.openTab('launcher.that.does.not.exist').catch(() => {});
         await store.openTab('launcher.that.does.not.exist').catch(() => {});

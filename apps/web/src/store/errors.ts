@@ -71,6 +71,14 @@ export class StoreCommandError extends Error {
  * would clear every notice sharing that id. A provider can satisfy every other line of the
  * contract while reusing one id for every failure, which is why this is an invariant with
  * a name rather than an assumption inside one assertion.
+ *
+ * **The id must be a per-failure counter or a uuid, never a clock.** A millisecond
+ * timestamp passes every check this can make and is still wrong: two failures on a real
+ * round trip land in different milliseconds, so a provider using `Date.now()` goes green
+ * here and collides the first time two rejections arrive in the same tick — a batched
+ * frame, a reconnect flushing a queue, two commands failing on one dropped socket. Only a
+ * provider fast enough to fail twice inside a millisecond, which is to say a mock, can be
+ * caught from outside. That limit is the reason this paragraph exists rather than a test.
  */
 export function hasDistinctIds(errors: readonly StoreError[]): boolean {
   return new Set(errors.map((error) => error.id)).size === errors.length;
