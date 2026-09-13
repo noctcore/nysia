@@ -377,19 +377,23 @@ async function waitForReady(store: Store): Promise<void> {
  *    project state, was untouched. A provider could pass by holding its metrics still
  *    between commands; it should not have to distort its design to satisfy a test.
  *
- * Dropping the values entirely gave something up, though, and this gets most of it back:
- * a provider whose *failing* `selectTab` also wiped the quota list or rewrote the metrics
- * object was caught before and would not be now. So the two are compared by shape instead
- * — that `usage` still has entries if it had them, and that `daemon` still has the same
- * keys. A streaming provider is free to move every number and stays green; one that
- * empties or reshapes telemetry as a side effect of an unrelated command goes red.
+ * Dropping the values entirely gave something up, though, and `daemonKeys` gets part of it
+ * back: a provider whose *failing* `selectTab` also replaced the metrics object with
+ * something of a different shape was caught before and would not be otherwise. Which keys
+ * exist is structure — a streaming provider moves every number inside them and stays green.
  *
- * What that still cannot catch is a value replaced by a wrong value of the same shape —
- * `memoryBytes` going to zero reads as a tick. That residue is W5's to hold, and it has
- * been told so.
+ * `usage` is deliberately *not* treated the same way. Asking whether it still has entries
+ * looks structural and is not: an empty quota list is a value like any other, and it is the
+ * value `emptySnapshot()` ships. A provider that reaches `ready` on its handshake and
+ * delivers its first quota sample on the next frame — a daemon polling quota separately
+ * from the connection, which is an ordinary design — would fail on a field no session
+ * assertion touches. That is the timing coupling this suite spent a round removing, so it
+ * does not come back for a partial gain.
+ *
+ * What is left uncovered: a value replaced by a wrong value of the same shape, and any
+ * change to `usage` at all. Both are W5's to hold, and it has been told so.
  */
 export interface Observable extends Omit<StoreSnapshot, 'errors' | 'status' | 'daemon' | 'usage'> {
-  readonly usagePopulated: boolean;
   readonly daemonKeys: readonly string[];
 }
 
@@ -401,7 +405,6 @@ export function observable(snapshot: StoreSnapshot): Observable {
     tabs: snapshot.tabs,
     activeTab: snapshot.activeTab,
     launchers: snapshot.launchers,
-    usagePopulated: snapshot.usage.length > 0,
     daemonKeys: Object.keys(snapshot.daemon).sort(),
   };
 }

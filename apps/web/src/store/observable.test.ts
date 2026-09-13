@@ -32,10 +32,12 @@ describe('observable', () => {
     expect(observable(busy)).toEqual(observable(base));
   });
 
-  it('catches a command that emptied the quota list', () => {
-    // The case dropping the values entirely gave up: a *failing* selectTab that also
-    // wiped usage used to be caught and would not be under a plain omission.
-    expect(observable({ ...base, usage: [] })).not.toEqual(observable(base));
+  it('ignores a quota list that is not there yet', () => {
+    // Populated-ness looks structural and is not: an empty list is the value
+    // `emptySnapshot()` ships, so requiring entries would fail a provider that reaches
+    // ready on its handshake and samples quota on the next frame. That is timing coupling,
+    // which is the thing this comparison exists to avoid.
+    expect(observable({ ...base, usage: [] })).toEqual(observable(base));
   });
 
   it('catches a command that reshaped the metrics object', () => {
