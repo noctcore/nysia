@@ -52,7 +52,29 @@ export const TAURI_ALLOWLIST: readonly string[] = [
   'apps/web/src/transport/',
 ];
 
-const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.rs'];
+/**
+ * Every extension that can carry an `import` or a `require` into a bundle, enumerated
+ * deliberately rather than grown one at a time.
+ *
+ * In:  `.ts` `.tsx` `.mts` `.cts` `.js` `.jsx` `.mjs` `.cjs`, plus `.rs` for the Rust scan.
+ * Out: `.json`, `.css`, `.html`, `.svg` — none of them can import anything.
+ *
+ * `.mts` and `.cts` matter specifically because Vite 8's default `resolve.extensions`
+ * includes `.mts`, so such a file bundles. The same list is repeated verbatim in
+ * `eslint.config.js`, which cannot import from here; if the two drift, a file is covered by
+ * neither.
+ */
+const SOURCE_EXTENSIONS = [
+  '.ts',
+  '.tsx',
+  '.mts',
+  '.cts',
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+  '.rs',
+];
 
 /**
  * The import forms that actually pull Tauri into a module.

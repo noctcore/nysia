@@ -16,10 +16,18 @@ import tseslint from 'typescript-eslint';
  * inherited in spirit. `pnpm prove:eslint-bans` lints virtual files through this config and
  * fails if a carve-out block has dropped a ban.
  *
- * Every block matches JavaScript as well as TypeScript. They used to be `{ts,tsx}` only,
- * which left a `.js` or `.jsx` file under `apps/web` covered by neither ESLint's ban nor
- * lint-meta's line-anchored regex — a multi-line grouped import slipped through both.
- * ESLint parses the module properly, so it is the right layer to close that at.
+ * Every block matches the same deliberate extension set, repeated verbatim in
+ * `tools/lint-meta/src/rules.ts` (`SOURCE_EXTENSIONS`), which cannot import from here:
+ *
+ *   In:  ts tsx mts cts js jsx mjs cjs
+ *   Out: json, css, html, svg — none of them can import anything.
+ *
+ * `.mts` and `.cts` are in the list because Vite 8's default `resolve.extensions` includes
+ * `.mts`, so such a file bundles; leaving them out left a file covered by neither layer.
+ *
+ * One thing this rule cannot see: `no-restricted-imports` does not cover `require()`, and
+ * `no-restricted-modules` was removed in ESLint 9. The split is deliberate — ESLint owns
+ * `import` and `export … from`, lint-meta owns `require()` and dynamic `import()`.
  */
 
 /**
@@ -84,7 +92,7 @@ export default tseslint.config(
   // apps/web — the browser bundle. Full ban set.
   // ---------------------------------------------------------------------------------
   {
-    files: ['apps/web/**/*.{ts,tsx,js,jsx,mjs,cjs}'],
+    files: ['apps/web/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
     languageOptions: {
       globals: globals.browser,
       parserOptions: { ecmaFeatures: { jsx: true } },
@@ -111,7 +119,7 @@ export default tseslint.config(
   // into the bundle.
   // ---------------------------------------------------------------------------------
   {
-    files: ['apps/web/src/transport/**/*.{ts,tsx,js,jsx,mjs,cjs}'],
+    files: ['apps/web/src/transport/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -126,9 +134,9 @@ export default tseslint.config(
   // ---------------------------------------------------------------------------------
   {
     files: [
-      'tools/**/*.{ts,js,mjs,cjs}',
-      'scripts/**/*.{ts,js,mjs,cjs}',
-      '*.config.{ts,js,mjs,cjs}',
+      'tools/**/*.{ts,mts,cts,js,mjs,cjs}',
+      'scripts/**/*.{ts,mts,cts,js,mjs,cjs}',
+      '*.config.{ts,mts,cts,js,mjs,cjs}',
       'eslint.config.js',
     ],
     languageOptions: {
@@ -144,7 +152,7 @@ export default tseslint.config(
   // apps/desktop — the shell itself. Tauri is its whole job, so no import ban applies.
   // ---------------------------------------------------------------------------------
   {
-    files: ['apps/desktop/**/*.{ts,tsx,js,jsx,mjs,cjs}'],
+    files: ['apps/desktop/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
     languageOptions: {
       globals: globals.browser,
     },
