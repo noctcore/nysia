@@ -16,3 +16,7 @@
 //! excluded from exports and diagnostics bundles.
 //!
 //! Owned by wave 1 (W2).
+
+mod replay;
+
+pub use replay::ReplayRing;
