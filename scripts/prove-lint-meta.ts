@@ -120,6 +120,12 @@ expectFile(cargoTrips, 'no-tauri-in-rust-crates', 'crates/nysia-proto/Cargo.toml
 // blind on it; cargo has no such trouble and the chain through it is visible.
 expectMessage(cargoTrips, 'no-tauri-reaching-core', 'nysia-core -> nysia-proto -> tauri');
 
+// Reading the graph rather than every Cargo.toml on disk narrows the rule in one way: a
+// crate that is not a workspace member never appears in it. Reported rather than skipped,
+// because "the rule stopped looking and said nothing" is the whole failure class here.
+expectFile(cargoTrips, 'no-tauri-in-rust-crates', 'crates/orphan/Cargo.toml');
+expectMessage(cargoTrips, 'no-tauri-in-rust-crates', 'is not a workspace member');
+
 expectClean(runCargoRules(fixture('cargo', 'clean')), 'the clean cargo workspace');
 process.stdout.write('  clean: apps/desktop may link tauri in its own manifest\n');
 

@@ -1,0 +1,10 @@
+# Not listed in the workspace members, so `cargo metadata` never mentions it and the
+# dependency rules cannot see inside it. A crate that drops out of the workspace must be
+# reported, not silently skipped.
+[package]
+name = "nysia-orphan"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+tauri = { path = "../../vendor/tauri" }

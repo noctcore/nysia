@@ -480,14 +480,50 @@ export function runSourceRules(root: string, includeFixtures = false): Violation
 }
 
 /**
+ * Rule (b), continued: every crate on disk must be one cargo knows about.
+ *
+ * Reading the dependency graph instead of every `Cargo.toml` on disk is what makes rules
+ * (b) and (c) trustworthy, but it narrows them in one way: a crate directory that is not a
+ * workspace member never appears in `cargo metadata`, so nothing inspects it. Today such a
+ * crate compiles into nothing, which is why it is a small risk — but "the rule stopped
+ * looking and said nothing" is the failure class this tool exists to remove, so a manifest
+ * cargo does not account for is reported rather than skipped.
+ */
+export function noUnknownCrates(
+  files: readonly string[],
+  workspace: CargoWorkspace,
+): Violation[] {
+  const known = new Set(workspace.members.map((m) => m.manifestPath));
+  // The workspace root manifest may be virtual — no `[package]`, so never a member.
+  known.add('Cargo.toml');
+
+  return files
+    .filter((file) => file === 'Cargo.toml' || file.endsWith('/Cargo.toml'))
+    .filter((file) => !known.has(file))
+    .filter((file) => !TAURI_ALLOWLIST.some((prefix) => file.startsWith(prefix)))
+    .map((file) => ({
+      rule: 'no-tauri-in-rust-crates',
+      file,
+      line: 0,
+      message:
+        'is not a workspace member, so cargo never resolves it and the dependency rules ' +
+        'cannot see inside it; add it to [workspace] members or delete it',
+    }));
+}
+
+/**
  * The rules that read cargo's resolved dependency graph: rules (b) and (c).
  *
  * @throws {CargoMetadataError} if cargo cannot describe the workspace. Deliberately not
  * caught here: a dependency rule that could not run must not report zero violations.
  */
-export function runCargoRules(root: string): Violation[] {
+export function runCargoRules(root: string, includeFixtures = false): Violation[] {
   const workspace = loadCargoWorkspace(root);
-  return [...noTauriInRustCrates(workspace), ...noTauriReachingCore(workspace)];
+  return [
+    ...noTauriInRustCrates(workspace),
+    ...noTauriReachingCore(workspace),
+    ...noUnknownCrates(walk(root, includeFixtures), workspace),
+  ];
 }
 
 /**
@@ -496,5 +532,8 @@ export function runCargoRules(root: string): Violation[] {
  * @throws {CargoMetadataError} see {@link runCargoRules}.
  */
 export function runAllRules(root: string, includeFixtures = false): Violation[] {
-  return [...runSourceRules(root, includeFixtures), ...runCargoRules(root)];
+  return [
+    ...runSourceRules(root, includeFixtures),
+    ...runCargoRules(root, includeFixtures),
+  ];
 }
