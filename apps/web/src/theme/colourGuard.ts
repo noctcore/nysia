@@ -80,10 +80,23 @@ const PALETTE_CLASS = new RegExp(
  *    property required in front, a template literal is no more ambiguous than a quoted
  *    one, so all three quote characters are in scope.
  *
- * What it still cannot see, stated so the next reader knows it is known: a colour that
- * reaches CSS through a variable rather than a literal (`color: chosen`), and a colour
- * name in a string that no property introduces. Both need types or a parser rather than a
- * sweep; the hex and colour-function rules, which do scan whole files, are the backstop.
+ * The first attempt at that prefix required the literal to sit immediately after the
+ * property and a colon, which quietly dropped most of what the blunt rule had been
+ * catching. Every one of these has a painting property in front of it and was invisible:
+ * a ternary between the separator and the literal, which is how a component ordinarily
+ * writes a conditional colour; a template literal whose interpolation contains quotes; a
+ * JSX attribute, which separates with an equals sign rather than a colon; an assignment
+ * through the style object; a `setProperty` call, whose separator is a comma; and a quoted
+ * key, where the quote between the property and the colon broke the match. So the
+ * separator is now either punctuation, an arbitrary expression is allowed to sit between
+ * it and the literal, and each quote character gets its own pattern — which also lets a
+ * value contain the *other* quote, catching a shorthand whose url is quoted inside it.
+ *
+ * What it still cannot see, stated so the next reader knows it is known and can trust the
+ * rest of this list: a colour that reaches CSS through a variable rather than a literal,
+ * and a colour name in a string that no painting property introduces. Both need types or a
+ * parser rather than a sweep; the hex and colour-function rules, which do scan whole files,
+ * are the backstop.
  */
 const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
 
@@ -97,10 +110,41 @@ const PAINTING_PROPERTY =
   '[a-zA-Z-]*[cC]olor|background|background-?[iI]mage|' +
   'border(?:-?(?:top|right|bottom|left|Top|Right|Bottom|Left))?|' +
   'outline|fill|stroke|box-?[sS]hadow|text-?[sS]hadow';
-const STYLE_VALUE = new RegExp(
-  `(?:${PAINTING_PROPERTY})\\s*:\\s*(['"\`])([^'"\`\\n]*)\\1`,
-  'g',
-);
+
+/**
+ * The property and its separator.
+ *
+ * The leading guard is what stops the list matching inside a longer word — without it
+ * `stroke` matched in `keystroke` and `fill` in `autofill` or `refill`, so the rule that
+ * had just stopped crying wolf on bare strings started crying wolf on identifiers instead.
+ * The other two rules have had that guard from the start.
+ *
+ * Two separator shapes: bare property then colon or equals, which covers an object literal,
+ * a JSX attribute and an assignment; or quoted property then comma, colon or equals, which
+ * covers a quoted key and `setProperty`.
+ */
+const PROPERTY_INTRO =
+  `(?<![\\w-])(?:${PAINTING_PROPERTY})(?:\\s*[:=]|['"\`]\\s*[,:=])`;
+
+/**
+ * Whatever sits between the separator and the literal — a ternary head, a call, nothing.
+ *
+ * It may not cross a quote, a semicolon or a line end, so it cannot wander into the next
+ * statement, and it is length-capped so a long line cannot let it reach a literal that has
+ * nothing to do with the property.
+ */
+const BEFORE_VALUE = `[^'"\`;\\n]{0,80}`;
+
+/**
+ * One pattern per quote character rather than one with a backreference, so a value may
+ * contain the other two. That is what catches a shorthand carrying a quoted url, and it is
+ * the only way the template pattern can see through an interpolation that contains quotes.
+ */
+const STYLE_VALUES: readonly RegExp[] = [
+  new RegExp(`${PROPERTY_INTRO}${BEFORE_VALUE}'([^'\\n]*)'`, 'g'),
+  new RegExp(`${PROPERTY_INTRO}${BEFORE_VALUE}"([^"\\n]*)"`, 'g'),
+  new RegExp(`${PROPERTY_INTRO}${BEFORE_VALUE}\`([^\`]*)\``, 'g'),
+];
 const NAMED_COLOURS = new Set(
   ('aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue ' +
     'blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue ' +
@@ -149,12 +193,14 @@ export function findColourLiterals(source: string): readonly ColourLiteral[] {
       }
     }
   }
-  for (const match of source.matchAll(STYLE_VALUE)) {
-    const value = (match[2] ?? '').toLowerCase();
-    for (const word of value.matchAll(/[a-z]+/g)) {
-      if (NAMED_COLOURS.has(word[0])) {
-        found.push({ kind: 'named-colour', text: match[0] });
-        break;
+  for (const pattern of STYLE_VALUES) {
+    for (const match of source.matchAll(pattern)) {
+      const value = (match[1] ?? '').toLowerCase();
+      for (const word of value.matchAll(/[a-z]+/g)) {
+        if (NAMED_COLOURS.has(word[0])) {
+          found.push({ kind: 'named-colour', text: match[0] });
+          break;
+        }
       }
     }
   }

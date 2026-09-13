@@ -41,6 +41,9 @@ const OFFENDERS = [
   { kind: 'palette-class', snippet: 'className="text-red-500"' },
   { kind: 'named-colour', snippet: 'className="[color:red]"' },
   { kind: 'named-colour', snippet: "style={{ color: 'red' }}" },
+  // The concrete failure a colon-flush pattern let through: on main this injected line
+  // turned the sweep red, and it would not have here.
+  { kind: 'named-colour', snippet: "style={{ color: failed ? 'red' : undefined }}" },
 ] as const;
 
 describe('findColourLiterals', () => {
@@ -110,6 +113,86 @@ describe('findColourLiterals', () => {
     expect(findColourLiterals('style={{ color: `red` }}').map((c) => c.kind)).toEqual([
       'named-colour',
     ]);
+  });
+
+  it('finds a colour behind an expression, not only one flush against the colon', () => {
+    // The ordinary React conditional style, and the shape that a colon-flush pattern
+    // silently stopped seeing — a component writing one of these on main went red and on
+    // the first version of the property prefix stayed green.
+    for (const conditional of [
+      "style={{ color: active ? 'red' : 'gray' }}",
+      'style={{ color: failed ? "red" : undefined }}',
+      "style={{ backgroundColor: pick(state) ?? 'navy' }}",
+    ]) {
+      expect(findColourLiterals(conditional).map((c) => c.kind), conditional).toContain(
+        'named-colour',
+      );
+    }
+  });
+
+  it('finds a colour inside a template whose interpolation carries quotes', () => {
+    const shorthand = "style={{ border: `1px solid ${on ? 'red' : 'gray'}` }}";
+    expect(findColourLiterals(shorthand).map((c) => c.kind)).toContain('named-colour');
+  });
+
+  it('finds a colour on a JSX attribute, which separates with an equals sign', () => {
+    for (const attribute of ['fill="red"', 'stroke="navy"', 'color="red"']) {
+      expect(findColourLiterals(attribute).map((c) => c.kind), attribute).toEqual([
+        'named-colour',
+      ]);
+    }
+  });
+
+  it('finds a colour assigned through the style object', () => {
+    expect(findColourLiterals("el.style.color = 'red';").map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
+    expect(
+      findColourLiterals("el.style.setProperty('color', 'red');").map((c) => c.kind),
+    ).toEqual(['named-colour']);
+  });
+
+  it('finds a colour under a quoted key', () => {
+    // The quote between the property and the colon used to break the match.
+    expect(findColourLiterals("{ 'color': 'red' }").map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
+    expect(findColourLiterals('{ "background-color": "red" }').map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
+  });
+
+  it('finds a colour beside a url quoted inside the same value', () => {
+    // Missed by every earlier version of the rule, because the inner quote closed the
+    // value early. One pattern per quote character is what lets the value carry the others.
+    expect(
+      findColourLiterals(`style={{ background: "url('a.png') no-repeat red" }}`).map(
+        (c) => c.kind,
+      ),
+    ).toEqual(['named-colour']);
+  });
+
+  it('does not match a painting property inside a longer word', () => {
+    // `fill` in `autofill`, `stroke` in `keystroke`. Fixing the bare-string false
+    // positives must not introduce an identifier-shaped set of them instead.
+    for (const innocent of [
+      "{ autofill: 'gold' }",
+      "{ keystroke: 'tan' }",
+      "{ refill: 'tan' }",
+      "{ unfilled: 'navy' }",
+    ]) {
+      expect(findColourLiterals(innocent), innocent).toEqual([]);
+    }
+  });
+
+  it('does not let the expression wander into the next statement', () => {
+    // The span between the separator and the literal stops at a semicolon, a quote or a
+    // line end, so a painting property cannot reach a literal that has nothing to do
+    // with it.
+    expect(findColourLiterals(['const color = pick();', "const tier = 'gold';"].join('\n'))).toEqual(
+      [],
+    );
+    expect(findColourLiterals("const color = pick(); const tier = 'gold';")).toEqual([]);
   });
 
   it('stays quiet on a string that no style property introduces', () => {
