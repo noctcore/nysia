@@ -144,6 +144,25 @@ export class TerminalRouter {
     }
   }
 
+  /**
+   * Drop every surface and the decoder's half-read frame, for a new stream connection.
+   *
+   * Ids do not survive a reconnect — proto scopes them to one stream connection — so a
+   * surface keyed by one describes nothing on the next. A daemon whose counter restarted
+   * would otherwise hand the first new session id 1 and have its output painted into
+   * whichever pane held id 1 before.
+   *
+   * Unlike {@link dispose} this sends no final acks: the connection they would travel on is
+   * gone, and the daemon has already released that connection's credit with the ids.
+   */
+  resetStreams(): void {
+    for (const surface of this.#surfaces.values()) {
+      surface.dispose();
+    }
+    this.#surfaces.clear();
+    this.#frameDecoder.reset();
+  }
+
   /** Tear everything down. */
   dispose(): void {
     for (const stream of [...this.#surfaces.keys()]) {

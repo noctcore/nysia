@@ -69,6 +69,7 @@ class FakeDaemon implements DaemonBridge {
         this.#connected = true;
         return undefined as T;
       case 'stream_attach': {
+        this.attachCalls += 1;
         // Both refusals are real: `attach_session` needs a stream connection, and the daemon
         // cannot route a session it does not hold.
         if (this.attaches === 0) {
@@ -97,7 +98,11 @@ class FakeDaemon implements DaemonBridge {
         return this.sessions.map((session) => ({ ...session })) as T;
       case 'session_create': {
         const request = args?.request as { kind: 'agent' | 'shell' } | undefined;
-        const created = session(this.sessions.length + 1, request?.kind ?? 'shell');
+        // Monotonic, never `sessions.length + 1`: a daemon does not reuse a pane key after a
+        // session closes, and a fake that did would hide a stale entry behind a new session
+        // that happened to land on the same key.
+        this.#nextSession += 1;
+        const created = session(this.#nextSession, request?.kind ?? 'shell');
         this.sessions.push(created);
         return created.handle as T;
       }
@@ -122,16 +127,32 @@ class FakeDaemon implements DaemonBridge {
     this.#delivery = onDelivery;
   }
 
+  /** Start from a set of sessions, without letting their numbers be handed out again. */
+  seed(sessions: WireSession[]): void {
+    this.sessions = sessions;
+    this.#nextSession = sessions.length;
+  }
+
   /** Push a delivery the way the one Channel would. */
   send(bytes: Uint8Array): void {
     this.#delivery?.(bytes);
   }
 
+  /** How many `stream_attach` round trips this daemon has served, across all connections. */
+  attachCalls = 0;
+  /** Sessions ever created, so a pane key is never handed out twice. */
+  #nextSession = 0;
+
   /** Pretend the socket dropped. */
   drop(): void {
     this.#connected = false;
     this.attaches = 0;
+    // Both are properties of the *stream connection*, and it is gone. Proto scopes a
+    // `StreamId` to one connection, and a fresh connection counts from the first id again —
+    // modelling that is what makes a client which reuses ids across a reconnect fail here
+    // rather than in front of a user.
     this.streams.clear();
+    this.#nextStream = 1;
     const resolve = this.#dropped;
     this.#dropped = null;
     resolve?.();
@@ -171,8 +192,8 @@ function stubTerminals(): TerminalFactory {
 
 function build(seed = 2): { store: DaemonStore; daemon: FakeDaemon } {
   const daemon = new FakeDaemon();
-  daemon.sessions = Array.from({ length: seed }, (_, index) =>
-    session(index + 1, index === 0 ? 'agent' : 'shell'),
+  daemon.seed(
+    Array.from({ length: seed }, (_, index) => session(index + 1, index === 0 ? 'agent' : 'shell')),
   );
   const store = new DaemonStore({
     bridge: daemon,
@@ -318,6 +339,60 @@ describe('the connection', () => {
     await until(() => daemon.connects > 1);
     expect(daemon.connects).toBeGreaterThan(1);
     await until(() => store.getSnapshot().status === 'ready');
+  });
+
+  it('re-attaches every session after a reconnect, and routes their output', async () => {
+    // `ready` is not the claim worth making, and asserting only that was how this suite
+    // missed the defect entirely: the store reached `ready` perfectly while every pane had
+    // been left silent for the rest of the process. A `StreamId` belongs to one stream
+    // connection, so ids learned before the drop describe nothing after it — the sessions
+    // have to be attached again, and their output has to arrive.
+    const { store, daemon } = build(2);
+    await ready(store);
+    expect(daemon.attachCalls).toBe(2);
+
+    const before = store.getSnapshot().tabs.map((tab) => store.surfaceStream(tab.paneKey));
+    expect(before.every((stream) => stream !== null)).toBe(true);
+
+    daemon.drop();
+    await until(() => store.getSnapshot().status === 'ready' && daemon.connects > 1);
+    await until(() => daemon.attachCalls >= 4);
+
+    expect(
+      daemon.attachCalls,
+      'every session must be attached again on the new connection',
+    ).toBe(4);
+
+    // And the ids the store now holds are the ones this connection assigned.
+    for (const tab of store.getSnapshot().tabs) {
+      const stream = store.surfaceStream(tab.paneKey);
+      expect(stream).not.toBeNull();
+      expect(stream).toBe(daemon.streams.get(tab.handle));
+    }
+
+    // Output on a reissued id reaches the pane that owns it now, not the one that held the
+    // same number before the drop.
+    const [first] = store.getSnapshot().tabs;
+    const stream = store.surfaceStream(first?.paneKey ?? '') ?? 0;
+    store.terminals.surface(stream).show({} as HTMLElement);
+    expect(() =>
+      daemon.send(encodeFrame('output', stream, new Uint8Array(64))),
+    ).not.toThrow();
+  });
+
+  it('forgets a session the daemon no longer holds', async () => {
+    // The map is what decides whether a session still needs attaching, so an entry for a
+    // handle closed in another window is a pane that never gets reattached.
+    const { store, daemon } = build(2);
+    await ready(store);
+    const [, second] = store.getSnapshot().tabs;
+    const gone = second?.paneKey ?? '';
+
+    daemon.sessions = daemon.sessions.slice(0, 1);
+    await store.selectNav('tasks');
+    await store.openTab('shell.pwsh');
+
+    expect(store.surfaceStream(gone)).toBeNull();
   });
 
   it('gives up rather than looping when waiting cannot help', async () => {
