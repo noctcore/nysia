@@ -118,14 +118,6 @@ function WorktreeBlock({ worktree }: { readonly worktree: Worktree }) {
   );
 }
 
-const STATUS_DOT: Readonly<Record<SessionSummary['status'], string>> = {
-  idle: 'bg-fg3',
-  running: 'bg-status-running',
-  needsInput: 'bg-status-needs-input',
-  queued: 'bg-status-queued',
-  failed: 'bg-status-failed',
-};
-
 function SessionRow({
   session,
   now,
@@ -146,12 +138,10 @@ function SessionRow({
       }`}
     >
       {session.kind === 'agent' ? (
-        // The agent row marks *status*, not identity — the accent asterisk belongs to the
-        // tab strip, the lifecycle dot belongs here.
-        <span
-          aria-hidden="true"
-          className={`size-1.5 flex-none rounded-full ${STATUS_DOT[session.status]}`}
-        />
+        // The accent, not a status colour. design-spec.md §3 is specific about this: the
+        // dot says "an agent lives here", and the lifecycle palette belongs to the Tasks
+        // table, where a row has to be triaged at a glance among dozens.
+        <span aria-hidden="true" className="bg-acc size-1.5 flex-none rounded-full" />
       ) : (
         <span aria-hidden="true" className="font-mono text-[10px]">
           {GLYPH.shell}
