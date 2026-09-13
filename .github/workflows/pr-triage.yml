@@ -68,3 +68,23 @@ jobs:
           repo-token: ${{ github.token }}
           # Add only. A label a reviewer applied by hand is never removed by this run.
           sync-labels: false
+
+  assign:
+    name: assign when unassigned
+    runs-on: ubuntu-latest
+    # Only when nobody owns the PR yet — an existing assignee, human or otherwise, is
+    # left exactly as it is. Bots assign their PRs to nobody on purpose; leave them.
+    if: >-
+      github.event.pull_request.assignees[0] == null &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    permissions:
+      pull-requests: write
+    steps:
+      - name: assign to the maintainer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr edit "$PR" --add-assignee Shironex
+          echo "::notice::Assigned #$PR to Shironex; it had no assignee."
