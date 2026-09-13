@@ -1,8 +1,11 @@
+# Rule (c): the daemon binary reaching tauri through apps/desktop. Nothing here names tauri,
+# so rule (b) cannot see it, and the reach search used to be seeded from nysia-core alone —
+# which left exactly this crate, the runtime D-1 protects, able to link the UI toolkit with
+# no gate tripping.
 [package]
 name = "nysia"
 version = "0.0.0"
 edition = "2021"
 
-[dependencies."ui"]   # a quoted table header, and a rename
-path = "../../vendor/tauri"
-package = "tauri"
+[dependencies]
+nysia-desktop = { path = "../../apps/desktop/src-tauri" }

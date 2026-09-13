@@ -103,12 +103,12 @@ process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-out
 // ---------------------------------------------------------------------------------------
 const cargoTrips = runCargoRules(fixture('cargo', 'violating'));
 expectRule(cargoTrips, 'no-tauri-in-rust-crates');
-expectRule(cargoTrips, 'no-tauri-reaching-core');
+expectRule(cargoTrips, 'no-tauri-reaching-rust-crates');
 
-// crates/nysia can reach tauri straight out of [workspace.dependencies] without editing a
-// shared file, so every crate is inspected and not only the chain rooted at nysia-core.
-// Here it is declared through a rename under a quoted table header.
-expectFile(cargoTrips, 'no-tauri-in-rust-crates', 'crates/nysia/Cargo.toml');
+// A crate can reach tauri straight out of [workspace.dependencies] without editing a shared
+// file, so every crate is inspected and not only the chain rooted at nysia-core. Here it is
+// declared through a rename under a quoted table header.
+expectFile(cargoTrips, 'no-tauri-in-rust-crates', 'crates/nysia-hook/Cargo.toml');
 expectMessage(cargoTrips, 'no-tauri-in-rust-crates', 'package = "tauri"');
 
 // Declared under a quoted key, in a `[ dependencies ]` header carrying whitespace and a
@@ -118,7 +118,13 @@ expectFile(cargoTrips, 'no-tauri-in-rust-crates', 'crates/nysia-proto/Cargo.toml
 // nysia-core's manifest carries a trailing comment after `[package]`. The old parser could
 // not read its name and dropped that crate from the scan entirely, so rules (b) and (c) went
 // blind on it; cargo has no such trouble and the chain through it is visible.
-expectMessage(cargoTrips, 'no-tauri-reaching-core', 'nysia-core -> nysia-proto -> tauri');
+expectMessage(cargoTrips, 'no-tauri-reaching-rust-crates', 'nysia-core -> nysia-proto -> tauri');
+
+// The daemon binary reaching tauri through apps/desktop. Nothing in its manifest names
+// tauri, so rule (b) cannot see it, and seeding the reach search from nysia-core alone left
+// this crate — the runtime D-1 protects — able to link the UI toolkit with nothing tripping.
+expectFile(cargoTrips, 'no-tauri-reaching-rust-crates', 'crates/nysia/Cargo.toml');
+expectMessage(cargoTrips, 'no-tauri-reaching-rust-crates', 'nysia -> nysia-desktop -> tauri');
 
 // Reading the graph rather than every Cargo.toml on disk narrows the rule in one way: a
 // crate that is not a workspace member never appears in it. Reported rather than skipped,
