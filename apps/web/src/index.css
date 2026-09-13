@@ -26,6 +26,18 @@
  * status is semantics — there is no code path from the accent picker to these four.
  */
 @theme {
+  /*
+   * Close the default palette first.
+   *
+   * Without this line Tailwind's whole built-in ramp stays reachable, so a component can
+   * write a palette utility and compile — a colour that has nothing to do with the theme
+   * and will never follow the switcher. The colour guard cannot catch what it cannot see
+   * compile, so the stronger fix is that the class does not exist. `transparent`,
+   * `current` and `inherit` are static utilities in Tailwind 4 rather than theme keys, so
+   * they survive this and stay usable.
+   */
+  --color-*: initial;
+
   /* Surfaces and text — Ember. */
   --color-bg0: #090b10;
   --color-bg1: #0c0f15;
