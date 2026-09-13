@@ -437,8 +437,74 @@ Each of these cost someone a day already.
 1. **Windows confinement.** Lexical gates only in v1 (§7.5). Is there an acceptable OS-level story later — AppContainer, a restricted token, or WSL-only agent sessions?
 2. **Scrollback persistence budget.** Orca: 5k rows default, 512 KiB replay, 5 MiB store, up to 200 MB history checkpoints. What is Nysia's ceiling, and does it survive a daemon crash or only a clean restart?
 3. **Memory expectations.** Orca on this machine: app 1.1 GB, 356–817 MB *per worktree*, PTY daemon 88 MB for 5 terminals. The agent processes are the entire cost. Tauri saves the Electron renderer, not the expensive part — so what is the honest performance claim?
-4. **Daemon crash blast radius.** Under D-2 the daemon owns more than Orca's does. SQLite WAL and atomic JSON cover state, but what supervises the daemon itself, and does a crash kill the PTYs it owns? (It does — the children are in its process tree. Orca accepts the same.)
-5. **How does the GUI discover and start the daemon?** Spawn-if-absent on app launch is obvious, but two clients racing to spawn needs a lock, and a stale socket file from a killed daemon needs to be distinguishable from a live one. Orca uses a pid-record with `startedAtMs` + `launchNonce`.
+4. **Daemon crash blast radius.** ~~Under D-2 the daemon owns more than Orca's does.~~
+   **Answered in wave 2 (W4).** A crash takes the sessions with it, and nothing pretends
+   otherwise.
+
+   - **The PTYs die with the daemon, by construction.** On Windows every child is in a Job
+     Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so the kernel tears the tree down when
+     the last handle closes — which is exactly what a crash does. On Unix the children are in
+     the daemon's process tree. This is not a regression against Orca, whose PTY daemon has
+     the same property; it is the cost §4 names, paid knowingly in exchange for deleting the
+     compensating layer.
+   - **Nothing supervises the daemon in v0.1, and that is deliberate.** A supervisor that
+     restarts a daemon whose sessions are already gone restores an empty runtime, which is
+     what the next client does anyway by spawning one. Adding a supervisor before there is
+     state worth resurrecting would be machinery with nothing to protect.
+   - **What a crash leaves behind is safe to find.** The lease file outlives the process, so
+     nothing may read its presence as proof of life — see question 5. On Unix the socket file
+     outlives it too and refuses connections; on Windows the pipe name stops existing with the
+     last handle. Both are the "nothing is listening" answer, and both lead a client to start
+     a fresh daemon rather than attach to a corpse.
+   - **What is *not* lost:** the clients. Every connection simply fails, and the CLI's error
+     envelope says to retry — which starts a daemon. There is no fencing, no generation
+     counter and no "restored authority" path, because authority was never delegated.
+   - **Open beyond v0.1:** once the store holds sessions worth resurrecting (v0.4+), the
+     question becomes whether a restarted daemon should re-spawn the shells it lost. Today it
+     cannot: a shell's process state is not in SQLite and never will be.
+5. **How does the GUI discover and start the daemon?** ~~Spawn-if-absent on app launch is
+   obvious, but two clients racing to spawn needs a lock…~~
+   **Answered in wave 2 (W4)**, and it is the same code path for the GUI and for `nysia
+   <verb>` — `nysia_core::rpc::discovery`, which the window links like everyone else.
+
+   **Liveness is three steps, and never the pid.** A pid that still exists says nothing: pids
+   are reused, and attaching to whatever now holds an old number is the failure the launch
+   nonce exists to prevent. So:
+
+   1. **connect** to the versioned endpoint;
+   2. **`hello`**, and read back `daemonIdentity`;
+   3. **`PidRecord::describes`** — the lease beside the endpoint must describe *that*
+      identity. When it does not, something is listening and it is not what the file says,
+      which a crash and an immediate restart produces. The connection is still good; the
+      record is what is stale.
+
+   **Stale endpoints differ by platform, and only one platform has the problem.** A Unix
+   socket file outlives its daemon and refuses connections — a far stronger signal than the
+   file's existence, and the one discovery acts on. A Windows pipe *name* is the object and
+   stops existing when the last handle closes, so there is no such thing as a stale pipe.
+
+   **The race is settled by the kernel, twice over.** Whoever binds the endpoint wins:
+   `first_pipe_instance` refuses the second creator on Windows, `bind` fails with `AddrInUse`
+   on Unix, and a daemon that loses exits zero rather than reporting a failure — what it was
+   started to guarantee is true. In front of that sits a spawn lock held by the operating
+   system (`flock`, or an exclusive Windows share mode) rather than a flag written in a file,
+   so a spawner killed mid-spawn releases it and there is no stale lock to reason about. The
+   loser of the race does not fail; it waits for the winner's daemon and uses that one.
+
+   **Idle retire is not a verb.** §3.1 sketched `shutdownIfIdle` as something a caller asks
+   for; `nysia-proto` ships no such verb and proto is the sole authority on the wire (D-13),
+   so the daemon decides for itself: no clients, no sessions, nothing in flight, sustained for
+   a grace period. **A daemon holding a session never retires**, and the grace only arms once
+   a client has connected and gone, so a freshly spawned daemon does not exit in the moment
+   before its spawner dials in.
+
+   **One trap worth writing down.** On Windows a redirected spawn inherits *every* inheritable
+   handle, not only the three that were named — including the write end of the pipe the
+   spawner's own stdout happens to be. A daemon started from inside `H=$(nysia session
+   create)` therefore held that pipe open for its whole life and the shell waited forever for
+   output it already had. The parent's standard handles are detached before the spawn, and
+   `crates/nysia/tests/survival.rs` has a regression test that reports the hang rather than
+   hanging on it.
 
 ---
 
