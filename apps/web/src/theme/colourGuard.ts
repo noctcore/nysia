@@ -114,17 +114,31 @@ const PALETTE_CLASS = new RegExp(
  *  - an expression between the property and the literal that contains a semicolon, a comma
  *    or a brace, or that runs past the length cap. Those are what stop the span crossing
  *    out of the value it belongs to, and the price is a call with more than one argument.
- *  - a painting property this list does not name. It covers CSS, and a library that takes
- *    its own colour keys — a terminal theme object, a chart config — is outside it. A key
- *    that merely *contains* one of these words is outside it too: the boundary guard that
- *    stops `fill` matching inside `autofill` is the same guard, and the same trade.
+ *  - a painting property the list does not name. It is a useful subset of CSS, not CSS —
+ *    `text-decoration`, `column-rule`, `text-emphasis`, the `border-inline` and
+ *    `border-block` families, and `filter` or `backdrop-filter` carrying a drop shadow are
+ *    all absent. The sentence here used to say it covered CSS, which was simply false.
+ *  - a colour key belonging to a library rather than to CSS: a terminal theme object, a
+ *    chart config. A key that merely *contains* one of the listed words is outside it too,
+ *    because the boundary guard that stops `fill` matching inside `autofill` is the same
+ *    guard and the same trade.
+ *  - bare CSS text carried inside a string or a template — a `cssText` assignment, a
+ *    tagged `css` template, a `style` attribute inside a markup string. The rule looks for
+ *    a property introducing a literal, and in all three the property is *inside* the
+ *    literal. Needs a CSS parser, not a wider pattern.
+ *  - a custom property whose name is computed, which is to say a template-literal key.
+ *    There is no name in the source for the pattern to match.
  *
  * The hex and colour-function rules, which do scan whole files, are the backstop for every
  * one of them, listed or not: only a *named* colour can hide in any of these.
  *
- * In the other direction, the rule does have false positives — a value that merely contains
- * a colour word, most obviously a url with one in the path. They are tracked separately;
- * none of them is silent, so none of them can ship a pixel.
+ * In the other direction, the rule has false positives. A value that merely contains a
+ * colour word, most obviously a url with one in the path. And a statement that ends without
+ * a semicolon followed by an unrelated string on the next line, since the span crosses line
+ * ends and only punctuation stops it — this tree is semicolon-terminated throughout and
+ * nothing enforces that, so it is a live trap rather than a theoretical one. Both are loud:
+ * a false positive fails the sweep and gets looked at, which is why they cost less than the
+ * misses above and are tracked separately.
  */
 const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
 
