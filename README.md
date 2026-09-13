@@ -47,9 +47,11 @@ cargo run -p nysia -- --daemon    # what will become nysiad
 ```
 
 `nysia` is one binary that is both the daemon and the CLI, selected by argv (D-11). In this
-scaffold `--daemon` prints what it would do and exits, and every verb resolves to a typed
-"not implemented in the v0.1 scaffold" error with exit code 3. The socket server lands in
-wave 2.
+scaffold nothing is implemented yet, so every mode — `--daemon` included — writes to stderr
+and exits **3**. That is deliberate: a stub daemon that exited 0 would read as success to
+any supervisor that spawned it and checked the status. Clap's usage errors stay at 2, so
+"you typed it wrong" and "this build cannot do that yet" remain distinguishable. The socket
+server lands in wave 2.
 
 ### Gates
 
@@ -76,7 +78,7 @@ anything is worse than no check:
 
 ```
 pnpm prove:ts-drift      # mutates nysia-proto, asserts the drift guard exits 1, restores it
-pnpm prove:lint-meta     # runs both architecture rules against a fixture that breaks them
+pnpm prove:lint-meta     # runs every architecture rule against fixtures that break it
 pnpm prove:eslint-bans   # lints virtual files to prove no-restricted-imports still bites
 pnpm prove               # all three
 ```
