@@ -1,0 +1,5 @@
+# Pinned so every worker, every worktree and both CI runners compile with the same
+# rustc. Bumping this is a coordinator-owned change.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,14 @@
+# ts-rs reads these when `cargo test export_bindings` runs. Cargo discovers this file by
+# walking up from the *current working directory*, so every binding-producing command must
+# run with cwd = this crate (traps register #1). From the repo root the environment is
+# unset, the bindings land in a gitignored `bindings/`, and the drift guard passes
+# vacuously.
+#
+# `force` is deliberately absent: the drift guard overrides TS_RS_EXPORT_DIR with a temp
+# directory from the environment, and an environment value only wins when cargo is not
+# forcing one.
+[env]
+TS_RS_EXPORT_DIR = { value = "../../apps/web/src/generated", relative = true }
+# `u32`/`i32` are what the identity types use; this keeps any future 64-bit field from
+# silently becoming a `bigint` on the TypeScript side.
+TS_RS_LARGE_INT = "number"

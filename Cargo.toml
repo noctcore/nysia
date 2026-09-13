@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = ["crates/nysia-proto"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/Shironex/nysia"
+
+# Every dependency v0.1 will need is declared here by the scaffold wave, so that both
+# lockfiles are fully populated and no later wave has to touch a shared file. Adding a
+# crate to this table is a coordinator-owned change.
+[workspace.dependencies]
+nysia-core = { path = "crates/nysia-core" }
+nysia-proto = { path = "crates/nysia-proto" }
+
+# PTY. Pinned to git `main`, never crates.io 0.9.0: the published release drops the
+# ConPTY `RESIZE_QUIRK` / `WIN32_INPUT_MODE` flags we depend on (traps register #5).
+portable-pty = { git = "https://github.com/wezterm/wezterm", branch = "main" }
+# Terminal state lives in Rust (D-7); this is the grid.
+alacritty_terminal = "0.26"
+# State store (D-12). `bundled` so the SQLite amalgamation is compiled in and no
+# system library has to be present on a contributor's machine.
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+tokio = { version = "1.53", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Rust is the sole wire authority; TypeScript is generated from it, never the reverse (D-13).
+ts-rs = "12.0"
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.6", features = ["derive"] }
+uuid = { version = "1.26", features = ["v4", "serde"] }
+
+tauri = { version = "2.11", features = [] }
+tauri-build = { version = "2.6", features = [] }
+
+# Job Objects with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` are the only way to tree-kill a
+# ConPTY child on Windows, which has no signals (traps register #7).
+[workspace.dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+]
+
+# CLAUDE.md §6 as a gate rather than a convention. `clippy.toml` re-allows both inside
+# tests, where a panic is the assertion.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[workspace.lints.rust]
+missing_docs = "warn"

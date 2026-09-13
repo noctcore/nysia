@@ -1,0 +1,13 @@
+//! Nysia's wire types.
+//!
+//! Every message that crosses the daemon socket, and every type the webview is allowed to
+//! know about, is defined here and exported to TypeScript with `ts-rs`. The generation is
+//! one-way — Rust → TypeScript, never the reverse (D-13) — so this crate is the single
+//! authority on the shape of the wire.
+//!
+//! The generated TypeScript is committed under `apps/web/src/generated/` and a drift guard
+//! (`pnpm ts-drift`) fails the build when it stops matching what this crate produces.
+
+pub mod identity;
+
+pub use identity::{IdentityError, Incarnation, PaneKey, SessionHandle, SessionKind};
