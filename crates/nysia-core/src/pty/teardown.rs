@@ -444,11 +444,10 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn the_tree_of_a_live_session_contains_its_own_processes() {
-        // The sweep is worth nothing if it cannot see a live tree, and this test process is
-        // in one. Collecting from this session's own leader must find at least this
-        // process's siblings — and never this process itself, which the sweep would
-        // otherwise signal.
+    fn the_sweep_sees_a_live_process_and_never_includes_the_caller() {
+        // Two properties, both of which the sweep would be dangerous without, and neither of
+        // which is "the tree has the right contents" — that is the test below, which builds
+        // a process it can name.
         // SAFETY: `getsid(0)` and `getpid` ask about the calling process and cannot fail.
         let (own_session, own_pid) = unsafe { (libc::getsid(0), libc::getpid()) };
         assert!(own_session > 0);
@@ -467,21 +466,46 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_child_of_the_leader_is_collected_even_from_a_process_group_of_its_own() {
-        // The macOS case in miniature, and the one `killpg` alone misses: a process that is
-        // a child of the leader but has left its process group. Collected through the
-        // parent relation, which is why that relation exists.
-        let mut child = std::process::Command::new("/bin/sh")
+        // The macOS case in miniature, and the one `killpg` alone misses. The child calls
+        // `setpgid` for itself before exec, so it really has left the caller's process
+        // group: without that the test would have been asserting the easy case and calling
+        // it the hard one.
+        use std::os::unix::process::CommandExt;
+
+        let mut command = std::process::Command::new("/bin/sh");
+        command
             .args(["-c", "sleep 30"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("/bin/sh must spawn");
+            .stderr(std::process::Stdio::null());
+        // SAFETY: `setpgid` is async-signal-safe and touches no memory. Making the child
+        // its own group leader is the whole point of the test.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("/bin/sh must spawn");
         let child_pid = i32::try_from(child.id()).expect("a pid is positive");
 
-        // SAFETY: `getpid` cannot fail. The child is ours, so it is in our session and its
-        // parent is this process; collecting from this process must reach it.
+        // SAFETY: `getpid` and `getpgid` cannot fail for the calling process.
         let own_pid = unsafe { libc::getpid() };
+        // The child is in a group of its own, so a group-based sweep would miss it.
+        // SAFETY: `getpgid` on a live child of ours.
+        let child_group = unsafe { libc::getpgid(child_pid) };
+        assert_eq!(
+            child_group, child_pid,
+            "the child should lead its own process group"
+        );
+        assert_ne!(
+            child_group,
+            unsafe { libc::getpgid(own_pid) },
+            "and that group should not be the caller's"
+        );
+
         let tree = collect_tree(u32::try_from(own_pid).expect("a pid is positive"));
         assert!(
             tree.contains(&child_pid),
