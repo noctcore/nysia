@@ -40,8 +40,10 @@ import {
  * One thing this rule cannot see: `no-restricted-imports` does not cover `require()`, and
  * `no-restricted-modules` was removed in ESLint 9. The split is deliberate — ESLint owns
  * `import` and `export … from`; lint-meta owns `require()`, dynamic `import()` **with a
- * literal specifier**, and `import.meta.glob`. A specifier built from a variable or a
- * concatenation is beyond both layers, and `rules.ts` says so at the rule (#19).
+ * literal specifier**, and `import.meta.glob`. lint-meta reads those from a syntax tree
+ * rather than from the text, so the two layers now disagree about nothing a parser can see.
+ * A specifier built from a variable or a concatenation is beyond both, and `rules.ts` says
+ * so at the rule (#19).
  */
 
 /**

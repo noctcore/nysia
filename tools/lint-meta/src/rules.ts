@@ -1,6 +1,8 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, posix, relative, sep } from 'node:path';
 
+import { Minimatch } from 'minimatch';
+
 import {
   BUNDLED_EXTENSIONS,
   STORE_CONTEXT_ALLOWED,
@@ -11,6 +13,7 @@ import {
   matches,
   matchesAny,
 } from './boundaries.ts';
+import { moduleReferences } from './moduleReferences.ts';
 import {
   isTauriEdge,
   isTauriPackage,
@@ -66,94 +69,78 @@ export const TAURI_ALLOWLIST: readonly string[] = directoryPrefixes(TAURI_ALLOWE
  */
 const SOURCE_EXTENSIONS = [...BUNDLED_EXTENSIONS.map((e) => `.${e}`), '.rs'];
 
-/**
- * The import forms that actually pull Tauri into a module.
- *
- * Anchored at the start of the line on purpose: an unanchored `from '@tauri-apps/...'`
- * also matches the sample code inside `scripts/prove-eslint-bans.ts`, where those strings
- * are test input rather than imports. A rule that fires on its own proof is a rule people
- * switch off.
- */
-const TS_TAURI_IMPORTS = [
-  /^\s*import\s[^'"]*from\s*['"]@tauri-apps[^'"]*['"]/,
-  /^\s*import\s*['"]@tauri-apps[^'"]*['"]/,
-  /^\s*export\s[^'"]*from\s*['"]@tauri-apps[^'"]*['"]/,
-  // The closing line of a multi-line named import: `}` then `from '@tauri-apps/...'`.
-  /^\s*\}\s*from\s*['"]@tauri-apps[^'"]*['"]/,
-  /(?:^|[^\w.$])import\s*\(\s*['"]@tauri-apps[^'"]*['"]/,
-  /(?:^|[^\w.$])require\s*\(\s*['"]@tauri-apps[^'"]*['"]/,
-];
-
 /** The carve-outs as a reader expects to see them in a message. */
 const STORE_CONTEXT_ALLOWED_FOR_HUMANS = describeBoundaries(STORE_CONTEXT_ALLOWED);
 
 /**
- * A specifier naming `StoreContext`, in any of the three ways JavaScript can quote one.
+ * Does this specifier name the store's context module?
  *
- * The backreference is what makes the template-literal case safe: an apostrophe inside a
- * backticked specifier cannot close it. Any path ending in `StoreContext`, with or without
- * a file extension — the same reach as the ESLint glob patterns, which deliberately do not
- * require `store/` next to the filename, so `../store/./StoreContext` and
- * `../store//StoreContext` are caught here too.
+ * Run against the *cooked* specifier the parser hands back — escapes resolved, quotes gone —
+ * so the three ways JavaScript can quote a string stopped being three cases.
+ *
+ * The query is stripped first, and here that is right for the same reason it is wrong in a
+ * glob: in a specifier `?` opens Vite's query, in a pattern it is the single-character
+ * wildcard. `./StoreContext.ts?raw` used to slip past here while the ESLint pattern ending
+ * in `StoreContext` plus any extension caught it, so the claim that the two had the same
+ * reach was an over-claim. It now has that reach rather than a footnote saying it does not.
+ *
+ * Any path ending in `StoreContext`, with or without a file extension, matching the ESLint
+ * globs, which deliberately do not require `store/` next to the filename — so
+ * `../store/./StoreContext` and `../store//StoreContext` are caught too.
  */
-const STORE_CONTEXT_SPECIFIER = String.raw`(['"\`])[^'"\`]*StoreContext(?:\.[A-Za-z0-9]+)?\1`;
+function namesStoreContext(specifier: string): boolean {
+  const path = specifier.split('?')[0] ?? '';
+  return /(?:^|\/)StoreContext(?:\.[A-Za-z0-9]+)?$/.test(path);
+}
 
 /**
- * Reaching `StoreContext` through a call rather than an `import` statement.
+ * Can this glob pattern reach a module, from the file that wrote it?
  *
- * ESLint's `no-restricted-imports` owns `import` and `export … from`; it does not see
- * `require()` or dynamic `import()`, and `no-restricted-modules` was removed in ESLint 9.
- * The config header in `eslint.config.js` assigns those two to lint-meta. A top-level
- * `await import('../store/StoreContext')` followed by `useContext` hands a component the
- * raw provider back, whose commands return promises that `void` silently drops.
+ * Asked of the matcher and the tree rather than answered by reading the pattern. The
+ * previous version took the pattern apart by hand to find its extension, splitting on `?`
+ * as if a glob carried a URL query — so `*.t?x` read as "pinned to extension t" and was
+ * exempted, while the real matcher returns `StoreProvider.tsx`. Every such question is now
+ * put to a glob matcher over the files that actually exist: resolve the pattern against the
+ * importing file's directory, match it, and see whether anything that comes back is a
+ * module.
  *
- * Matched over the whole file with comments blanked, not line by line. Line by line the
- * rule claimed to match any path ending in `StoreContext` and matched only a single-line,
- * single- or double-quoted one; four spellings of the same call passed lint-meta, ESLint,
- * `tsc` **and** the Vite build (#19): a template literal, the specifier on its own line, a
- * line whose trim started with `/*` — which the guard skipped wholesale, comment or not —
- * and `import.meta.glob`, which is handled separately below because it need not name the
- * file at all.
+ * A leading `!` is stripped because Vite strips it before matching. An exclusion cannot
+ * itself return a file, so a negation can only ever add a report here, never remove one —
+ * which is the safe direction and the reason no attempt is made to work out which patterns
+ * cancel which.
  *
- * WHAT THIS STILL CANNOT SEE, stated rather than implied by silence: a specifier that is
- * not a literal. `import(specifier)`, `import('../store/' + name)` and a template with a
- * `${…}` in it are all invisible here, and ESLint's `no-restricted-imports` is equally
- * blind to the static equivalents. That is an honest limit of reading source text, not an
- * oversight — and it is why the store module keeps the provider unexported from its public
- * surface rather than relying on this rule alone.
- *
- * Lookbehind rather than a consumed delimiter: `matchAll` reports the match index, and a
- * consumed leading newline would put the reported line one above the call.
+ * Two limits, named rather than implied. A pattern that matches nothing today is not
+ * reported, because today it returns nothing; the rule runs on every commit, so it reports
+ * the day a module lands under it. And the matcher is `minimatch`, where Vite's is
+ * `picomatch`: they agree on `*`, `?`, `{…}` and `[…]`, and differ only in exotic syntax
+ * this repository does not use. Using Vite's own would mean declaring it in the root
+ * manifest, which is coordinator-owned.
  */
-const TS_STORE_CONTEXT_CALLS = [
-  new RegExp(String.raw`(?<![\w.$])import\s*\(\s*${STORE_CONTEXT_SPECIFIER}`, 'g'),
-  new RegExp(String.raw`(?<![\w.$])require\s*\(\s*${STORE_CONTEXT_SPECIFIER}`, 'g'),
-];
+function globReachesModule(
+  pattern: string,
+  from: string,
+  files: readonly string[],
+): boolean {
+  const positive = pattern.startsWith('!') ? pattern.slice(1) : pattern;
+  // A root-relative pattern resolves against Vite's root, not this scan's — fail closed
+  // rather than resolve it wrongly.
+  if (positive.startsWith('/')) return true;
 
-/**
- * Vite's glob import, which returns modules the specifier never names.
- *
- * `import.meta.glob('../store/*.ts')` hands back the provider without the string
- * `StoreContext` appearing anywhere, so no specifier test can decide it. Reported by
- * default, with two exits that can be read off the call:
- *
- * - `query: '?raw'` in the options — every module comes back as source text, which has no
- *   commands on it. Read from the options alone, because that is where it applies to the
- *   whole call; the per-pattern `'…?raw'` spelling exempts only its own pattern;
- * - **every** pattern restricted to extensions outside {@link BUNDLED_EXTENSIONS} — a glob
- *   that can only return stylesheets cannot return the provider.
- *
- * The first argument may be an array, which Vite documents as first-class, and every literal
- * in it is read. Reading only the first was the defect: a stylesheet, or a negation naming
- * one, in front of the store exempted a call that returned the provider anyway. One pattern
- * that could return a module is enough to report the call, and a first argument with no
- * literal in it at all — built at runtime — is reported too.
- *
- * Both exits are what `apps/web` already uses the glob for, and both are proven by the clean
- * fixture, in the array form as well as the single-pattern one, rather than merely observed
- * on today's tree.
- */
-const TS_GLOB_IMPORT = /(?<![\w.$])import\s*\.\s*meta\s*\.\s*glob(?:Eager)?\s*\(/g;
+  let matcher;
+  try {
+    matcher = new Minimatch(posix.join(from, positive), { dot: true });
+  } catch {
+    // A pattern the matcher will not compile is one whose reach is unknown.
+    return true;
+  }
+
+  return files.some(
+    (candidate) =>
+      SOURCE_EXTENSIONS.includes(candidate.slice(candidate.lastIndexOf('.'))) &&
+      !candidate.endsWith('.rs') &&
+      matcher.match(candidate),
+  );
+}
 
 /**
  * The crate root, in any of the spellings a `use` path can start with.
@@ -337,369 +324,6 @@ export function blankRustComments(source: string): string {
   return blanked;
 }
 
-/**
- * The end of the string or template literal opening at `at`, or `undefined` if one does not.
- *
- * Two rules, and both of them are about false *negatives*:
- *
- * - `'` and `"` must close on the same line. They cannot legally span one, and treating an
- *   unterminated quote as a literal lets a quote inside a regex — `/['"]/` — swallow
- *   everything up to the next quote in the file.
- * - a backtick may span lines, so it is scanned to its terminator; if there is none, it was
- *   not a literal either.
- *
- * A backslash escapes the next character in both, which is why `"he said \"/*\""` is one
- * literal and not two with a comment opener loose between them.
- */
-function endOfJsLiteral(source: string, at: number): number | undefined {
-  const quote = source[at];
-  if (quote !== '"' && quote !== "'" && quote !== '`') return undefined;
-
-  for (let k = at + 1; k < source.length; k += 1) {
-    const c = source[k];
-    if (c === '\\') {
-      k += 1;
-      continue;
-    }
-    if (c === quote) return k + 1;
-    if (quote === '`') {
-      // A `${…}` substitution is code, and code can hold a backtick — in a string, in a
-      // nested template, in a regex. Running to the first unescaped backtick ended the
-      // literal inside the substitution, and every quote after that was read one out of
-      // step, which is how a later template leaked a `/*` into the scan.
-      if (c === '$' && source[k + 1] === '{') {
-        const close = endOfSubstitution(source, k + 2);
-        if (close === undefined) return undefined;
-        k = close - 1;
-      }
-      continue;
-    }
-    if (c === '\n') return undefined;
-  }
-  return undefined;
-}
-
-/**
- * The index just past the `}` closing a `${` substitution, or `undefined` if it never closes.
- *
- * Braces are counted and literals inside are stepped over by {@link endOfJsLiteral}, which
- * is why the two call each other. An unbalanced substitution means the template was not a
- * template, and refusing it is the safe direction: the scan then reads less as comment.
- */
-function endOfSubstitution(source: string, from: number): number | undefined {
-  let depth = 1;
-  let k = from;
-
-  while (k < source.length) {
-    const literalEnd = endOfJsLiteral(source, k);
-    if (literalEnd !== undefined) {
-      k = literalEnd;
-      continue;
-    }
-    const c = source[k];
-    if (c === '{') depth += 1;
-    else if (c === '}') {
-      depth -= 1;
-      if (depth === 0) return k + 1;
-    }
-    k += 1;
-  }
-  return undefined;
-}
-
-/**
- * Characters after which a `/` opens a regular expression rather than dividing.
- *
- * The standard disambiguation, which needs the previous token: after a value, `/` divides;
- * after an operator, a delimiter or nothing at all, it opens a literal.
- */
-const REGEX_MAY_FOLLOW = new Set([
-  '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '^', '~',
-  '<', '>',
-]);
-
-/** Keywords a regex may follow, for the cases an operator character does not cover. */
-const REGEX_MAY_FOLLOW_KEYWORD = new Set([
-  'return',
-  'typeof',
-  'instanceof',
-  'in',
-  'of',
-  'new',
-  'delete',
-  'void',
-  'throw',
-  'do',
-  'else',
-  'case',
-  'yield',
-  'await',
-]);
-
-/**
- * The index just past a regular expression literal opening at `at`, or `undefined`.
- *
- * A regex cannot span lines, and inside a character class a `/` needs no escape — both are
- * why this is scanned rather than guessed at. The point of scanning it at all is that a
- * regex may hold any quoting character: `` /[`]/ `` used to start a template literal that
- * ran to the next backtick in the file, and the `/*` it left behind opened a block comment
- * that blanked every line below it.
- */
-function endOfRegexLiteral(source: string, at: number): number | undefined {
-  let inClass = false;
-
-  for (let k = at + 1; k < source.length; k += 1) {
-    const c = source[k];
-    if (c === '\\') {
-      k += 1;
-      continue;
-    }
-    if (c === '\n') return undefined;
-    if (inClass) {
-      if (c === ']') inClass = false;
-      continue;
-    }
-    if (c === '[') {
-      inClass = true;
-      continue;
-    }
-    if (c === '/') {
-      let end = k + 1;
-      while (end < source.length && /[a-z]/i.test(source[end] ?? '')) end += 1;
-      return end;
-    }
-  }
-  return undefined;
-}
-
-/**
- * Blank out JavaScript and TypeScript comment bodies, preserving every byte position.
- *
- * Rule (d) scans whole files rather than single lines, so it has to know where a comment
- * ends. The previous rule skipped any line whose trim started with `//`, `*` or `/*`, which
- * is why a line that opened with a block comment, closed it again and then called
- * `await import('../store/StoreContext')` passed (#19): the guard threw the whole line
- * away without reading past the comment.
- *
- * Bodies become spaces and newlines are kept, so a match index still maps to the right line
- * — the same contract as {@link blankRustComments}, and the same reason: a rule that
- * silently stops scanning keeps reporting success.
- *
- * The direction that matters is over-blanking. String literals are stepped over as units
- * rather than blanked, because a specifier *is* a literal; failing to recognise one lets the
- * `//` or `/*` inside it open a comment that blanks real code below. Mistaking code for a
- * literal is the safe direction — the scan reads less as comment, never more — which is why
- * {@link endOfJsLiteral} refuses anything it cannot terminate rather than guessing.
- *
- * Three things are scanned that an earlier version of this waved at, and the claim it made
- * — that a regex could only ever hold a quote, which the same-line rule defuses — was simply
- * wrong. The same-line rule covers `'` and `"`. A backtick is the third quoting character
- * and a template may span lines, so a regex holding one started a literal that ran to the
- * next backtick in the file and left a `/*` loose behind it. So:
- *
- * - **regex literals are scanned**, using the previous significant token to tell a literal
- *   from a division. Misreading a division as a literal only skips text, which reads less as
- *   comment, never more;
- * - **`${…}` substitutions are scanned**, because they are code and code holds quotes. Running
- *   to the first unescaped backtick was only correct while no substitution contained one;
- * - **an unterminated block comment is not a comment.** It is a syntax error, so reading it
- *   as code costs nothing real, and it bounds every future mis-scan of this kind: a leaked
- *   `/*` that is never closed can no longer blank the rest of the file.
- *
- * What is left, named rather than claimed away: a mis-scan that leaks a `/*` and finds a
- * closer later in the file still blanks what lies between the two. Both trips fixtures carry
- * such a closer on purpose — without one the third defence alone rescues them, and neither
- * fixture could then tell whether the first two defences were doing anything at all.
- */
-export function blankJsComments(source: string): string {
-  // `split('')`, deliberately not `[...source]`: every index below is a UTF-16 code unit,
-  // and code-point iteration would drift one slot per astral character. See
-  // `blankRustComments` for what that costs.
-  const out = source.split('');
-  let i = 0;
-  /** The last significant character of code, for telling a regex from a division. */
-  let previous: string | undefined;
-
-  const blankTo = (end: number): void => {
-    for (let k = i; k < end && k < source.length; k += 1) {
-      if (out[k] !== '\n') out[k] = ' ';
-    }
-    i = Math.min(end, source.length);
-  };
-
-  const opensRegex = (): boolean => {
-    if (previous === undefined) return true;
-    if (REGEX_MAY_FOLLOW.has(previous)) return true;
-    const word = /([A-Za-z_$]+)\s*$/.exec(source.slice(Math.max(0, i - 16), i))?.[1];
-    return word !== undefined && REGEX_MAY_FOLLOW_KEYWORD.has(word);
-  };
-
-  while (i < source.length) {
-    if (source.startsWith('/*', i)) {
-      // JavaScript block comments do not nest; the first `*/` ends it. One that never ends
-      // is not a comment but a syntax error — the file does not compile — and blanking to
-      // end of file on it is precisely the over-blanking that hides real code while the
-      // rule reports success. Treated as ordinary characters instead.
-      const close = source.indexOf('*/', i + 2);
-      if (close !== -1) {
-        blankTo(close + 2);
-        continue;
-      }
-    } else if (source.startsWith('//', i)) {
-      const newline = source.indexOf('\n', i);
-      blankTo(newline === -1 ? source.length : newline);
-      // A comment is not a token, so it does not change what the next `/` may be.
-      continue;
-    }
-
-    const literalEnd = endOfJsLiteral(source, i);
-    if (literalEnd !== undefined) {
-      i = literalEnd;
-      previous = source[literalEnd - 1];
-      continue;
-    }
-
-    if (source[i] === '/' && opensRegex()) {
-      const regexEnd = endOfRegexLiteral(source, i);
-      if (regexEnd !== undefined) {
-        i = regexEnd;
-        previous = '/';
-        continue;
-      }
-    }
-
-    const character = source[i];
-    if (character !== undefined && !/\s/.test(character)) previous = character;
-    i += 1;
-  }
-
-  const blanked = out.join('');
-  if (blanked.length !== source.length) {
-    throw new Error(
-      `blankJsComments changed the length of its input (${source.length} -> ` +
-        `${blanked.length}); every index in this function must be a UTF-16 code unit`,
-    );
-  }
-  return blanked;
-}
-
-/**
- * The text between the parenthesis at `open` and its match, literals stepped over.
- *
- * Used to read a glob import's arguments, which may span lines and hold parentheses of
- * their own. Comments are already blanked by the time this runs; literals are not, because
- * the pattern and the `?raw` query are both literals and both are the point.
- */
-function callArguments(code: string, open: number): string {
-  let depth = 0;
-  let i = open;
-
-  while (i < code.length) {
-    const literalEnd = endOfJsLiteral(code, i);
-    if (literalEnd !== undefined) {
-      i = literalEnd;
-      continue;
-    }
-    const c = code[i];
-    if (c === '(') depth += 1;
-    else if (c === ')') {
-      depth -= 1;
-      if (depth === 0) return code.slice(open + 1, i);
-    }
-    i += 1;
-  }
-  return code.slice(open + 1);
-}
-
-/**
- * Could a glob with this pattern return a module that holds the provider?
- *
- * False only when the pattern itself says it cannot: a `?raw` query, which yields source
- * text, or an extension pinned to something that cannot carry commands. Anything else
- * returns true — a pattern that does not say what it matches can match anything, and the
- * rule fails closed on it.
- *
- * A negation is judged by its extension like any other pattern, which can over-report: a
- * `!`-prefixed glob naming a bundled extension reads as "could be a module" even though
- * excluding a file returns nothing. Over-reporting is the safe direction and the message
- * says how to fix it. The alternative — working out which patterns cancel which — is a glob
- * engine, and getting that wrong is a silent exemption, which is the failure this rule is.
- */
-function globYieldsModule(pattern: string): boolean {
-  const parts = pattern.split('?');
-  const path = parts[0] ?? '';
-  // `'../x/*.ts?raw'` — the per-pattern spelling of the query. The options-object spelling
-  // is read at the call site, because it applies to every pattern in the call.
-  if (parts.slice(1).some((query) => query.includes('raw'))) return false;
-
-  const braced = /\.\{([^}]*)\}$/.exec(path);
-  if (braced !== null) {
-    const listed = braced[1];
-    if (listed === undefined) return true;
-    return listed.split(',').some((e) => BUNDLED_EXTENSIONS.includes(e.trim()));
-  }
-
-  const single = /\.([A-Za-z0-9]+)$/.exec(path);
-  if (single !== null) {
-    const extension = single[1];
-    return extension === undefined || BUNDLED_EXTENSIONS.includes(extension);
-  }
-
-  return true;
-}
-
-/**
- * The first argument of a call, given the text between its parentheses.
- *
- * Split at the first top-level comma, with brackets and braces counted and literals stepped
- * over, so an array of patterns stays whole and the options object stays out of it. Reading
- * the arguments as one blob is what let the options decide a pattern's fate and the reverse.
- */
-function firstArgument(argumentText: string): string {
-  let depth = 0;
-  let i = 0;
-
-  while (i < argumentText.length) {
-    const literalEnd = endOfJsLiteral(argumentText, i);
-    if (literalEnd !== undefined) {
-      i = literalEnd;
-      continue;
-    }
-    const c = argumentText[i];
-    if (c === '(' || c === '[' || c === '{') depth += 1;
-    else if (c === ')' || c === ']' || c === '}') depth -= 1;
-    else if (c === ',' && depth === 0) return argumentText.slice(0, i);
-    i += 1;
-  }
-  return argumentText;
-}
-
-/**
- * Every string and template literal in a stretch of code, contents only.
- *
- * The first version of the glob check read *one* literal out of the whole call and decided
- * the call on it. Vite documents an array of patterns as first-class, so a stylesheet — or a
- * negation naming one — in front of the store exempted a glob that returned the provider
- * anyway. A rule written to close "narrower than its words" was narrower than its words, and
- * its proof never noticed because it only ever passed a single-literal call. Every pattern
- * is read now, and one that could return a module is enough to report the call.
- */
-function literalsIn(text: string): string[] {
-  const found: string[] = [];
-  let i = 0;
-
-  while (i < text.length) {
-    const literalEnd = endOfJsLiteral(text, i);
-    if (literalEnd !== undefined) {
-      found.push(text.slice(i + 1, literalEnd - 1));
-      i = literalEnd;
-      continue;
-    }
-    i += 1;
-  }
-  return found;
-}
-
 /** 1-indexed line of a byte offset. */
 function lineAt(source: string, index: number): number {
   let line = 1;
@@ -768,6 +392,12 @@ function read(root: string, file: string): string {
  * The window is a client with no privileged path (D-1, D-2). A component that reaches for
  * `@tauri-apps/api` directly, or a crate that links `tauri`, has quietly made the runtime
  * depend on the UI toolkit — which is the one thing the architecture is built to prevent.
+ *
+ * Rust is scanned as text; TypeScript and JavaScript are parsed. The line scan this replaced
+ * had to anchor its patterns at the start of a line, because an unanchored one also fired on
+ * the sample imports inside `scripts/prove-eslint-bans.ts` where they are test input — and
+ * an anchor is a guess about layout. A tree removes the reason for the guess: those samples
+ * are string literals, and a string is not an import however it reads.
  */
 export function noTauriOutsideDesktop(root: string, files: readonly string[]): Violation[] {
   const violations: Violation[] = [];
@@ -796,18 +426,15 @@ export function noTauriOutsideDesktop(root: string, files: readonly string[]): V
       continue;
     }
 
-    // TypeScript and JavaScript stay line-based. ESLint owns this boundary properly with
-    // an AST; lint-meta is the backstop for the files ESLint's ignores exclude, and a
-    // statement-level scan here would fire on the sample code inside
-    // `scripts/prove-eslint-bans.ts`, where those imports are test input.
-    source.split(/\r?\n/).forEach((text, index) => {
-      const trimmed = text.trim();
-      // Comments talk about the rule constantly; only code breaks it.
-      if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) {
-        return;
-      }
-      if (TS_TAURI_IMPORTS.some((pattern) => pattern.test(text))) report(file, index + 1);
-    });
+    // TypeScript and JavaScript are parsed. This used to be a line scan anchored at the
+    // start of the line, for one stated reason: an unanchored match also fired on the
+    // sample imports inside `scripts/prove-eslint-bans.ts`, where they are test input. A
+    // tree removes the reason rather than working around it — those samples are
+    // `StringLiteral` nodes, and a string is not an import however it reads.
+    for (const reference of moduleReferences(file, source)) {
+      if (reference.kind === 'glob') continue;
+      if (reference.specifier?.startsWith('@tauri-apps') === true) report(file, reference.line);
+    }
   }
   return violations;
 }
@@ -822,6 +449,19 @@ export function noTauriOutsideDesktop(root: string, files: readonly string[]): V
  *
  * Scoped to `apps/web/` because that is the scope of the ESLint ban it completes, with the
  * same two carve-outs.
+ *
+ * Two questions, and neither is answered by reading text any more. What the file reaches
+ * comes from a syntax tree — see `moduleReferences.ts` for why, which is three rounds of a
+ * hand-written scanner finding a new spelling each time. What a glob pattern reaches comes
+ * from a glob matcher run over the files that exist. Both are the same lesson the labeler
+ * checker learned when it was replaced by a simulation of the real action, and the daemon
+ * when it was only trusted once a test drove both real halves: model nothing you can run.
+ *
+ * WHAT REMAINS BEYOND IT, stated rather than implied by silence: a specifier that is not a
+ * literal. `import(name)` and `import('../store/' + name)` are reported as computed by the
+ * parser but cannot be resolved by it, and ESLint's `no-restricted-imports` is equally blind
+ * to the static equivalents. That is why the store keeps the provider off its public surface
+ * rather than relying on this rule alone.
  */
 export function noStoreContextOutsideStore(root: string, files: readonly string[]): Violation[] {
   const violations: Violation[] = [];
@@ -833,51 +473,42 @@ export function noStoreContextOutsideStore(root: string, files: readonly string[
     const extension = file.slice(file.lastIndexOf('.'));
     if (!SOURCE_EXTENSIONS.includes(extension) || extension === '.rs') continue;
 
-    // Scanned whole, with comment bodies blanked. Rule (a) stays line-based because it also
-    // reads `scripts/**`, where `prove-eslint-bans.ts` carries tauri imports as test input;
-    // rule (d) never leaves `apps/web`, so it has no such sample to fire on and can afford
-    // to see a call that spans lines.
-    const code = blankJsComments(read(root, file));
-
-    const report = (index: number, message: string): void => {
-      violations.push({
-        rule: 'no-store-context-outside-store',
-        file,
-        line: lineAt(code, index),
-        message,
-      });
+    const report = (line: number, message: string): void => {
+      violations.push({ rule: 'no-store-context-outside-store', file, line, message });
     };
 
-    for (const pattern of TS_STORE_CONTEXT_CALLS) {
-      for (const match of code.matchAll(pattern)) {
-        if (match.index === undefined) continue;
+    for (const reference of moduleReferences(file, read(root, file))) {
+      if (reference.kind === 'import' || reference.kind === 'export') continue;
+
+      if (reference.kind !== 'glob') {
+        if (reference.specifier === undefined) continue;
+        if (!namesStoreContext(reference.specifier)) continue;
         report(
-          match.index,
+          reference.line,
           'reaches StoreContext through a call; components use useCommands() from ' +
             `store/hooks. Only ${STORE_CONTEXT_ALLOWED_FOR_HUMANS} may touch the provider`,
         );
+        continue;
       }
-    }
 
-    for (const match of code.matchAll(TS_GLOB_IMPORT)) {
-      if (match.index === undefined) continue;
-      const args = callArguments(code, match.index + match[0].length - 1);
-      const patterns = firstArgument(args);
-      // `{ query: '?raw' }` applies to every pattern in the call, so it is read from the
-      // options rather than from the patterns — and only from the options, so a `?raw`
-      // written inside one pattern cannot exempt the others beside it.
-      if (args.slice(patterns.length).includes('?raw')) continue;
+      // The options are what make a glob return source text, and there is no per-pattern
+      // spelling of that — a query cannot be written into a pattern, where `?` is the
+      // single-character wildcard.
+      if (reference.raw) continue;
 
-      const literals = literalsIn(patterns);
-      // No literal at all is a pattern built at runtime, which says nothing about what it
-      // can return; one literal that could return a module is enough to report the call.
-      if (literals.length > 0 && !literals.some(globYieldsModule)) continue;
+      const from = posix.dirname(file);
+      // A pattern that is not a literal says nothing about what it can return, so it is
+      // reported; one that reaches a module is enough to report the call.
+      const reaches = reference.patterns.some(
+        (pattern) => pattern === undefined || globReachesModule(pattern, from, files),
+      );
+      if (!reaches) continue;
 
       report(
-        match.index,
+        reference.line,
         'glob-imports modules it does not name, so it may hand back the store provider; ' +
           `only ${STORE_CONTEXT_ALLOWED_FOR_HUMANS} may touch it. Read the files as text ` +
-          "with query: '?raw', or pin the glob to an extension that cannot be a module",
+          "with query: '?raw', or write a pattern that reaches no module",
       );
     }
   }
