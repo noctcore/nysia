@@ -65,6 +65,21 @@ pub enum DaemonError {
         /// Whether another attempt could reach a daemon that says yes.
         retryable: bool,
     },
+    /// There was no daemon, and the window could not start one.
+    ///
+    /// The window ships the `nysia` runtime beside itself and starts it on a first launch
+    /// (§12 q5), so this is what is left when that cannot happen: the sidecar is missing from
+    /// the bundle, the file will not execute, or it ran and never answered. **Never
+    /// retryable**, and that is the point of having a variant of its own — none of those
+    /// change by waiting, and a window that kept reconnecting against a runtime nobody can
+    /// start would show *Reconnecting* for ever without once saying why.
+    #[error("{message}")]
+    Spawn {
+        /// What went wrong, as a sentence.
+        message: String,
+        /// What to do about it. Never blank.
+        next_step: String,
+    },
     /// The socket died.
     #[error("the connection to the daemon failed: {0}")]
     Io(String),
@@ -94,7 +109,7 @@ impl DaemonError {
             Self::Unreachable { .. } | Self::Io(_) | Self::Disconnected => true,
             Self::Refused { retryable, .. } => *retryable,
             Self::Daemon(envelope) => envelope.is_retryable(),
-            Self::Endpoint(_) | Self::Protocol(_) => false,
+            Self::Endpoint(_) | Self::Protocol(_) | Self::Spawn { .. } => false,
         }
     }
 
@@ -123,6 +138,9 @@ impl DaemonError {
             Self::Endpoint(_) => {
                 vec!["Nysia could not work out where the daemon's socket should be.".to_owned()]
             }
+            // Composed where the failure happened, because only that caller knows which path
+            // was tried and which log would say why.
+            Self::Spawn { next_step, .. } => vec![next_step.clone()],
         }
     }
 }
@@ -229,6 +247,10 @@ mod tests {
             DaemonError::Io("reset".to_owned()),
             DaemonError::Protocol("garbage".to_owned()),
             DaemonError::Disconnected,
+            DaemonError::Spawn {
+                message: "the Nysia runtime is not installed beside the app".to_owned(),
+                next_step: "Reinstall Nysia.".to_owned(),
+            },
             DaemonError::Daemon(Box::new(ErrorEnvelope::new(
                 ErrorCode::SpawnFailed,
                 "pwsh is not on PATH",
@@ -248,6 +270,25 @@ mod tests {
                 "{failure:?} has an empty next step"
             );
         }
+    }
+
+    #[test]
+    fn a_runtime_that_cannot_be_started_is_never_retryable() {
+        // The defect this variant closes: a window that treats "there is no runtime to start"
+        // as something waiting could fix shows *Reconnecting* for ever and never says why.
+        let failure = DaemonError::Spawn {
+            message: "the Nysia runtime is not installed beside the app".to_owned(),
+            next_step: "Reinstall Nysia.".to_owned(),
+        };
+        assert!(!failure.retryable());
+
+        let surfaced = CommandFailure::from(failure);
+        assert_eq!(surfaced.next_steps, vec!["Reinstall Nysia.".to_owned()]);
+        assert!(
+            surfaced.message.contains("not installed beside the app"),
+            "the sentence the caller composed must survive, got {:?}",
+            surfaced.message
+        );
     }
 
     #[test]
