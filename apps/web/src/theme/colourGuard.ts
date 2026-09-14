@@ -113,10 +113,17 @@ const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
  *  - a variable or class-field declaration, `const color = …`;
  *  - a default, wherever one can be written: a parameter's, a destructured binding's, an
  *    enum member's. `function Dot({ color = 'red' })` is the ordinary React spelling of a
- *    hardcoded colour, and the three of them are one branch because the language writes
- *    them the same way. The pattern this replaced caught all of them by accident — it
+ *    hardcoded colour. These are not a branch of their own, and neither are the two bullets
+ *    above them: all five kinds, plus the class field, are the one question
+ *    `ts.hasOnlyExpressionInitializer` answers, which is why they are described here as
+ *    shapes rather than as cases. The pattern this replaced caught them by accident — it
  *    matched an equals sign and did not care which kind — and the first version of this
- *    walk dropped them, which is a gate getting narrower than the one it replaced;
+ *    walk hand-listed the kinds and dropped these three, which is a gate getting narrower
+ *    than the one it replaced;
+ *  - a default in a destructuring *assignment*, `({ color = 'red' } = props)`, which is the
+ *    one member of that family TypeScript's predicate does not answer — its initializer is
+ *    a differently named field — so it is the hand branch beside it. See
+ *    {@link INITIALIZERS_HANDLED_BY_HAND};
  *  - a destructuring declaration, which is read through the thing being taken apart rather
  *    than through a name: `const [color, setColor] = useState('red')` is where the other
  *    live React idiom keeps a colour, and it is the one declaration shape whose value is
@@ -255,12 +262,20 @@ const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
  * The rule has false positives too, and they are tracked separately because they are loud:
  * one fails the sweep and gets looked at, where a miss ships a pixel in silence. That is why
  * the trade usually runs towards catching too much — but not always, because a guard that
- * cries wolf is one somebody eventually switches off. Three are left of the six the pattern
- * had; the comment, the missing semicolon and the quoted key are in the section above, as
- * things the tree answers rather than things to live with.
+ * cries wolf is one somebody eventually switches off.
  *
- *  - a value that merely contains a colour word. The `url()` form is closed, since a path is
- *    the one place a colour word turns up in a value often enough to be worth knowing about.
+ * Below are the ones left of the six the pattern had, and the ones the walk introduced. The
+ * three the tree answers outright — the comment, the missing semicolon and the quoted key —
+ * are in the section above rather than here, named so you can check that sentence against
+ * it. **Each bullet says which of the two it is, and this sentence deliberately counts
+ * neither.** A total written here is a fact about the list four lines down, kept in step by
+ * hand; this file has shipped one that did not match three times, most recently in the very
+ * commit that added a bullet to close that class. The residue list keeps its total because
+ * it is referred to from elsewhere, and pays for it with a test that counts the bullets.
+ *
+ *  - a value that merely contains a colour word, which the pattern had too. The `url()` form
+ *    is closed, since a path is the one place a colour word turns up in a value often enough
+ *    to be worth knowing about.
  *    A token whose own name spells one still fires, and that is the shape most likely to.
  *  - a table keyed by one of the eight ANSI names whose values are prose — a label map, most
  *    plausibly — which fires once per entry. Those words are in the vocabulary because
@@ -274,7 +289,8 @@ const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
  *    the four spellings the old entry named, the tree removed two: a comparison operand is
  *    in a condition and an index is a lookup, and neither is walked. A conditional's other
  *    branch is still read, deliberately: either branch can be the value.
- *  - one paint reported twice, where a destructuring default renames a painting property to
+ *  - one paint reported twice, which is new with the walk and not one of the pattern's six,
+ *    where a destructuring default renames a painting property to
  *    the same name: `({ color: color = 'red' } = props)`. The tree holds a property called
  *    `color` whose value is written `color = 'red'`, and that inner node is an assignment to
  *    a painting name in its own right, so both sites report. Only the spelling where the two
