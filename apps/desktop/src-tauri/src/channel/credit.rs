@@ -8,12 +8,21 @@
 //! ```text
 //!   child ──write──▶ kernel PTY buffer ──▶ daemon ──socket──▶ THIS PROCESS ──Channel──▶ xterm
 //!                                             ▲                    │
-//!                                             └──── CreditGrant ◀──┘  (after write() returned)
+//!                                             └───── CreditAck ◀───┘  (after write() returned)
 //! ```
 //!
-//! The daemon may only send bytes it has been granted. This process grants more once the
-//! webview says it has *rendered* them — after xterm's `write()` callback fires, not when
-//! the message arrives, because a message sitting in a queue has not been rendered. When no
+//! **The producer grants and the consumer acks, and the arrow above is the direction that
+//! matters.** The daemon owns the window: it issues a [`nysia_proto::CreditGrant`] on attach and spends
+//! that allowance byte for byte as it writes. This process is the consumer, so what travels
+//! back up the socket is a [`nysia_proto::CreditAck`] naming the bytes the webview has
+//! *rendered*, and each one replenishes the daemon's allowance. A client that sent grants
+//! instead was speaking the producer's half of the protocol into a daemon that honours only
+//! acks: it dropped them, nothing ever replenished, and a flood stalled dead at the
+//! per-stream ceiling — with the daemon's pump blocked behind it, which froze `terminal
+//! read` for that session for the CLI and for hooks as well.
+//!
+//! The ack goes out after xterm's `write()` callback fires, not when the message arrives,
+//! because a message sitting in a queue has not been rendered. When no
 //! attached stream can take another chunk this process stops reading the socket; the socket
 //! buffer fills, the daemon's write blocks, the daemon stops reading the PTY, the kernel
 //! buffer fills, and the child blocks in `write(2)`. Not one byte is dropped and nothing
@@ -36,18 +45,19 @@
 //!
 //! ## Why the numbers are not here
 //!
-//! [`CreditWindow`] comes from `nysia-proto` and a [`CreditGrant`] carries the window it
-//! was issued under, so the client never holds its own copy of the constants (D-13). A
-//! daemon that narrows the window for a slow renderer is obeyed on the next grant, with no
-//! protocol change and no chance of the two ends disagreeing about what is in force.
+//! [`CreditWindow`] comes from `nysia-proto` and the daemon's [`nysia_proto::CreditGrant`] carries the
+//! window it was issued under, so the client never holds its own copy of the constants
+//! (D-13). A daemon that narrows the window for a slow renderer is obeyed on the next
+//! grant, with no protocol change and no chance of the two ends disagreeing about what is
+//! in force.
 //!
-//! A grant names no session. It rides a [`nysia_proto::FrameKind::Credit`] frame whose
+//! An ack names no session. It rides a [`nysia_proto::FrameKind::Credit`] frame whose
 //! header already carries the stream id, and a second copy in the payload could only ever
 //! disagree with it.
 
 use std::collections::HashMap;
 
-use nysia_proto::credit::{CreditGrant, CreditWindow};
+use nysia_proto::credit::{CreditAck, CreditWindow};
 use nysia_proto::stream::StreamId;
 
 /// Why the ledger refused an operation.
@@ -249,9 +259,9 @@ impl CreditLedger {
 
     /// Record that the webview has rendered `bytes` of this stream.
     ///
-    /// Returns a [`CreditGrant`] once the batch reaches [`CreditWindow::ack_batch`], and
+    /// Returns a [`CreditAck`] once the batch reaches [`CreditWindow::ack_batch`], and
     /// `None` while it is still accumulating. The reader also walks
-    /// [`Self::streams_owing_a_grant`] on every pass, so a partial batch is returned by
+    /// [`Self::streams_owing_an_ack`] on every pass, so a partial batch is returned by
     /// whichever pass notices it rather than waiting for one that happens to fill.
     ///
     /// # Errors
@@ -262,7 +272,7 @@ impl CreditLedger {
         &mut self,
         stream: StreamId,
         bytes: u32,
-    ) -> Result<Option<CreditGrant>, CreditError> {
+    ) -> Result<Option<CreditAck>, CreditError> {
         let ack_batch = self.window.ack_batch;
         {
             let entry = self
@@ -286,17 +296,22 @@ impl CreditLedger {
             .get(&stream)
             .is_some_and(|entry| entry.ungranted >= ack_batch);
         if batched {
-            return Ok(self.drain_grant(stream));
+            return Ok(self.drain_ack(stream));
         }
         Ok(None)
     }
 
-    /// Return whatever credit this stream has earned but not yet been granted.
+    /// Return whatever credit this stream has earned but not yet acknowledged.
     ///
     /// `None` when there is nothing to return. This is the idle flush: without it the last
     /// few kilobytes of every burst sit in `ungranted` forever, and a session that
     /// alternates between bursts and silence loses a little of its window on each one.
-    pub fn drain_grant(&mut self, stream: StreamId) -> Option<CreditGrant> {
+    ///
+    /// The ledger's own balances move here too, not only the number on the wire: they are
+    /// this client's mirror of the allowance the daemon will restore when the ack lands, and
+    /// [`Self::is_blocked`] — which decides whether the reader keeps reading — is asked of
+    /// the mirror.
+    pub fn drain_ack(&mut self, stream: StreamId) -> Option<CreditAck> {
         let window = self.window;
         let total_credit = self.total_credit;
         let total_ungranted = self.total_ungranted;
@@ -328,16 +343,16 @@ impl CreditLedger {
         if bytes == 0 {
             return None;
         }
-        Some(CreditGrant { bytes, window })
+        Some(CreditAck { bytes })
     }
 
     /// Every attached stream holding credit that has not been returned upstream.
     ///
-    /// The reader walks this on each pass, so a grant leaves as soon as any pass notices it
-    /// is owed. Without that, the only thing that ever wrote a grant was the render report
-    /// that happened to fill a batch — and a stream whose last burst fell short of one sat
-    /// on the credit forever.
-    pub fn streams_owing_a_grant(&self) -> Vec<StreamId> {
+    /// The reader walks this on each pass, so an ack leaves as soon as any pass notices it
+    /// is owed. Without that, the only thing that ever wrote one was the render report that
+    /// happened to fill a batch — and a stream whose last burst fell short of one sat on the
+    /// credit forever.
+    pub fn streams_owing_an_ack(&self) -> Vec<StreamId> {
         self.streams
             .iter()
             .filter(|(_, entry)| entry.ungranted > 0)
@@ -385,11 +400,10 @@ mod tests {
         assert_eq!(ledger.render(StreamId(1), chunk).unwrap(), None);
         assert_eq!(ledger.unrendered(), 0);
 
-        let grant = ledger
-            .drain_grant(StreamId(1))
+        let ack = ledger
+            .drain_ack(StreamId(1))
             .expect("an idle flush returns the tail");
-        assert_eq!(grant.bytes, chunk);
-        assert_eq!(grant.window, CreditWindow::DEFAULT);
+        assert_eq!(ack.bytes, chunk);
         assert_eq!(
             ledger.available(StreamId(1)),
             CreditWindow::DEFAULT.per_stream_initial
@@ -550,14 +564,14 @@ mod tests {
         // Without this the only thing that ever wrote a grant was the render report that
         // filled a batch, and a stream whose last burst fell short sat on the credit.
         let mut ledger = ledger();
-        assert!(ledger.streams_owing_a_grant().is_empty());
+        assert!(ledger.streams_owing_an_ack().is_empty());
 
         ledger.receive(StreamId(1), 4096).unwrap();
         ledger.render(StreamId(1), 4096).unwrap();
-        assert_eq!(ledger.streams_owing_a_grant(), vec![StreamId(1)]);
+        assert_eq!(ledger.streams_owing_an_ack(), vec![StreamId(1)]);
 
-        ledger.drain_grant(StreamId(1));
-        assert!(ledger.streams_owing_a_grant().is_empty());
+        ledger.drain_ack(StreamId(1));
+        assert!(ledger.streams_owing_an_ack().is_empty());
     }
 
     #[test]
@@ -656,7 +670,7 @@ mod tests {
             ledger.render(StreamId(7), 1),
             Err(CreditError::UnknownStream(StreamId(7)))
         );
-        assert_eq!(ledger.drain_grant(StreamId(7)), None);
+        assert_eq!(ledger.drain_ack(StreamId(7)), None);
     }
 
     #[test]

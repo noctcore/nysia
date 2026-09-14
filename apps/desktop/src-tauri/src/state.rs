@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::channel::Dispatcher;
+use crate::channel::{Dispatcher, FrameSink};
 use crate::daemon::control::Control;
 use crate::daemon::stream::Stream;
 use crate::daemon::{DaemonError, endpoint};
@@ -28,7 +28,6 @@ use nysia_proto::envelope::{RequestPayload, ResponsePayload};
 use nysia_proto::handshake::{ClientRole, DaemonIdentity};
 use nysia_proto::identity::SessionHandle;
 use nysia_proto::stream::{StreamAttach, StreamDetach, StreamId};
-use tauri::ipc::{Channel, InvokeResponseBody};
 
 /// Which stream id belongs to which session, in both directions.
 ///
@@ -151,25 +150,48 @@ pub struct Client {
     /// block instead of polling. A condvar rather than a channel because there may be more
     /// than one waiter and every one of them wants the same edge.
     dropped: Arc<(Mutex<u64>, Condvar)>,
+    /// Where to dial, when it is not to be resolved from the environment.
+    ///
+    /// `None` for the window, which is the whole point of [`Self::new`]: production has one
+    /// daemon and finds it the way every other client does. [`Self::at`] pins one instead,
+    /// and is named so that a call site which has left the ordinary path is obvious in a
+    /// diff and greppable afterwards.
+    endpoint: Option<Endpoint>,
 }
 
 impl Client {
-    /// A client holding no connection.
+    /// A client holding no connection, which finds the daemon the way the window does.
     pub fn new() -> Self {
+        Self::pinned(None)
+    }
+
+    /// A client that dials `endpoint` instead of resolving one from the environment.
+    ///
+    /// For the interop tests, which bind a daemon of their own and must not find — or
+    /// disturb — the one the developer has running. Deliberately a second named
+    /// constructor rather than an argument on [`Self::new`]: the window must not be one
+    /// parameter away from talking to a daemon nobody chose.
+    #[cfg(test)]
+    pub fn at(endpoint: Endpoint) -> Self {
+        Self::pinned(Some(endpoint))
+    }
+
+    fn pinned(endpoint: Option<Endpoint>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(None)),
             table: Arc::new(Mutex::new(StreamTable::new())),
             next_generation: Arc::new(Mutex::new(1)),
             dropped: Arc::new((Mutex::new(0), Condvar::new())),
+            endpoint,
         }
     }
 
     /// Where this client dials.
-    ///
-    /// Resolved per connection attempt rather than cached at construction: a window outlives
-    /// the daemon it is talking to, and the endpoint belongs to whichever one is there now.
     fn dial(&self) -> Result<Endpoint, DaemonError> {
-        endpoint::endpoint()
+        match &self.endpoint {
+            Some(pinned) => Ok(pinned.clone()),
+            None => endpoint::endpoint(),
+        }
     }
 
     /// Connect, or return the identity of the daemon already attached.
@@ -230,7 +252,8 @@ impl Client {
         outcome
     }
 
-    /// Take the webview's channel and open the output connection.
+    /// Take the webview's channel — or any other [`FrameSink`] — and open the output
+    /// connection.
     ///
     /// **Attaching sessions is a separate step.** This opens the stream socket and starts
     /// the reader; it deliberately requires no session to exist yet, because the connect
@@ -244,7 +267,7 @@ impl Client {
     ///
     /// [`DaemonError::Disconnected`] if no daemon is attached, or whatever the handshake
     /// produced.
-    pub fn attach_channel(&self, channel: Channel<InvokeResponseBody>) -> Result<(), DaemonError> {
+    pub fn attach_channel(&self, sink: impl FrameSink) -> Result<(), DaemonError> {
         let socket = {
             // The lock is not held across the connect: opening a socket and shaking hands
             // can block for as long as the daemon takes, and every other command would
@@ -282,7 +305,7 @@ impl Client {
         let stream = Stream::spawn(
             reader,
             Arc::clone(&self.table),
-            Dispatcher::spawn(channel),
+            Dispatcher::spawn(sink),
             CreditWindow::DEFAULT,
             Box::new(move || notify.disconnect_generation(generation)),
         )?;

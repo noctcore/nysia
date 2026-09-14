@@ -28,6 +28,13 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[dev-dependencies]
+# For the interop tests only, which bind a real `nysia_core::rpc::Daemon` and drive this
+# client against it over a real socket. The daemon's accept loop is async; this client is
+# not, and deliberately so (every command is `spawn_blocking`), so the runtime lives on a
+# thread of the harness's own and the test body stays synchronous.
+tokio = { workspace = true }
+
 [features]
 # Set by `tauri build` for production bundles: the webview then loads the frontend through
 # the custom protocol instead of a dev server. DO NOT REMOVE.
