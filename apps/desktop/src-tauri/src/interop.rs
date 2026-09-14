@@ -29,7 +29,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -189,8 +189,6 @@ struct Webview {
     /// boundary that is not a fault. The token these tests look for is ASCII, so a
     /// replacement character at a seam cannot hide it.
     painted: Arc<Mutex<BTreeMap<StreamId, String>>>,
-    /// Payload bytes of output delivered, across every stream.
-    total: Arc<AtomicU64>,
     /// Replay boundaries delivered, per stream, and where each fell.
     ///
     /// The seam is kept as an offset into `painted` so a test can ask what was *replayed*
@@ -208,7 +206,6 @@ impl Webview {
             decoder: Arc::new(Mutex::new(FrameDecoder::new())),
             seen: Arc::new(Mutex::new(BTreeMap::new())),
             painted: Arc::new(Mutex::new(BTreeMap::new())),
-            total: Arc::new(AtomicU64::new(0)),
             boundaries: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -232,8 +229,25 @@ impl Webview {
             .unwrap_or_default()
     }
 
-    fn delivered_total(&self) -> u64 {
-        self.total.load(Ordering::Relaxed)
+    /// Payload bytes delivered on any stream **other** than `stream`.
+    ///
+    /// One lock, deliberately. The obvious spelling — compare a running total against this
+    /// stream's share — reads two counters that live behind different synchronisation, and
+    /// the shell is still producing while they are read. Whatever arrives between the two
+    /// reads makes them disagree, and the failure that produces says nothing about routing:
+    /// it reported the per-stream figure as *larger* than the total, which no misrouting can
+    /// cause. Asking the question that is actually meant — did anything reach an id this
+    /// session was not assigned — takes one lock and is stable under load.
+    fn delivered_elsewhere(&self, stream: StreamId) -> u64 {
+        self.seen
+            .lock()
+            .map(|seen| {
+                seen.iter()
+                    .filter(|(id, _)| **id != stream)
+                    .map(|(_, bytes)| *bytes)
+                    .sum()
+            })
+            .unwrap_or_default()
     }
 
     /// How many replay boundaries this stream has been sent.
@@ -319,7 +333,6 @@ impl FrameSink for Webview {
                     .or_default()
                     .push_str(&String::from_utf8_lossy(&frame.payload));
             }
-            self.total.fetch_add(count as u64, Ordering::Relaxed);
 
             // The whole point of the sink. `terminal_ack` is what the webview invokes from
             // inside xterm's `write()` callback, and this is the same call.
@@ -522,8 +535,8 @@ fn output_reaches_the_webview_on_the_id_the_daemon_assigned() {
         "nothing was delivered on stream {stream:?} within {DEADLINE:?}"
     );
     assert_eq!(
-        webview.delivered_total(),
-        webview.delivered(stream),
+        webview.delivered_elsewhere(stream),
+        0,
         "output arrived on an id the daemon never assigned to this session"
     );
 }
