@@ -18,17 +18,17 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 
+use crate::channel::Dispatcher;
+use crate::daemon::control::Control;
+use crate::daemon::stream::Stream;
+use crate::daemon::{DaemonError, endpoint};
+use nysia_core::rpc::Endpoint;
 use nysia_proto::credit::CreditWindow;
 use nysia_proto::envelope::{RequestPayload, ResponsePayload};
 use nysia_proto::handshake::{ClientRole, DaemonIdentity};
 use nysia_proto::identity::SessionHandle;
 use nysia_proto::stream::{StreamAttach, StreamDetach, StreamId};
 use tauri::ipc::{Channel, InvokeResponseBody};
-
-use crate::channel::Dispatcher;
-use crate::daemon::control::Control;
-use crate::daemon::stream::Stream;
-use crate::daemon::{DaemonError, endpoint};
 
 /// Which stream id belongs to which session, in both directions.
 ///
@@ -164,6 +164,14 @@ impl Client {
         }
     }
 
+    /// Where this client dials.
+    ///
+    /// Resolved per connection attempt rather than cached at construction: a window outlives
+    /// the daemon it is talking to, and the endpoint belongs to whichever one is there now.
+    fn dial(&self) -> Result<Endpoint, DaemonError> {
+        endpoint::endpoint()
+    }
+
     /// Connect, or return the identity of the daemon already attached.
     ///
     /// # Errors
@@ -175,7 +183,7 @@ impl Client {
             return Ok(connected.identity.clone());
         }
 
-        let control = Control::connect()?;
+        let control = Control::connect(self.dial()?.listening())?;
         let identity = control.identity().clone();
         *held = Some(Connected {
             control,
@@ -243,7 +251,7 @@ impl Client {
             // queue behind it.
             let held = self.lock()?;
             held.as_ref().ok_or(DaemonError::Disconnected)?;
-            endpoint::open(&endpoint::endpoint()?)?
+            endpoint::open(self.dial()?.listening())?
         };
 
         let mut reader = std::io::BufReader::new(socket);
