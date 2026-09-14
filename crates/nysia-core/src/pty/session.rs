@@ -1189,6 +1189,14 @@ mod tests {
         // where `$!.end` is read as the history event `!.end` and the whole line is
         // rejected with "event not found". `sh -c` gets a pid from `$$` with no `!` in
         // sight, and `exec` keeps that pid for the `sleep` that replaces it.
+        //
+        // This test fails on Linux, on `main`, and did so before any of the work around it.
+        // Linux is neither a CI target nor a shipping platform — Windows and macOS are — so
+        // that is information rather than a defect, and it is recorded here because a
+        // container recipe now exists for running the `cfg(unix)` paths from a Windows
+        // desktop. The next person to reach for it meets this failure first, and should
+        // know it predates them rather than spending the afternoon bisecting their own
+        // branch.
         let (session, output, mut state) = spawn_ready(
             SessionSpec::new(ShellProfile::Posix).with_size(TerminalSize::new(120, 30)),
         );

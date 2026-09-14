@@ -290,6 +290,7 @@ Unix:
 - Linux daemon sets `PR_SET_CHILD_SUBREAPER` so orphans reparent to it. macOS has no subreaper — sweep by session id on kill and on daemon start.
 - A failed `execve` returns `Ok` from spawn and the child dies silently (wezterm#7893, caused by `close_random_fds` closing Rust's exec-error pipe). **Pre-validate program paths.**
 - EOF only arrives when *every* slave fd closes — a backgrounded server keeps the master alive after the shell exits. Decouple "child exited" from "PTY EOF".
+- Linux is neither a CI target nor a shipping platform, and the orphan test fails there on `main`, independent of any change near it. Recorded because the `cfg(unix)` paths are runnable from a Windows desktop in a container, so the failure is met by whoever does that next rather than by CI. The measurements behind the signal-ignoring guard, and why #21's proposed longer sleep was backwards, are in the doc comments beside those two tests.
 
 Env hygiene: scrub `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, and specifically `CLAUDE_CODE_CHILD_SESSION` / `CLAUDE_CODE_SESSION_ID` / `CLAUDE_CODE_BRIDGE_SESSION_ID` (Orca deletes exactly these) or a launched `claude` is misclassified as a child session. Force `TERM=xterm-256color`, `COLORTERM=truecolor`.
 
