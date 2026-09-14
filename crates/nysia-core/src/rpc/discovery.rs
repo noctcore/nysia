@@ -212,12 +212,21 @@ pub enum EnsureError<E: std::error::Error + 'static> {
     /// The probe failed for a reason that is not "nothing is listening".
     #[error(transparent)]
     Probe(E),
+    /// The caller could not say what it may start, asked after nothing answered.
+    ///
+    /// Its own variant rather than folded into [`Self::Probe`] because of *when* it is
+    /// reached: only after step 1 found nothing listening. A caller whose policy is expensive
+    /// or fallible — the window's, which has to find the runtime it ships beside itself — pays
+    /// for it on the cold path alone, and a window with no runtime beside it still attaches to
+    /// a daemon that is already there.
+    #[error(transparent)]
+    Policy(E),
 }
 
 impl From<EnsureError<DiscoveryError>> for DiscoveryError {
     fn from(error: EnsureError<DiscoveryError>) -> Self {
         match error {
-            EnsureError::Discovery(err) | EnsureError::Probe(err) => err,
+            EnsureError::Discovery(err) | EnsureError::Probe(err) | EnsureError::Policy(err) => err,
         }
     }
 }
@@ -232,18 +241,28 @@ impl From<EnsureError<DiscoveryError>> for DiscoveryError {
 /// the one it cannot use. So the policy lives here, once:
 ///
 /// 1. probe — if something answers, that is the daemon, and no lock is taken;
-/// 2. take the spawn lock, which the operating system holds and releases;
-/// 3. **probe again**, because somebody may have won it while this caller waited;
-/// 4. run `program --daemon`, detached;
-/// 5. probe until it answers or [`READY_TIMEOUT`] passes.
+/// 2. **resolve `policy`**, which is the first moment anything to start has to exist;
+/// 3. take the spawn lock, which the operating system holds and releases;
+/// 4. **probe again**, because somebody may have won it while this caller waited;
+/// 5. run `program --daemon`, detached;
+/// 6. probe until it answers or [`READY_TIMEOUT`] passes.
 ///
 /// [`discover`] runs exactly these steps, on a blocking thread, with an async dial bridged
 /// into `probe`. There is one implementation of the race and both callers are inside it.
 ///
+/// # Why `policy` is a closure
+///
+/// Because step 2 is where it belongs, and a value would have been resolved before step 1.
+/// **Spawning needs a program; attaching does not.** The window finds the runtime it ships
+/// beside itself, and that lookup fails — permanently, with "reinstall" — when the file is
+/// not there; resolved eagerly it refused a daemon that was already listening, which is
+/// step 1 of this very contract denied by its own caller. A `FnOnce` puts the cost and the
+/// failure on the only path that can use either.
+///
 /// # The contract on `probe`
 ///
 /// It must answer [`Probed::Absent`] **only** for "nothing is listening", and report every
-/// other failure as `Err`. Step 5 calls it in a loop, so it must be cheap when the answer is
+/// other failure as `Err`. Step 6 calls it in a loop, so it must be cheap when the answer is
 /// no, and it must leave no connection behind when it answers `Absent`.
 ///
 /// # Errors
@@ -251,10 +270,11 @@ impl From<EnsureError<DiscoveryError>> for DiscoveryError {
 /// [`DiscoveryError::Absent`] when nothing is listening and `policy` forbids starting one,
 /// [`DiscoveryError::LockTimeout`] when another spawner held the lock throughout,
 /// [`DiscoveryError::Spawn`] when the program could not be run, [`DiscoveryError::NeverReady`]
-/// when it ran and never answered, and [`EnsureError::Probe`] for anything the probe refused.
+/// when it ran and never answered, [`EnsureError::Policy`] for a policy that could not be
+/// resolved, and [`EnsureError::Probe`] for anything the probe refused.
 pub fn ensure_daemon<T, E>(
     endpoint: &Endpoint,
-    policy: &SpawnPolicy,
+    policy: impl FnOnce() -> Result<SpawnPolicy, E>,
     mut probe: impl FnMut() -> Result<Probed<T>, E>,
 ) -> Result<Ensured<T>, EnsureError<E>>
 where
@@ -268,14 +288,16 @@ where
         return Ok(settle(endpoint, connection, &identity, false));
     }
 
-    let program = match policy {
+    // Asked for only now, with nothing listening established. Everything above this line
+    // runs on a window that has no runtime beside it at all.
+    let program = match policy().map_err(EnsureError::Policy)? {
         SpawnPolicy::Never => {
             return Err(DiscoveryError::Absent {
                 endpoint: endpoint.listening().to_string(),
             }
             .into());
         }
-        SpawnPolicy::IfAbsent { program } => program.clone(),
+        SpawnPolicy::IfAbsent { program } => program,
     };
 
     let _lock = SpawnLock::acquire(endpoint)?;
@@ -347,8 +369,12 @@ pub async fn discover(
     let client_id = client_id.clone();
     let policy = policy.clone();
     let ensured = tokio::task::spawn_blocking(move || {
-        ensure_daemon(&endpoint, &policy, || {
-            match handle.block_on(try_connect(&endpoint, &client_id, role))? {
+        // Already resolved, because a CLI's program is `current_exe` and costs nothing to
+        // name. The seam asks late; this caller has nothing to defer.
+        ensure_daemon(
+            &endpoint,
+            move || Ok(policy),
+            || match handle.block_on(try_connect(&endpoint, &client_id, role))? {
                 Some(client) => {
                     let identity = client.identity().clone();
                     Ok(Probed::Answering {
@@ -357,8 +383,8 @@ pub async fn discover(
                     })
                 }
                 None => Ok(Probed::Absent),
-            }
-        })
+            },
+        )
     })
     .await
     // A `JoinError` means the blocking thread panicked or the runtime is shutting down.
@@ -731,7 +757,7 @@ mod tests {
         let endpoint = crate::rpc::endpoint::scratch("ensure-present");
         let probe = Scripted::of([answering("live")]);
 
-        let ensured = ensure_daemon(&endpoint, &SpawnPolicy::Never, || probe.probe())
+        let ensured = ensure_daemon(&endpoint, || Ok(SpawnPolicy::Never), || probe.probe())
             .expect("something answered");
         assert_eq!(ensured.connection, "live");
         assert!(!ensured.spawned, "nothing was started");
@@ -749,12 +775,131 @@ mod tests {
     fn nothing_listening_and_no_permission_to_spawn_is_absent_through_the_seam_too() {
         let endpoint = crate::rpc::endpoint::scratch("ensure-absent");
         let probe = Scripted::of([]);
-        let err = ensure_daemon(&endpoint, &SpawnPolicy::Never, || probe.probe())
+        let err = ensure_daemon(&endpoint, || Ok(SpawnPolicy::Never), || probe.probe())
             .expect_err("nothing is listening");
         assert!(matches!(
             err,
             EnsureError::Discovery(DiscoveryError::Absent { .. })
         ));
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// Step 2 happens **after** step 1, and a daemon that is already there never reaches it.
+    ///
+    /// The defect: the window resolves the runtime it ships beside itself, and that lookup
+    /// fails permanently — "reinstall Nysia" — when the file is not there. Resolved before the
+    /// probe, a window with no sidecar refused a daemon that was listening and answering, and
+    /// stopped for the rest of its life. The seam's own contract says the opposite in step 1,
+    /// so this asserts the order rather than trusting the numbering.
+    #[test]
+    fn the_policy_is_never_asked_for_when_something_already_answers() {
+        let endpoint = crate::rpc::endpoint::scratch("ensure-policy-late");
+        let probe = Scripted::of([answering("live")]);
+        let asked = std::cell::Cell::new(0_usize);
+
+        let ensured = ensure_daemon(
+            &endpoint,
+            || {
+                asked.set(asked.get() + 1);
+                // What a window with no runtime beside it produces. Reaching this at all is
+                // the bug; answering it with a failure is how the test says so.
+                Err(DiscoveryError::Spawn(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "the runtime is not installed beside the app",
+                )))
+            },
+            || probe.probe(),
+        )
+        .expect("something answered, so nothing had to be started");
+
+        assert_eq!(ensured.connection, "live");
+        assert_eq!(
+            asked.get(),
+            0,
+            "the policy was resolved for a daemon that was already listening"
+        );
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// And when nothing answers it **is** asked, exactly once, after the probe.
+    ///
+    /// The other half of the same claim: deferring the policy must not quietly turn
+    /// spawn-if-absent into never-spawn. The probe count read from inside the closure is what
+    /// pins the order — a resolver called first would see zero dials.
+    #[test]
+    fn nothing_listening_resolves_the_policy_once_and_only_after_the_probe() {
+        let endpoint = crate::rpc::endpoint::scratch("ensure-policy-once");
+        let probe = Scripted::of([Probed::Absent, answering("the one it started")]);
+        let asked = std::cell::Cell::new(0_usize);
+        let dials_when_asked = std::cell::Cell::new(0_usize);
+
+        let ensured = ensure_daemon(
+            &endpoint,
+            || {
+                asked.set(asked.get() + 1);
+                dials_when_asked.set(probe.asked.get());
+                Ok(SpawnPolicy::IfAbsent {
+                    program: harmless(),
+                })
+            },
+            || probe.probe(),
+        )
+        .expect("the re-probe under the lock answered");
+
+        assert_eq!(ensured.connection, "the one it started");
+        assert_eq!(
+            asked.get(),
+            1,
+            "the policy was resolved {} times",
+            asked.get()
+        );
+        assert!(
+            dials_when_asked.get() >= 1,
+            "the policy was resolved before anything had been dialled"
+        );
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// A policy that cannot be resolved is the caller's own failure, handed back untouched.
+    ///
+    /// Untouched because the caller is the only party that can phrase it: the window's
+    /// "reinstall Nysia, then reopen it" is worth more to a person than anything this module
+    /// could compose, and a seam that wrapped it in [`DiscoveryError::Spawn`] would throw the
+    /// next steps away on the one path where somebody is reading them.
+    #[test]
+    fn a_policy_that_cannot_be_resolved_stops_before_the_lock_and_keeps_its_own_words() {
+        let endpoint = crate::rpc::endpoint::scratch("ensure-policy-fails");
+        let probe = Scripted::of([]);
+
+        let err = ensure_daemon(
+            &endpoint,
+            || {
+                Err(DiscoveryError::Spawn(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "reinstall Nysia",
+                )))
+            },
+            || probe.probe(),
+        )
+        .expect_err("there is nothing to start");
+
+        match &err {
+            EnsureError::Policy(cause) => assert!(
+                cause.to_string().contains("reinstall Nysia"),
+                "the caller's sentence did not survive: {cause}"
+            ),
+            other => panic!("got {other:?}"),
+        }
+        assert!(
+            SpawnLock::try_acquire(&endpoint.lock_path())
+                .expect("the attempt itself works")
+                .is_some(),
+            "the lock was taken for a spawn that could never happen"
+        );
+        assert!(
+            !endpoint.log_path().exists(),
+            "something was started with no program to start"
+        );
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
     }
 
@@ -767,8 +912,10 @@ mod tests {
         let endpoint = crate::rpc::endpoint::scratch("ensure-refused");
         let refused = ensure_daemon(
             &endpoint,
-            &SpawnPolicy::IfAbsent {
-                program: harmless(),
+            || {
+                Ok(SpawnPolicy::IfAbsent {
+                    program: harmless(),
+                })
             },
             || Err::<Probed<&'static str>, _>(DiscoveryError::LockTimeout { seconds: 1 }),
         )
@@ -797,8 +944,10 @@ mod tests {
 
         let ensured = ensure_daemon(
             &endpoint,
-            &SpawnPolicy::IfAbsent {
-                program: harmless(),
+            || {
+                Ok(SpawnPolicy::IfAbsent {
+                    program: harmless(),
+                })
             },
             || probe.probe(),
         )
@@ -832,8 +981,10 @@ mod tests {
 
         let ensured = ensure_daemon(
             &endpoint,
-            &SpawnPolicy::IfAbsent {
-                program: harmless(),
+            || {
+                Ok(SpawnPolicy::IfAbsent {
+                    program: harmless(),
+                })
             },
             || probe.probe(),
         )
@@ -854,8 +1005,10 @@ mod tests {
         let probe = Scripted::of([]);
         let err = ensure_daemon(
             &endpoint,
-            &SpawnPolicy::IfAbsent {
-                program: endpoint.runtime_dir().join("no-such-nysia-binary"),
+            || {
+                Ok(SpawnPolicy::IfAbsent {
+                    program: endpoint.runtime_dir().join("no-such-nysia-binary"),
+                })
             },
             || probe.probe(),
         )
@@ -882,18 +1035,24 @@ mod tests {
             .write(&identity)
             .expect("writes a lease");
 
-        let matching = ensure_daemon(&endpoint, &SpawnPolicy::Never, || {
-            Ok::<_, DiscoveryError>(Probed::Answering {
-                connection: "live",
-                identity: identity.clone(),
-            })
-        })
+        let matching = ensure_daemon(
+            &endpoint,
+            || Ok(SpawnPolicy::Never),
+            || {
+                Ok::<_, DiscoveryError>(Probed::Answering {
+                    connection: "live",
+                    identity: identity.clone(),
+                })
+            },
+        )
         .expect("something answered");
         assert!(matching.lease_matches);
 
-        let impostor = ensure_daemon(&endpoint, &SpawnPolicy::Never, || {
-            Ok::<_, DiscoveryError>(answering("live"))
-        })
+        let impostor = ensure_daemon(
+            &endpoint,
+            || Ok(SpawnPolicy::Never),
+            || Ok::<_, DiscoveryError>(answering("live")),
+        )
         .expect("something answered");
         assert!(
             !impostor.lease_matches,
