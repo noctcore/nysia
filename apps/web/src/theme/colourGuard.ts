@@ -97,6 +97,24 @@ const PALETTE_CLASS = new RegExp(
  * and each quote character gets its own pattern — which also lets a value contain the
  * *other* quote, catching a shorthand whose url is quoted inside it.
  *
+ * Only half the JSX case survived that, and the half that did was the half the tests
+ * exercised. A prop written as a plain string was caught; the same prop written as an
+ * expression container — which is how anything conditional has to be written, and so how
+ * the shape this rule most needs to catch actually appears — was not, because the brace
+ * is what bounds the span and it sat between the separator and the value. A status dot
+ * whose colour prop is a ternary is the default idiom, and it shipped with every gate
+ * green under a sentence that said JSX attributes were covered. The brace that opens a
+ * container is admitted at the separator now, where it touches the equals sign; the one
+ * that opens an object still bounds the span, and the closing one still stops it, so a
+ * prop cannot reach the prop after it.
+ *
+ * That gap had a second life. Naming the ANSI colour words as introducers meant that
+ * inside a braced ternary the quoted first branch read as a key introducing the second,
+ * so the rule fired when the first branch was one of eight words and stayed quiet
+ * otherwise — the same which-way-was-it-written asymmetry the equality separator had,
+ * reappearing in the one shape no case covered. Admitting the brace is what removes it:
+ * both spellings now match on the container rather than on the accident.
+ *
  * ## What it cannot see
  *
  * Every entry below is a real miss, and `colourGuard.test.ts` proves each one: a case per
@@ -125,6 +143,9 @@ const PALETTE_CLASS = new RegExp(
  *  - an expression between the property and the literal that contains a semicolon, a comma
  *    or a brace, or that runs past the length cap. Those are what stop the span crossing
  *    out of the value it belongs to, and the price is a call with more than one argument.
+ *    The brace that opens a JSX expression container is the exception and is admitted at
+ *    the separator, because it is punctuation the language requires rather than a sign the
+ *    value has ended; every brace after that still bounds the span.
  *  - a painting property the list does not name. It is a useful subset of CSS, not CSS —
  *    `text-decoration`, `column-rule`, `text-emphasis`, the `border-inline` and
  *    `border-block` families, and `filter` or `backdrop-filter` carrying a drop shadow are
@@ -268,7 +289,7 @@ const SET_PROPERTY_CALL =
  * condition was always missed, and a colour reached through a variable is in the residue.
  */
 const PROPERTY_INTRO =
-  `(?:(?<![\\w-])(?:${COLOUR_INTRODUCER})(?:\\s*(?::|=(?!=))|['"\`]\\s*(?::|=(?!=)))|${SET_PROPERTY_CALL})`;
+  `(?:(?<![\\w-])(?:${COLOUR_INTRODUCER})(?:\\s*:|\\s*=(?!=)\\{?|['"\`]\\s*(?::|=(?!=)))|${SET_PROPERTY_CALL})`;
 
 /**
  * Whatever sits between the separator and the literal — a ternary head, a call, nothing.

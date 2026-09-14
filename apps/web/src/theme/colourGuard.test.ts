@@ -60,6 +60,12 @@ const OFFENDERS = [
     kind: 'named-colour',
     snippet: "new Terminal({ theme: { foreground: 'white' } });",
   },
+  // The braced JSX prop. The first branch is deliberately not one of the ANSI words, so
+  // this proves the container and not the quoted-key accident that used to stand in for it.
+  {
+    kind: 'named-colour',
+    snippet: `<Dot stroke={active ? 'navy' : undefined} />`,
+  },
 ] as const;
 
 describe('findColourLiterals', () => {
@@ -178,6 +184,56 @@ describe('findColourLiterals', () => {
         'named-colour',
       ]);
     }
+  });
+
+  it('finds a colour on a JSX attribute written as an expression container', () => {
+    // The braces are the ordinary way to write this. Only the plain string attribute was
+    // caught, and only the plain string attribute was tested — which is how a claim that
+    // JSX attributes were covered survived: the case that would have contradicted it was
+    // the one nobody wrote. A status dot whose colour prop is a conditional is the default
+    // React idiom, and it shipped a painted pixel with every gate green.
+    for (const attribute of [
+      `<Dot color={'red'} />`,
+      `<Dot color={"red"} />`,
+      `<path fill={failed ? 'red' : 'gray'} />`,
+      `<path stroke={active ? 'navy' : undefined} />`,
+      `<stop stopColor={c ?? 'gold'} />`,
+      `<Dot
+  color={
+    failed ? 'red' : 'gray'
+  }
+/>`,
+    ]) {
+      expect(findColourLiterals(attribute).map((c) => c.kind), attribute).toContain(
+        'named-colour',
+      );
+    }
+  });
+
+  it('reads both branches of a braced conditional the same way round', () => {
+    // Naming the ANSI colour words as introducers had a side effect nothing tested: in a
+    // braced ternary the quoted first branch read as a key introducing the second, so the
+    // rule fired when the first branch was one of eight words and stayed quiet otherwise.
+    // That is the same which-way-was-it-written asymmetry the equality separator had, in
+    // the shape the tests did not reach. All four of these fire through the brace now.
+    for (const conditional of [
+      `<Dot color={on ? 'red' : 'gray'} />`,
+      `<Dot color={on ? 'red' : undefined} />`,
+      `<Dot color={on ? 'crimson' : 'gray'} />`,
+      `<Dot color={on ? 'crimson' : undefined} />`,
+    ]) {
+      expect(findColourLiterals(conditional).map((c) => c.kind), conditional).toContain(
+        'named-colour',
+      );
+    }
+  });
+
+  it('does not let a braced attribute reach the attribute after it', () => {
+    // The brace is admitted where it opens the container, not as a bound inside the
+    // expression: the closing one still stops the span, so a prop cannot read a literal
+    // belonging to the next prop along.
+    expect(findColourLiterals(`<Dot color={pick()} label={'gold'} />`)).toEqual([]);
+    expect(findColourLiterals(`<Dot fill={shade} /> <Tag kind={'silver'} />`)).toEqual([]);
   });
 
   it('finds a colour assigned through the style object', () => {
