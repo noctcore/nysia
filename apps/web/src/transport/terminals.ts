@@ -1,3 +1,5 @@
+import type { CreditGrant } from '../generated/CreditGrant';
+import type { CreditWindow } from '../generated/CreditWindow';
 import type { DaemonBridge } from './bridge';
 import { CreditLedger } from './credit';
 import { bySession, FrameDecoder, type StreamId } from './frames';
@@ -14,6 +16,26 @@ import { policyFor, WebglPool } from './surface/webglPool';
  * routing a frame to the wrong pane, and returning credit for a pane that has gone.
  */
 
+/**
+ * How long a stream may sit on a part-filled batch before it is acknowledged anyway.
+ *
+ * Short enough that the daemon is not left holding the tail of a burst, long enough that a
+ * busy session still batches rather than spending an IPC round trip per repaint. The
+ * coalescing window upstream is 16 ms, so this is a few of those.
+ */
+const IDLE_ACK_MS = 50;
+
+/** Whether a decoded credit frame is the daemon advertising a window. */
+function isGrant(frame: unknown): frame is CreditGrant & { credit: 'grant' } {
+  if (typeof frame !== 'object' || frame === null) {
+    return false;
+  }
+  const tagged = frame as { credit?: unknown; window?: unknown };
+  return (
+    tagged.credit === 'grant' && typeof tagged.window === 'object' && tagged.window !== null
+  );
+}
+
 /** Owns every live surface and the flow control behind them. */
 export class TerminalRouter {
   readonly #bridge: DaemonBridge;
@@ -21,6 +43,8 @@ export class TerminalRouter {
   readonly #frameDecoder = new FrameDecoder();
   readonly #ledger = new CreditLedger();
   readonly #surfaces = new Map<StreamId, XtermSurface>();
+  /** Pending idle flushes, one per stream. See {@link TerminalRouter.#rendered}. */
+  readonly #idleAcks = new Map<StreamId, ReturnType<typeof setTimeout>>();
   readonly #pool: WebglPool;
   #onBell: (stream: StreamId) => void = () => {};
   #onExit: (stream: StreamId) => void = () => {};
@@ -58,6 +82,17 @@ export class TerminalRouter {
   }): void {
     this.#onBell = events.bell ?? this.#onBell;
     this.#onExit = events.exit ?? this.#onExit;
+  }
+
+  /**
+   * The window in force, as the daemon last advertised it.
+   *
+   * Exposed so a test can see that the announcement was adopted. Nothing in the app reads
+   * it: the ledger applies it, and a second reader of the numbers is a second place they
+   * could be wrong.
+   */
+  get creditWindow(): CreditWindow {
+    return this.#ledger.window;
   }
 
   /** The surface for a stream, built on first use. */
@@ -104,11 +139,18 @@ export class TerminalRouter {
           case 'exit':
             this.#onExit(stream);
             break;
-          // `osc133` is shell-integration state and `credit` is the daemon advertising its
-          // window; neither paints anything, and the Rust side has already acted on the
-          // credit frame before it reached here.
-          case 'osc133':
           case 'credit':
+            // The daemon advertising the window in force. It paints nothing, but this
+            // ledger is what decides when a render is worth acknowledging, and this frame
+            // is the only way it can learn the numbers it decides against (D-13).
+            //
+            // Rust adopts it too, for its own mirror. Two adoptions of one announcement is
+            // not two sources of truth — the daemon remains the only one — and the
+            // alternative was this side running on compiled-in defaults for ever.
+            this.#adopt(frame.payload);
+            break;
+          // Shell-integration state. Nothing here paints it yet.
+          case 'osc133':
             break;
         }
       }
@@ -133,6 +175,7 @@ export class TerminalRouter {
       return;
     }
     this.#surfaces.delete(stream);
+    this.#cancelIdleAck(stream);
     surface.dispose();
 
     // The final ack matters: a stream closed mid-burst would otherwise leave the daemon
@@ -160,6 +203,9 @@ export class TerminalRouter {
       surface.dispose();
     }
     this.#surfaces.clear();
+    for (const stream of [...this.#idleAcks.keys()]) {
+      this.#cancelIdleAck(stream);
+    }
     this.#frameDecoder.reset();
   }
 
@@ -168,14 +214,70 @@ export class TerminalRouter {
     for (const stream of [...this.#surfaces.keys()]) {
       this.close(stream);
     }
+    for (const stream of [...this.#idleAcks.keys()]) {
+      this.#cancelIdleAck(stream);
+    }
     this.#frameDecoder.reset();
+  }
+
+  /**
+   * Adopt a window the daemon advertised, ignoring anything that does not parse.
+   *
+   * A credit frame that cannot be read is the daemon's problem to fix, not a reason to stop
+   * rendering: the window already in force stays in force, which is the same thing the Rust
+   * side does with one.
+   */
+  #adopt(payload: Uint8Array): void {
+    let frame: unknown;
+    try {
+      frame = JSON.parse(new TextDecoder().decode(payload));
+    } catch {
+      return;
+    }
+    if (!isGrant(frame)) {
+      return;
+    }
+    this.#ledger.adopt(frame.window);
   }
 
   /** A surface has painted; batch the acknowledgement and send it when the batch fills. */
   #rendered(stream: StreamId, bytes: number): void {
     const ack = this.#ledger.rendered(stream, bytes);
     if (ack) {
+      this.#cancelIdleAck(stream);
       void this.#ack(ack.stream, ack.bytes);
+      return;
+    }
+
+    // **A partial batch has to leave on its own.** Without this the tail of every burst sits
+    // here unacknowledged: the daemon is holding that much of the stream's allowance, and a
+    // session that alternates between bursts and silence loses a little of its window each
+    // time. `CreditWindow::is_coherent` does not require the ack batch to fit inside the
+    // per-stream allowance, so a window the daemon is entitled to advertise can leave a
+    // batch that will never fill — at which point the pane stops dead with nothing in the
+    // log. Rust has had this flush since it was written; this side only claimed to.
+    this.#scheduleIdleAck(stream);
+  }
+
+  #scheduleIdleAck(stream: StreamId): void {
+    this.#cancelIdleAck(stream);
+    this.#idleAcks.set(
+      stream,
+      setTimeout(() => {
+        this.#idleAcks.delete(stream);
+        const ack = this.#ledger.drain(stream);
+        if (ack) {
+          void this.#ack(ack.stream, ack.bytes);
+        }
+      }, IDLE_ACK_MS),
+    );
+  }
+
+  #cancelIdleAck(stream: StreamId): void {
+    const scheduled = this.#idleAcks.get(stream);
+    if (scheduled !== undefined) {
+      clearTimeout(scheduled);
+      this.#idleAcks.delete(stream);
     }
   }
 

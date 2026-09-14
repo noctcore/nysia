@@ -135,7 +135,11 @@ impl CreditLedger {
         }
     }
 
-    /// The window in force.
+    /// The window in force — the daemon's, once it has advertised one, never a copy this
+    /// client keeps (D-13).
+    ///
+    /// Only the tests read it back. Everything that acts on the window does so through the
+    /// ledger, and a second reader of the numbers is a second place they could be wrong.
     #[cfg(test)]
     pub fn window(&self) -> CreditWindow {
         self.window
