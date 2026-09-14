@@ -154,6 +154,13 @@ const PALETTE_CLASS = new RegExp(
  *    line, since the span crosses line ends and only punctuation stops it. This tree is
  *    semicolon-terminated throughout and nothing enforces that, so it is a live trap rather
  *    than a theoretical one.
+ *  - a comment that writes a property, a separator and a quoted colour — a line describing
+ *    what paints rather than painting. The rule reads text and not syntax, so the two are
+ *    the same thing to it. Telling them apart means knowing where the comments are, and
+ *    working that out by pattern is how a scanner comes to mistake a regex literal for a
+ *    comment — this module has one carrying a backtick — and fall silent over everything
+ *    after it. That failure is quiet and this one is not, so this one stays. Marking a
+ *    property up in prose is safe; putting a separator after it is what fires.
  */
 const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
 
