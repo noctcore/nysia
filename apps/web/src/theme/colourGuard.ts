@@ -235,8 +235,8 @@ const PALETTE_CLASS = new RegExp(
  * Every round of review has found a *position* this rule reads wrongly: a property flush
  * against its colon, then one behind a ternary, then a quoted key, then a custom property,
  * then a JSX expression container, then whichever branch a greedy quantifier reached last,
- * then a branch written as a template. Seven, over six rounds, each closed by spelling that
- * one out. That run is not luck. Whether a string is the value of a painting property is a
+ * then a branch written as a template. Seven of them, each closed by spelling that one out,
+ * and the list is in the order they were found. That run is not luck. Whether a string is the value of a painting property is a
  * question about syntax, and a regular expression can be made right about a position
  * somebody has already thought of, never about position itself, because it has no notion of
  * one. The false positives say it from the other side: an operand, a branch, a key and a
@@ -244,13 +244,15 @@ const PALETTE_CLASS = new RegExp(
  *
  * That diagnosis explains the *history*. It does not describe the list, and a previous
  * version of this section said it did — that nearly every entry was positional and a syntax
- * tree would leave two standing. Count them: of the nine misses above, roughly three turn on
- * position, and the other six are questions about **vocabulary** or about **what a value
- * hides**. Which property names paint. Which library's keys paint. Which wrapper calls
- * paint. What a `url()` or a data URI is carrying. What a percent-encoded hash is. What a
- * computed custom-property key resolves to. A syntax tree answers none of those by knowing
- * about syntax — it has to be *told*, exactly as this rule is told, and the lists it is told
- * with are the ones in this file.
+ * tree would leave two standing. Go through the nine misses instead of counting on it. One
+ * turns purely on position, the span bounds, and one is half position and half vocabulary,
+ * the setter list with its tuple. The rest are questions about **vocabulary** or about
+ * **what a value hides**, and here they are: which property names paint; which library's
+ * keys paint; which wrapper calls paint; what a `url()` or a data URI is carrying; what a
+ * percent-encoded hash is; what a computed custom-property key resolves to; and what a name
+ * holds when the colour arrives through a variable. A syntax tree answers none of those by
+ * knowing about syntax — it has to be *told*, exactly as this rule is told, and the lists it
+ * would be told with are the ones in this file.
  *
  * So, for whoever picks up issue #45, which rewrites this as a walk over the TypeScript
  * syntax tree — JSX attributes, object-literal properties and assignment targets whose key
@@ -259,9 +261,9 @@ const PALETTE_CLASS = new RegExp(
  *  - the positional entries stop existing rather than being documented better, and so does
  *    the class of them, which is the whole point: no spans, no greedy quantifiers, no
  *    ordering accidents, no eighth position waiting to be found;
- *  - the vocabulary and value entries **carry over unchanged** and have to be ported with
- *    the code. They are not artefacts of doing this with regular expressions and deleting
- *    them as though they were would quietly reopen every hole they describe.
+ *  - the seven vocabulary and value entries **carry over unchanged** and have to be ported
+ *    with the code. They are not artefacts of doing this with regular expressions, and
+ *    deleting them as though they were would quietly reopen every hole they describe.
  *
  * The precedent is next door: the architecture rules hand-rolled a lexer for the same class
  * of question, hit the same run of positional misses, and deleted it for a syntax-tree walk
