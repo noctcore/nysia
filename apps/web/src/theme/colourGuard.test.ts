@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  DEPENDENCY_STYLESHEETS,
   TOKEN_DEFINITION_MODULES,
   TOKEN_DEFINITION_STYLESHEETS,
   findColourLiterals,
+  findDependencyStylesheets,
   scanForColourLiterals,
   type ScannedFile,
 } from './colourGuard';
@@ -596,9 +598,32 @@ describe('hardcoded colour guard', () => {
     expect(TOKEN_DEFINITION_MODULES).not.toContain('src/theme/colourGuard.ts');
   });
 
-  it('keeps the token stylesheet the only stylesheet in the package', () => {
+  it('keeps the token stylesheet the only stylesheet under src', () => {
     expect(Object.keys(stylesheets).map(normalize).sort()).toEqual(
       [...TOKEN_DEFINITION_STYLESHEETS].sort(),
     );
+  });
+
+  it('names every stylesheet the package pulls in from a dependency', () => {
+    // The glob above is rooted at this file, so it proves something about `src` and nothing
+    // about the bundle. Reading the built CSS is what showed the difference: a dependency
+    // stylesheet imported by package name lands in it carrying a hex background, a hex
+    // foreground, a colour function and a data URI painting a path, and no rule in this
+    // module has ever seen any of them.
+    expect(findDependencyStylesheets(scanned)).toEqual([...DEPENDENCY_STYLESHEETS].sort());
+  });
+
+  it('trips when a module pulls in a stylesheet the list does not name', () => {
+    // Trap 12 again: the check runs over the real tree with one import added, so a list
+    // that has stopped being wired up fails here rather than passing vacuously.
+    const poisoned = scanned.map((file) =>
+      file.path === 'src/App.tsx'
+        ? { ...file, source: `${file.source}
+import 'some-lib/dist/theme.css';
+` }
+        : file,
+    );
+    expect(findDependencyStylesheets(poisoned)).not.toEqual([...DEPENDENCY_STYLESHEETS].sort());
+    expect(findDependencyStylesheets(poisoned)).toContain('some-lib/dist/theme.css');
   });
 });
