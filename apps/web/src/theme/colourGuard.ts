@@ -129,6 +129,10 @@ const PALETTE_CLASS = new RegExp(
  *    literal. Needs a CSS parser, not a wider pattern.
  *  - a custom property whose name is computed, which is to say a template-literal key.
  *    There is no name in the source for the pattern to match.
+ *  - a name and a value written as a tuple and handed to one of the DOM setters later,
+ *    rather than passed to it at the call site. The comma separator is spelled as part of
+ *    that call now; before it was, a tuple table was caught, but by accident — every
+ *    unrelated two-argument call with a property name in front of a string was caught too.
  *  - a colour carried inside a `url()`, which is set aside as a path before the words are
  *    counted. A data URI can carry a whole stylesheet, so this is the bare-CSS entry two
  *    bullets up arriving through a different door. The trade bought the loudest false
@@ -208,6 +212,22 @@ const TERMINAL_THEME_KEYS =
 const COLOUR_INTRODUCER = `${PAINTING_PROPERTY}|${TERMINAL_THEME_KEYS.join('|')}`;
 
 /**
+ * Writing a property through the DOM, where the name is an argument and the separator is
+ * the comma between the two.
+ *
+ * The call has to be named. The comma form used to accept any call whose first argument was
+ * a quoted property name and whose second was a string — a test helper, an analytics event,
+ * a two-element lookup table, none of which paints anything — and that was a false positive
+ * inherited from the version before the rule narrowed. Naming the two DOM methods that
+ * actually take this shape closes it without giving up the case the comma exists for.
+ *
+ * The price is a name and a value written as a tuple somewhere else and handed to one of
+ * these later, which is in the residue.
+ */
+const SET_PROPERTY_CALL =
+  `(?<![\\w-])set(?:Property|Attribute)\\s*\\(\\s*['"\`](?:${COLOUR_INTRODUCER})['"\`]\\s*,`;
+
+/**
  * The property and its separator.
  *
  * The leading guard is what stops the list matching inside a longer word — without it
@@ -215,12 +235,12 @@ const COLOUR_INTRODUCER = `${PAINTING_PROPERTY}|${TERMINAL_THEME_KEYS.join('|')}
  * had just stopped crying wolf on bare strings started crying wolf on identifiers instead.
  * The other two rules have had that guard from the start.
  *
- * Two separator shapes: bare property then colon or equals, which covers an object literal,
- * a JSX attribute and an assignment; or quoted property then comma, colon or equals, which
- * covers a quoted key and `setProperty`.
+ * Three shapes: bare property then colon or equals, which covers an object literal, a JSX
+ * attribute and an assignment; quoted property then colon or equals, which covers a quoted
+ * key; and the DOM call below.
  */
 const PROPERTY_INTRO =
-  `(?<![\\w-])(?:${COLOUR_INTRODUCER})(?:\\s*[:=]|['"\`]\\s*[,:=])`;
+  `(?:(?<![\\w-])(?:${COLOUR_INTRODUCER})(?:\\s*[:=]|['"\`]\\s*[:=])|${SET_PROPERTY_CALL})`;
 
 /**
  * Whatever sits between the separator and the literal — a ternary head, a call, nothing.
