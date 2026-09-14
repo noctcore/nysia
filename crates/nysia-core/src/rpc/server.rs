@@ -986,7 +986,44 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use nysia_proto::{SessionCreate, SessionKind, StreamAttach};
+
     use super::*;
+    use crate::rpc::testing::TestShell;
+
+    /// A socket that has gone away: every write fails the way one into a closed pipe does.
+    ///
+    /// Written out rather than staged by dropping a pipe's far end, because the branches it
+    /// is here for are the ones that run when an answer never reached the client — and a test
+    /// for those should not also rest on when a buffered duplex decides to report the far end
+    /// has gone.
+    struct WriteFails;
+
+    impl tokio::io::AsyncWrite for WriteFails {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn receipts_replay_the_first_answer_and_forget_the_oldest() {
@@ -1272,6 +1309,153 @@ mod tests {
              one that was just turned away"
         );
 
+        daemon.shutdown();
+        drop(listener);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    #[tokio::test]
+    async fn a_stream_connection_whose_acceptance_never_left_is_not_left_bound() {
+        // The bind happens before the answer, so an answer that never goes out leaves the
+        // client id pointing at a socket the client does not know it holds. It will never ack
+        // on that connection — it was never told it was accepted — so a sink opened against
+        // it spends its opening allowance and then stalls the session it feeds for good.
+        let endpoint = crate::rpc::endpoint::scratch("unbind");
+        let (daemon, listener) = Daemon::bind(DaemonConfig {
+            idle_retire_after: None,
+            ..DaemonConfig::new(endpoint.clone())
+        })
+        .expect("binds");
+        let client_id: ClientId = "nysia-test".parse().expect("a well-formed client id");
+        let mine = PeerCredentials {
+            pid: Some(std::process::id()),
+            user: "me".to_owned(),
+            daemon_user: "me".to_owned(),
+        };
+
+        let (peer, ours) = tokio::io::duplex(4096);
+        let (ours_reader, _ours_writer) = tokio::io::split(ours);
+        let (_peer_reader, peer_writer) = tokio::io::split(peer);
+        ControlWriter::new(peer_writer)
+            .write_frame(&HelloRequest::new(
+                PROTOCOL_VERSION,
+                ClientRole::Stream,
+                client_id.clone(),
+            ))
+            .await
+            .expect("the hello goes out");
+
+        daemon
+            .serve_io(
+                ControlReader::new(ours_reader),
+                ControlWriter::new(WriteFails),
+                Some(mine),
+            )
+            .await;
+
+        assert_eq!(
+            daemon.streams().bound(),
+            1,
+            "the hello was accepted and the connection was bound; without that this asserts \
+             nothing about the rollback"
+        );
+        assert_eq!(
+            daemon.streams().connections(),
+            0,
+            "and the bind was given back when the acceptance could not be written"
+        );
+        assert!(
+            daemon.streams().attach(&client_id).is_none(),
+            "a client id left pointing at a socket nobody is reading serves the next attach \
+             a sink that can never be acked"
+        );
+
+        daemon.shutdown();
+        drop(listener);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    #[tokio::test]
+    async fn an_attach_whose_answer_never_left_gives_the_id_back_and_forgets_its_receipt() {
+        // An attach's whole effect is the id in its answer. When that answer does not reach
+        // the client, both halves of the effect have to go: the sink, which the client can
+        // never ack because it never learned the id, and the receipt, which would otherwise
+        // replay that id to a retry after the sink behind it had been given up — an attach
+        // into nothing, reported as a success.
+        let endpoint = crate::rpc::endpoint::scratch("rollback");
+        let (daemon, listener) = Daemon::bind(DaemonConfig {
+            idle_retire_after: None,
+            ..DaemonConfig::new(endpoint.clone())
+        })
+        .expect("binds");
+        let client_id: ClientId = "nysia-test".parse().expect("a well-formed client id");
+        let mine = PeerCredentials {
+            pid: Some(std::process::id()),
+            user: "me".to_owned(),
+            daemon_user: "me".to_owned(),
+        };
+        let session = daemon
+            .sessions()
+            .create(&SessionCreate {
+                kind: SessionKind::Shell,
+                pane_key: None,
+                profile: TestShell::pick().profile,
+                cwd: None,
+                env_overrides: BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+            })
+            .expect("a shell session starts");
+        // The stream connection the attach routes to. Held for the length of the test: an
+        // attach with nowhere to write is refused, and a refusal would take this test through
+        // a branch that has no rollback to make.
+        let _stream = daemon.streams().bind(&client_id);
+        let caller = Caller::new(Some(mine), &client_id, daemon.sessions());
+
+        let request = RequestEnvelope::new(RequestPayload::StreamAttach(StreamAttach {
+            handle: session.handle.clone(),
+        }));
+        let attach = request.request_id.clone();
+        let (peer, ours) = tokio::io::duplex(4096);
+        let (ours_reader, _ours_writer) = tokio::io::split(ours);
+        let (_peer_reader, peer_writer) = tokio::io::split(peer);
+        ControlWriter::new(peer_writer)
+            .write_frame(&request)
+            .await
+            .expect("the attach goes out");
+
+        daemon
+            .serve_control(
+                ControlReader::new(ours_reader),
+                ControlWriter::new(WriteFails),
+                &caller,
+            )
+            .await;
+
+        assert_eq!(
+            daemon.streams().next_stream_id(&client_id),
+            Some(StreamId(StreamId::FIRST.get() + 1)),
+            "an id was assigned, so the rollback below is the one after a real attach rather \
+             than an assertion about an attach that never happened"
+        );
+        assert_eq!(
+            daemon.streams().len(),
+            0,
+            "the sink goes with the answer that never arrived; kept, it spends its opening \
+             allowance against a client that can never ack an id it was never told"
+        );
+        assert!(
+            lock(&daemon.receipts)
+                .get(&caller.fingerprint, &attach)
+                .is_none(),
+            "and the receipt goes with it, or a retry is handed the id of a sink that has \
+             already been given up and told it succeeded"
+        );
+
+        daemon
+            .sessions()
+            .close(&session.handle)
+            .expect("the session closes");
         daemon.shutdown();
         drop(listener);
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
