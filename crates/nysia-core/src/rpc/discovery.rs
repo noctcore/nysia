@@ -283,6 +283,35 @@ impl From<EnsureError<DiscoveryError>> for DiscoveryError {
 pub fn ensure_daemon<T, E>(
     endpoint: &Endpoint,
     policy: impl FnOnce() -> Result<SpawnPolicy, E>,
+    probe: impl FnMut() -> Result<Probed<T>, E>,
+) -> Result<Ensured<T>, EnsureError<E>>
+where
+    E: std::error::Error + 'static,
+{
+    ensure_daemon_within(endpoint, READY_TIMEOUT, policy, probe)
+}
+
+/// [`ensure_daemon`], with the readiness wait bounded by `ready` rather than
+/// [`READY_TIMEOUT`].
+///
+/// **Not the path to reach for.** [`ensure_daemon`] is, and it is the one every front end
+/// calls; this exists so that a *test* can reach a real readiness timeout without sitting
+/// through twenty seconds of one. It is named apart for the reason §6 gives about overriding
+/// a default: a call site that has shortened this wait is then obvious in a diff and
+/// greppable afterwards, instead of being a number somebody passed on the path everyone uses.
+///
+/// The twenty seconds are load-bearing in the other direction too. They are a bound on one
+/// call rather than a verdict on the daemon — see [`READY_TIMEOUT`] — so a caller that
+/// trimmed them in production would turn a first launch behind a virus scanner back into the
+/// failure that made a timeout look like a flake.
+///
+/// # Errors
+///
+/// Exactly [`ensure_daemon`]'s, with [`DiscoveryError::NeverReady`] reporting `ready`.
+pub fn ensure_daemon_within<T, E>(
+    endpoint: &Endpoint,
+    ready: Duration,
+    policy: impl FnOnce() -> Result<SpawnPolicy, E>,
     mut probe: impl FnMut() -> Result<Probed<T>, E>,
 ) -> Result<Ensured<T>, EnsureError<E>>
 where
@@ -322,7 +351,7 @@ where
 
     spawn_daemon(&program, endpoint).map_err(DiscoveryError::Spawn)?;
 
-    let deadline = Instant::now() + READY_TIMEOUT;
+    let deadline = Instant::now() + ready;
     loop {
         if let Probed::Answering {
             connection,
@@ -334,7 +363,7 @@ where
         if Instant::now() >= deadline {
             return Err(DiscoveryError::NeverReady {
                 endpoint: endpoint.listening().to_string(),
-                seconds: READY_TIMEOUT.as_secs(),
+                seconds: ready.as_secs(),
             }
             .into());
         }
@@ -1107,6 +1136,48 @@ mod tests {
             probe.asked.get() >= 4,
             "the readiness wait polled {} times, so it returned before anything answered",
             probe.asked.get()
+        );
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// A runtime that never answers ends the wait, and the wait is the one the caller named.
+    ///
+    /// The seam [`ensure_daemon_within`] exists for: twenty seconds of real clock is what
+    /// stands between a test and the `NeverReady` branch, and a test that sat through it
+    /// would be paid for on every run of both CI legs. `harmless()` starts and does nothing,
+    /// which is exactly a runtime that will not bind.
+    #[test]
+    fn a_runtime_that_never_binds_ends_the_wait_the_caller_asked_for() {
+        let endpoint = crate::rpc::endpoint::scratch("ensure-never-ready");
+        let probe = Scripted::of([]);
+
+        let began = Instant::now();
+        let err = ensure_daemon_within(
+            &endpoint,
+            Duration::from_millis(150),
+            || {
+                Ok::<_, DiscoveryError>(SpawnPolicy::IfAbsent {
+                    program: harmless(),
+                })
+            },
+            || probe.probe(),
+        )
+        .expect_err("nothing was ever going to answer");
+
+        assert!(
+            matches!(
+                err,
+                EnsureError::Discovery(DiscoveryError::NeverReady { .. })
+            ),
+            "got {err:?}"
+        );
+        assert!(
+            began.elapsed() < READY_TIMEOUT,
+            "the wait ignored the bound it was given and sat through the default"
+        );
+        assert!(
+            probe.asked.get() >= 3,
+            "it gave up without polling, so the bound is being read as a single dial"
         );
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
     }
