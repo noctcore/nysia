@@ -156,9 +156,15 @@ function isGlobCall(expression: ts.Expression): boolean {
  * against, `caseSensitive` changes which files it matches, `exhaustive` widens it into
  * `node_modules`, and the next release may add another. Enumerating the dangerous ones means
  * every option nobody has thought of fails OPEN, which is unbounded. Enumerating the safe
- * ones means the worst an unfamiliar option can do is produce a report, and a report is a
- * developer writing one line to silence it with a reason. The other direction puts the store
- * provider in the production bundle with every gate green.
+ * ones means the worst an unfamiliar option can do is produce a report. The other direction
+ * puts the store provider in the production bundle with every gate green.
+ *
+ * That trade is real but it is not free, and an earlier version of this comment undersold
+ * it: lint-meta has NO suppression mechanism, so an over-report cannot be silenced in place
+ * the way an ESLint one can. It has to be fixed, argued with in review, or the rule has to
+ * change. That raises the price of a needless report, which is why the query narrowing below
+ * is taken and why the list is kept to forms this repository actually writes — not why the
+ * default is opened again.
  *
  * So the list is short, and each entry was executed rather than read:
  *
@@ -207,8 +213,15 @@ function readGlobOptions(options: ts.Expression | undefined): GlobOptionsVerdict
     }
     if (INERT_OPTIONS.has(key)) continue;
 
-    if (key === 'query' && literalText(property.initializer) === '?raw') {
-      sourceText = true;
+    if (key === 'query') {
+      // Verified by execution: Vite appends the query to each import path only AFTER the
+      // files have been globbed, so a query — whatever its value, however it is spelled,
+      // even one this cannot evaluate — cannot change WHICH files are reached. Only `?raw`
+      // proves what comes back is harmless; every other query falls through to the tree
+      // check, which reports if the pattern reaches a module and stays quiet if it does not.
+      // That takes the asset, worker and url globs out of the over-report set without
+      // reopening anything, because the file set is still decided by the tree.
+      if (literalText(property.initializer) === '?raw') sourceText = true;
       continue;
     }
     return { kind: 'undecidable', because: `the \`${key}\` option` };

@@ -115,14 +115,20 @@ function namesStoreContext(specifier: string): boolean {
  * modelled. That is the fail-closed default doing the work, and it is what makes this
  * function's approximations tolerable rather than load-bearing.
  *
- * Because they are approximations, and an earlier version claimed otherwise. "Same matcher,
- * same options" was not true: the matcher here is `minimatch` with `dot: true` and no
- * ignore list, matching every file in the scan including the importing file itself, where
+ * Because they are approximations, and two earlier versions claimed otherwise. "Same
+ * matcher, same options" was not true: the matcher here is `minimatch` with `dot: true` and
+ * no ignore list, matching every file in the scan including the importing file itself, where
  * Vite runs `picomatch` with its own dot and extglob settings, its own ignores, and the
- * importing file excluded. Every one of those differences makes this side match MORE, so
- * each is a possible over-report and none is a missed one — which is the only direction
- * that would matter. Using Vite's own matcher would mean declaring it in the root manifest,
- * which is coordinator-owned.
+ * importing file excluded.
+ *
+ * The replacement — that every one of those differences makes this side match MORE, so none
+ * could be a missed one — was also wrong, and wrong in the dangerous direction. Anchoring is
+ * a difference too, and it narrows: joining an unanchorable pattern onto the importing
+ * directory made this side match LESS than Vite, and a double-star glob reaching the store
+ * was allowed through. So the honest statement is the guard above, not a claim about the
+ * matcher: what this function compares is only ever a pattern it has already established it
+ * can anchor. Using Vite's own matcher would mean declaring it in the root manifest, which
+ * is coordinator-owned.
  *
  * One limit in the other direction, named rather than implied: a pattern that matches
  * nothing today is not reported, because today it returns nothing. The rule runs on every
@@ -134,9 +140,14 @@ function globReachesModule(
   files: readonly string[],
 ): boolean {
   const positive = pattern.startsWith('!') ? pattern.slice(1) : pattern;
-  // A root-relative pattern resolves against Vite's root, not this scan's — fail closed
-  // rather than resolve it wrongly.
-  if (positive.startsWith('/')) return true;
+  // Anchoring is the whole of this function, so a pattern that cannot be anchored cannot be
+  // judged here. Only a relative pattern resolves against the importing file's directory.
+  // `/x` resolves against Vite's root; a pattern starting `**` is handed to the globber
+  // untouched and walked from the filesystem root; an alias or a subpath import goes through
+  // the resolver first. Joining any of those onto the importing directory does not merely
+  // get the answer wrong, it gets it wrong in the direction that stays silent — it anchors a
+  // pattern Vite left loose, so the rule looks in one folder while the glob walks the disk.
+  if (!positive.startsWith('./') && !positive.startsWith('../')) return true;
 
   let matcher;
   try {
@@ -475,11 +486,12 @@ export function noTauriOutsideDesktop(root: string, files: readonly string[]): V
  * be dangerous. The earlier version had it the other way round: it enumerated the safe
  * spellings and exempted them, so every option nobody had thought of failed OPEN. That is
  * unbounded, because Vite's option surface is Vite's to change and this rule is guessing at
- * it from outside; three separate options and three expression wrappers walked through it
- * before anyone noticed. The worst an unfamiliar option can do now is produce a report, and
- * a report is a developer writing one line to silence it with a reason. The other direction
- * is the store provider in the production bundle with every gate green. See
- * `GlobOptionsVerdict` for the list and what is deliberately left off it.
+ * it from outside; three separate options, three expression wrappers and an unanchorable
+ * pattern walked through it before anyone noticed. The worst an unfamiliar option can do now
+ * is produce a report; the other direction is the store provider in the production bundle
+ * with every gate green. See `GlobOptionsVerdict` for the list and what is deliberately left
+ * off it — including the reason an over-report costs more here than it would in ESLint,
+ * since lint-meta has no way to suppress one in place.
  *
  * WHAT REMAINS BEYOND IT, stated rather than implied by silence: a specifier that is not a
  * literal. `import(name)` and `import('../store/' + name)` are reported as computed by the
@@ -526,7 +538,7 @@ export function noStoreContextOutsideStore(root: string, files: readonly string[
           `glob-imports with ${reference.options.because}, which can change what it ` +
             'reaches or what it returns; this rule reports what it cannot prove harmless, ' +
             `because only ${STORE_CONTEXT_ALLOWED_FOR_HUMANS} may touch the store provider. ` +
-            "Read the files as text with query: '?raw', or silence this with a reason",
+            "Read the files as text with query: '?raw', or reach the modules some other way",
         );
         continue;
       }
