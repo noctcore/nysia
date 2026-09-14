@@ -508,6 +508,24 @@ describe('the documented residue', () => {
     ).toEqual([]);
   });
 
+  it('does fire on a comment that writes a property, a colon and a quoted colour', () => {
+    // The rule reads text, not syntax, so a line that only talks about painting is
+    // indistinguishable from one that paints. Telling them apart means knowing where the
+    // comments are, and finding that out by pattern is how a scanner ends up mistaking a
+    // regex literal for a comment and going quiet over the rest of a file. A loud false
+    // positive is the cheaper of those two, so this one stays.
+    expect(
+      findColourLiterals("// background: the swatch stays 'red' until the run lands").map(
+        (c) => c.kind,
+      ),
+    ).toEqual(['named-colour']);
+    expect(
+      findColourLiterals('/** Paints `background` as `red` when the probe fails. */').map(
+        (c) => c.kind,
+      ),
+    ).toEqual([]);
+  });
+
   it('does fire on a value that merely contains a colour word', () => {
     // The other direction, also documented: a false positive, but a loud one. Nothing
     // silent can ship a pixel.
