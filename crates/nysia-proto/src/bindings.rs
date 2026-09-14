@@ -370,6 +370,22 @@ mod tests {
             generated.contains("deserializes into the Rust enum and re-serializes"),
             "the webview boundary is why this type is not needed everywhere"
         );
+        // #60: the limit was right and the reason given for it was not. The retired rule
+        // said any `string` constituent disqualifies the discriminant, and a plain `string`
+        // tail measurably does narrow — it is the intersection that does not. Naming the
+        // cause is what keeps the next reader from "fixing" it by dropping the `& {}`.
+        assert!(
+            generated.contains("The cause is the `string & {}` tail"),
+            "the doc must name the intersection as the cause, not any `string` constituent"
+        );
+        assert!(
+            !generated.contains("the moment one constituent types it"),
+            "the retired rule is back: a plain `string` tail does narrow, measurably"
+        );
+        assert!(
+            generated.contains("Spelling the tail `string` is not the fix"),
+            "naming the cause without warning off the obvious wrong fix invites it"
+        );
     }
 
     #[test]
