@@ -2,7 +2,9 @@
 import type { CreditWindow } from "./CreditWindow";
 
 /**
- * The reader tells the writer it may send more.
+ * The producer tells the consumer it may send more — daemon to client.
+ *
+ * Counted in payload bytes, like the [`CreditAck`] that replenishes it.
  *
  * It names no session. A credit frame rides the stream connection, whose header already
  * carries a [`StreamId`](crate::StreamId) — and two routing keys in one frame is a bug
@@ -11,7 +13,7 @@ import type { CreditWindow } from "./CreditWindow";
  */
 export type CreditGrant = { 
 /**
- * How many further bytes the writer may send, on top of what it already has.
+ * How many further payload bytes the producer may send, on top of what it already has.
  */
 bytes: number, 
 /**
