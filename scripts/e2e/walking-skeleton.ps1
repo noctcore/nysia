@@ -81,12 +81,23 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
+# **Every constant below is read-only, and that is load-bearing.**
+#
+# PowerShell names are case-insensitive and a `switch` body is not a child scope, so a plain
+# `$control = Read-Screen …` three hundred lines down assigns to `$script:Control`. It did:
+# the control that proves the re-attach check can fail ended up comparing a screen against
+# itself, which is false for every row of a multi-line screen, so `-not (…)` was true whatever
+# the shell had printed and the control passed unconditionally — #44's own defect, wearing the
+# costume of the fix for it. Read-only turns the next collision into a terminating error at the
+# assignment rather than a check that quietly stops checking. `$script:Failed` is deliberately
+# not in here: it is a flag, and it is meant to move.
+#
 # Computed by the shell, never typed. A check that looks for a string which also appears in
 # the line as typed is satisfied by kernel echo, with the shell having run nothing — and after
 # a relaunch it is satisfied a second time by a replay of that echo, which is the very thing
 # under test.
-$script:Token = 'NYSIA-42'
-$script:Recipe = @{
+New-Variable -Name Token -Scope Script -Option ReadOnly -Value 'NYSIA-42'
+New-Variable -Name Recipe -Scope Script -Option ReadOnly -Value @{
     pwsh     = @('Write-Output ("NYSIA" + "-" + (6*7))')
     # `cmd` expands %NYS% when it parses the line, so the assignment has to be its own command.
     cmd      = @('set /a NYS=6*7', 'echo NYSIA-%NYS%')
@@ -101,8 +112,8 @@ $script:Recipe = @{
 # second token as a substring. A check that searched for it would have passed on the very
 # corruption it was written for. What is asserted instead is a whole screen line equal to the
 # token, which the concatenation cannot produce.
-$script:Reattach = 'NYSIA-REATTACH-84'
-$script:ReattachRecipe = @{
+New-Variable -Name Reattach -Scope Script -Option ReadOnly -Value 'NYSIA-REATTACH-84'
+New-Variable -Name ReattachRecipe -Scope Script -Option ReadOnly -Value @{
     pwsh     = @('Write-Output ("NYSIA" + "-REATTACH-" + (2*42))')
     cmd      = @('set /a RE=2*42', 'echo NYSIA-REATTACH-%RE%')
     git_bash = @('echo "NYSIA-REATTACH-$((2*42))"')
@@ -112,8 +123,8 @@ $script:ReattachRecipe = @{
 # above can fail. A second recipe rather than a re-run of the first: after the real check `RE`
 # holds 84, so a control that reused it would print the token even with its first line broken
 # and would report a working check as working for the wrong reason.
-$script:Control = 'NYSIA-CONTROL-21'
-$script:ControlRecipe = @{
+New-Variable -Name Control -Scope Script -Option ReadOnly -Value 'NYSIA-CONTROL-21'
+New-Variable -Name ControlRecipe -Scope Script -Option ReadOnly -Value @{
     pwsh     = @('Write-Output ("NYSIA" + "-CONTROL-" + (3*7))')
     cmd      = @('set /a CO=3*7', 'echo NYSIA-CONTROL-%CO%')
     git_bash = @('echo "NYSIA-CONTROL-$((3*7))"')
@@ -122,9 +133,9 @@ $script:ControlRecipe = @{
 # What the control leaves sitting in the line editor: two characters nobody submitted. The
 # defect leaves a whole recalled command line there, but the property under test is "something
 # was waiting", and two characters are the smallest version of it this can type.
-$script:Prepended = 'X_'
+New-Variable -Name Prepended -Scope Script -Option ReadOnly -Value 'X_'
 
-$script:StatePath = Join-Path $RuntimeDir 'walking-skeleton.state.json'
+New-Variable -Name StatePath -Scope Script -Option ReadOnly -Value (Join-Path $RuntimeDir 'walking-skeleton.state.json')
 
 function Save-State {
     param([Parameter(Mandatory)] [hashtable] $State)
@@ -384,7 +395,9 @@ switch ($Step) {
         $state = Read-State -Expected 'closed'
 
         $handle = $state['handle']
-        $shell = $state['shell']
+        # Not `$shell`: that is the `-Shell` parameter, which a later step would then read back
+        # as whatever this assigned. The same collision as the one above, caught looking for it.
+        $shellKey = $state['shell']
 
         # The screen as it stands with no window attached to it. Everything between here and
         # the comparison below is the app attaching, and the app attaching must not type
@@ -452,7 +465,7 @@ switch ($Step) {
         # the control after it proves the claim is one that can fail.
         Write-Host ''
         Write-Host "--- typing $($script:Reattach) at the re-attached session ---" -ForegroundColor DarkGray
-        Send-Recipe -Handle $handle -Lines $script:ReattachRecipe[$shell]
+        Send-Recipe -Handle $handle -Lines $script:ReattachRecipe[$shellKey]
         $typed = Read-Screen -Handle $handle
         Write-Check "the shell ran exactly what was sent, and computed $($script:Reattach)" `
             (Test-HasLine -Text $typed -Line $script:Reattach) `
@@ -464,10 +477,15 @@ switch ($Step) {
         # Without this the check above is a sentence about a property nothing has demonstrated
         # it can observe, which is exactly the complaint #44 makes about the step it replaces.
         Send-Line -Handle $handle -Text $script:Prepended -NoEnter
-        Send-Recipe -Handle $handle -Lines $script:ControlRecipe[$shell]
-        $control = Read-Screen -Handle $handle
+        Send-Recipe -Handle $handle -Lines $script:ControlRecipe[$shellKey]
+        # **Not `$control`.** That name *is* `$script:Control` — see the constants at the top of
+        # the file — so the screen landed in the token and the line below compared the screen
+        # against itself, which no single row equals, so the control passed whatever the shell
+        # had printed. The constants are read-only now, so the old spelling is a terminating
+        # error rather than a silent one; this name is the one that was meant.
+        $controlScreen = Read-Screen -Handle $handle
         Write-Check "that check fails when '$($script:Prepended)' is waiting at the prompt" `
-            (-not (Test-HasLine -Text $control -Line $script:Control)) `
+            (-not (Test-HasLine -Text $controlScreen -Line $script:Control)) `
             "$($script:Control) appeared even with something prepended, so the check above proves nothing"
         Clear-Prompt -Handle $handle
         Write-Host '--- after the assertion and its control ---' -ForegroundColor DarkGray
