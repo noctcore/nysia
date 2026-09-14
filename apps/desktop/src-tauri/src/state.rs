@@ -151,9 +151,10 @@ type Generation = u64;
 
 /// Where a client looks for the runtime to start when nothing is listening.
 ///
-/// A three-way choice rather than an `Option<PathBuf>` because "start the one that shipped
-/// with me", "start this exact file" and "start nothing" are three different intentions, and
-/// the last two exist only for tests. §6's rule about security defaults applies to the shape:
+/// An enum rather than an `Option<PathBuf>` because "start the one that shipped with me",
+/// "start this exact file", "look beside somewhere else" and "start nothing" are four
+/// different intentions, and only the first is production's. §6's rule about security
+/// defaults applies to the shape:
 /// the window's own path resolves the sidecar and there is no argument on it that could name
 /// something else.
 #[derive(Debug, Clone)]

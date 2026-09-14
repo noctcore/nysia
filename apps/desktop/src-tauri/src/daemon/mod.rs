@@ -69,10 +69,14 @@ pub enum DaemonError {
     ///
     /// The window ships the `nysia` runtime beside itself and starts it on a first launch
     /// (§12 q5), so this is what is left when that cannot happen: the sidecar is missing from
-    /// the bundle, the file will not execute, or it ran and never answered. **Never
-    /// retryable**, and that is the point of having a variant of its own — none of those
-    /// change by waiting, and a window that kept reconnecting against a runtime nobody can
-    /// start would show *Reconnecting* for ever without once saying why.
+    /// the bundle, or the file will not execute. **Never retryable**, and that is the point of
+    /// having a variant of its own — neither changes by waiting, and a window that kept
+    /// reconnecting against a runtime nobody can start would show *Reconnecting* for ever
+    /// without once saying why.
+    ///
+    /// A runtime that *ran* and has not answered is [`Self::Starting`], not this. It is the
+    /// one case here that waiting does fix, and the two must not be confused: this variant
+    /// tells the user the window has stopped.
     #[error("{message}")]
     Spawn {
         /// What went wrong, as a sentence.
