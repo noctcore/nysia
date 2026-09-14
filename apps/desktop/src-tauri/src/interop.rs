@@ -456,19 +456,20 @@ fn a_flood_keeps_flowing_past_the_per_stream_ceiling() {
     );
 }
 
-/// **Blocked on the daemon half, and ignored until it lands — not passing, not deleted.**
+/// The flagship path: a webview reload, against the real daemon, end to end.
 ///
-/// Measured against the daemon on `main` at the time this was written: six runs in ten fail,
-/// and both causes are on the daemon's side of the seam. It reissues `StreamId(2)` rather
-/// than numbering per stream connection, and its hub and sinks are not keyed by connection —
-/// so the superseded connection's unbind closes sinks the new one owns and nothing reaches
-/// the pane. Neither is reachable from `apps/**`.
+/// It was `#[ignore]`d for two rounds while the daemon half caught up, and it is worth
+/// recording what it took, because neither half alone was enough. The daemon now binds a
+/// stream connection **before** it answers that connection's hello, so an attach issued the
+/// instant a reload's connect returns cannot be served on the connection it supersedes. And
+/// this client claims the stream generation before it opens the socket, so the reader the
+/// reload abandons cannot reach end-of-file still holding the live generation and take the
+/// healthy control connection with it.
 ///
-/// It is `#[ignore]`d rather than removed because it is the finished proof for the fix that
-/// is coming: remove the attribute once the daemon PR is in, and it either passes or says
-/// exactly what is still wrong. Run it with `cargo test -- --ignored a_reload`.
+/// Measured with the second half reverted and a 200 ms gap in its place — the shape a
+/// control round trip from the dying webview actually produces — this failed five runs in
+/// five, with the pane silent while the window said ready.
 #[test]
-#[ignore = "needs the daemon-side hub keying and per-connection stream ids; see the doc above"]
 fn a_reload_reattaches_over_a_second_stream_connection() {
     // What a webview reload is, against the real daemon: the control connection stays, a
     // second stream connection is opened under the same client id, every id learned on the
