@@ -24,7 +24,9 @@ use crate::channel::{Dispatcher, FrameSink};
 use crate::daemon::control::Control;
 use crate::daemon::stream::Stream;
 use crate::daemon::{DaemonError, endpoint};
-use nysia_core::rpc::{DiscoveryError, Endpoint, EnsureError, Probed, SpawnPolicy, ensure_daemon};
+use nysia_core::rpc::{
+    DiscoveryError, Endpoint, EnsureError, Ensured, Probed, SpawnPolicy, ensure_daemon,
+};
 use nysia_proto::credit::CreditWindow;
 use nysia_proto::envelope::{RequestPayload, ResponsePayload};
 use nysia_proto::handshake::{ClientRole, DaemonIdentity};
@@ -249,6 +251,18 @@ pub struct Client {
     /// seam runs and writes it after — neither under a lock this module forbids waiting
     /// under.
     pending_runtime: Arc<AtomicBool>,
+    /// How long to give a runtime this client starts, when the default will not do.
+    ///
+    /// `#[cfg(test)]`, and therefore `None` in every build a user runs: the wait is twenty
+    /// seconds of real clock, and a release build has no way to name another number. What
+    /// needs one is the proof that a **real** readiness timeout is what sets
+    /// [`Self::pending_runtime`] — twenty seconds per run of both CI legs to reach a branch
+    /// whose production line could be deleted with every test still green.
+    ///
+    /// See [`nysia_core::rpc::discovery::ensure_daemon_within`] for why the default is not a
+    /// number to trim where a person is waiting on it.
+    #[cfg(test)]
+    ready_timeout: Option<std::time::Duration>,
 }
 
 impl Client {
@@ -289,6 +303,27 @@ impl Client {
         Self::configured(Some(endpoint), RuntimeBinary::BesideWindow(window))
     }
 
+    /// A client that dials `endpoint`, may start `program`, and gives it only `ready` to
+    /// answer.
+    ///
+    /// The seam #61 needed. A readiness timeout is the one production transition that no
+    /// test could drive, because reaching it meant waiting out twenty seconds of real clock
+    /// — so the flag it sets was only ever set by hand, and the line that sets it for real
+    /// could be deleted with every test still passing. Named apart from
+    /// [`Self::at_with_runtime`] for the reason §6 gives about overriding a default: a call
+    /// site that shortened this wait is obvious in a diff and greppable afterwards.
+    #[cfg(test)]
+    pub fn at_with_slow_runtime(
+        endpoint: Endpoint,
+        program: PathBuf,
+        ready: std::time::Duration,
+    ) -> Self {
+        Self {
+            ready_timeout: Some(ready),
+            ..Self::configured(Some(endpoint), RuntimeBinary::Pinned(program))
+        }
+    }
+
     fn configured(endpoint: Option<Endpoint>, binary: RuntimeBinary) -> Self {
         Self {
             inner: Arc::new(Mutex::new(None)),
@@ -298,6 +333,8 @@ impl Client {
             endpoint,
             binary,
             pending_runtime: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            ready_timeout: None,
         }
     }
 
@@ -353,6 +390,26 @@ impl Client {
         self.pending_runtime.store(false, Ordering::Release);
     }
 
+    /// Run the discovery seam, with whatever readiness bound this client was built with.
+    ///
+    /// One call in every build a user runs. The arm that shortens the wait is behind
+    /// `#[cfg(test)]` along with the field it reads, so production cannot reach it and a
+    /// release build does not compile it.
+    fn reach<T>(
+        &self,
+        endpoint: &Endpoint,
+        policy: impl FnOnce() -> Result<SpawnPolicy, DaemonError>,
+        probe: impl FnMut() -> Result<Probed<T>, DaemonError>,
+    ) -> Result<Ensured<T>, EnsureError<DaemonError>> {
+        #[cfg(test)]
+        if let Some(ready) = self.ready_timeout {
+            return nysia_core::rpc::discovery::ensure_daemon_within(
+                endpoint, ready, policy, probe,
+            );
+        }
+        ensure_daemon(endpoint, policy, probe)
+    }
+
     /// Connect, starting a daemon if none is listening, or return the identity of the one
     /// already attached.
     ///
@@ -401,7 +458,7 @@ impl Client {
         // once the call returns this cell is the only party that saw it.
         let resolved: std::cell::OnceCell<SpawnPolicy> = std::cell::OnceCell::new();
 
-        let outcome = ensure_daemon(
+        let outcome = self.reach(
             &endpoint,
             || {
                 let policy = self.spawn_policy()?;
@@ -1471,6 +1528,66 @@ mod tests {
         client.disconnect();
         starter.disconnect();
         stop_daemon(&endpoint);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// A program that starts, succeeds, and never binds anything.
+    ///
+    /// Which is what a runtime being scanned by Defender looks like from here, and what a
+    /// runtime that died on its way up looks like too — the whole point being that the
+    /// window cannot tell them apart from the outside.
+    fn never_binds() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from("cmd.exe")
+        } else {
+            PathBuf::from("/bin/echo")
+        }
+    }
+
+    /// **#61 as a test.** A **real** readiness timeout is what leaves the window probing.
+    ///
+    /// The transition the #51 test below assumes and cannot produce. It sets the flag by
+    /// hand, so the one production line that sets it on the real path — in the `NeverReady`
+    /// arm of [`Client::connect`] — has nothing driving it: delete that line and every test
+    /// in this file still passes, while a window that hit a genuine twenty second timeout
+    /// would go on to start a second runtime on the very next tick.
+    ///
+    /// What stood in the way was the clock. [`Client::at_with_slow_runtime`] is the seam for
+    /// it, in the shape PR #59 built for the sidecar resolver: the production path is
+    /// unchanged and the override is a separately named constructor.
+    #[test]
+    fn a_readiness_timeout_on_the_real_path_is_what_leaves_the_window_probing() {
+        let endpoint = crate::interop::scratch("never-ready");
+        let client = Client::at_with_slow_runtime(
+            endpoint.clone(),
+            never_binds(),
+            std::time::Duration::from_millis(150),
+        );
+        assert!(
+            !client.awaiting_runtime()
+                && matches!(client.spawn_policy(), Ok(SpawnPolicy::IfAbsent { .. })),
+            "a fresh window has started nothing and may start the runtime it ships with"
+        );
+
+        let waiting = client
+            .connect()
+            .expect_err("the program it started never binds anything");
+        assert!(
+            matches!(waiting, DaemonError::Starting { .. }),
+            "a readiness timeout is not a verdict on the daemon, got {waiting:?}"
+        );
+
+        // The assertion the flag exists for, and the one nothing was making: it was set by
+        // the timeout itself rather than by a test reaching in.
+        assert!(
+            client.awaiting_runtime(),
+            "the window forgot it had started a runtime, so the next tick starts a second one"
+        );
+        assert!(
+            matches!(client.spawn_policy(), Ok(SpawnPolicy::Never)),
+            "a window with a runtime already on its way must probe, not start another"
+        );
+
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
     }
 
