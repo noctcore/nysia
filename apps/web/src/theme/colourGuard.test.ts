@@ -137,14 +137,24 @@ describe('the declaration family', () => {
     expect(accepted).toEqual([...INITIALIZED_DECLARATIONS].sort());
   });
 
-  it('names every node that carries an initializer the predicate does not accept', () => {
-    // The complement, which is what makes the pair a closed claim rather than half of one.
-    // These are the interfaces in TypeScript's public typings with an `initializer` or
-    // `objectAssignmentInitializer` field, minus the ones above. Each is either handled at
-    // its own site or explained in the residue; the guard's comment says which and why.
-    for (const kind of INITIALIZERS_HANDLED_BY_HAND) {
-      expect(INITIALIZED_DECLARATIONS, kind).not.toContain(kind);
-      expect(ts.SyntaxKind[kind as keyof typeof ts.SyntaxKind], kind).toBeTypeOf('number');
+  it('names nodes the predicate really does reject, not merely ones it omits', () => {
+    // **What this checks and what it does not.** The accepted six above are checked against
+    // the compiler: the enum sweep fails unless the predicate's answer is exactly that list.
+    // This list is the other half and it is hand-verified — nothing here reads the typings,
+    // so nothing here can tell you whether a twelfth interface has appeared with an
+    // initializer field belonging to neither list. That is a grep over `typescript.d.ts`
+    // when the compiler is bumped, and the guard's comment says so in those words.
+    //
+    // What is worth checking is checked: each name is a real kind, and each is genuinely
+    // *rejected* by the predicate rather than merely absent from the other list. Asserting
+    // absence alone would pass for a name that is not a node kind at all.
+    for (const name of INITIALIZERS_HANDLED_BY_HAND) {
+      const kind = ts.SyntaxKind[name as keyof typeof ts.SyntaxKind];
+      expect(kind, name).toBeTypeOf('number');
+      expect(ts.hasOnlyExpressionInitializer({ kind } as unknown as ts.Node), name).toBe(
+        false,
+      );
+      expect(INITIALIZED_DECLARATIONS, name).not.toContain(name);
     }
     expect(INITIALIZERS_HANDLED_BY_HAND).toHaveLength(5);
   });
@@ -373,6 +383,32 @@ describe('the rule that reads a syntax tree', () => {
     // A promise of a colour is a colour behind a name, which is the first residue entry.
     expect(
       findColourLiterals(`async function f() { el.style.color = await load(); }`),
+    ).toEqual([]);
+  });
+
+  it('reads a value a yield hands back, the same as an await', () => {
+    // `yield x` hands back its operand the way `await x` does, and the two share a branch
+    // because they are one idea — handling either without the other would leave exactly the
+    // which-way-did-you-write-it asymmetry this rule has been held for.
+    //
+    // That sharing is why this case exists. The branch was written for both and asserted
+    // about both in a PR body, and deleting `ts.isYieldExpression` from it left every test
+    // in this file green: `yield` appeared here only inside a comment. A behaviour with no
+    // case that goes red without it is the defect this file keeps being held for, and it
+    // does not stop being that defect when the behaviour is correct.
+    for (const yielded of [
+      `function* g() { el.style.color = yield 'red'; }`,
+      `function* g() { el.style.color = yield (on ? 'red' : 'gray'); }`,
+      `function* g() { const s = { color: yield 'red' }; }`,
+      `function* g() { const s = { fill: (yield 'red') ?? 'gray' }; }`,
+    ]) {
+      expect(findColourLiterals(yielded).map((c) => c.kind), yielded).toContain(
+        'named-colour',
+      );
+    }
+    // And the same limit as await: what a generator is handed back is not in the source.
+    expect(
+      findColourLiterals(`function* g() { el.style.color = yield load(); }`),
     ).toEqual([]);
   });
 
@@ -1141,6 +1177,8 @@ describe('the corpus', () => {
     { value: `(() => 'red')()`, entry: 'produced by running something' },
     { value: `(() => { const c = 'red'; return c; })()`, entry: 'produced by running something' },
     { value: 'css`red`', entry: 'produced by running something' },
+    { value: `'red'.trim()`, entry: 'produced by running something' },
+    { value: `[...['red']]`, entry: 'produced by running something' },
     { value: `['red', 'gray'][+on]`, entry: 'matched by span coincidence' },
     { value: `palette('red').hex()`, entry: 'matched by span coincidence' },
     { value: `f('red')(x)`, entry: 'matched by span coincidence' },
@@ -1326,6 +1364,14 @@ describe('the documented residue', () => {
     expect(
       findColourLiterals(`const s = { color: (() => { const c = 'red'; return c; })() };`),
     ).toEqual([]);
+    // Two more shapes named against this entry rather than left unnamed. Both were caught by
+    // the rule this replaced and are missed here, and both are the walk stopping rather than
+    // the walk being wrong: a method called on a literal produces its value by running, and
+    // a spread is closer to how a value is made than a function body is but is still a shape
+    // the walk does not follow. If that difference ever costs something real they want an
+    // entry of their own; until then the guard's comment says exactly that.
+    expect(findColourLiterals(`const s = { color: 'red'.trim() };`)).toEqual([]);
+    expect(findColourLiterals(`const s = { color: [...['red']] };`)).toEqual([]);
   });
 
   it('misses what the old rule matched by span coincidence', () => {
@@ -1434,6 +1480,27 @@ describe('the false positives that are left', () => {
     expect(
       findColourLiterals(`<div style={{ color: 'var(--brand-red-500)' }} />`).map((c) => c.kind),
     ).toEqual(['named-colour']);
+  });
+
+  it('does report one paint twice when a default renames a property to its own name', () => {
+    // The tree holds a property called `color` whose value is written `color = 'red'`, and
+    // that inner node is an assignment to a painting name in its own right, so both sites
+    // report. Only the spelling where the two names match does it.
+    expect(
+      findColourLiterals(`({ color: color = 'red' } = props);`).map((c) => c.kind),
+    ).toEqual(['named-colour', 'named-colour']);
+    expect(
+      findColourLiterals(`({ color: c = 'red' } = props);`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+    // Left alone deliberately. Telling it apart from the shape below — which really is two
+    // paints and really should report twice — means walking up the parents to ask whether
+    // the enclosing object literal is an assignment target, which is a rule about position
+    // of exactly the kind this module spent three rounds deleting. A paint reported twice is
+    // loud; the sweep fails either way. This case is here so that if somebody does close it,
+    // they close it on purpose.
+    expect(
+      findColourLiterals(`el.style.color = other.color = 'red';`).map((c) => c.kind),
+    ).toEqual(['named-colour', 'named-colour']);
   });
 });
 

@@ -201,15 +201,22 @@ const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
  *    positive the rule had, and a percent-encoded stylesheet is not a shape anything in
  *    this tree writes. A *hash* encoded that way is the one miss with no backstop at all,
  *    which is the sentence below rather than this bullet.
- *  - a colour the value only produces by running something: a function body, a tagged
- *    template, a getter. {@link valueStrings} follows the shapes a value is *made* of and
- *    stops everywhere else, and stopping is the point — it is what keeps a condition's
- *    operand and a lookup's key out of the answer. This one is new with the walk. The
- *    pattern it replaces read every literal in a span of characters, so it caught some of
- *    these by accident and reported the operands and the keys for the same reason — but
- *    only some: a colour inside a statement body, `(() => { const c = 'red'; return c; })()`,
- *    was missed by that pattern too, because a semicolon bounded its span. Half of the entry
- *    the rewrite deleted moved here rather than being solved.
+ *  - a colour the value reaches only by running something, or through a shape the walk does
+ *    not follow. {@link valueStrings} follows the shapes a value is *made* of and stops
+ *    everywhere else, and stopping is the point — it is what keeps a condition's operand and
+ *    a lookup's key out of the answer. Five shapes have been named against this entry so
+ *    far: a function body, a tagged template, a getter, a method called on a literal
+ *    (`'red'.trim()`), and a spread (`[...['red']]`). The last two are here because the walk
+ *    stops at them rather than because much is run — a spread is closer to how a value is
+ *    made than a function body is — and if that distinction ever costs something real they
+ *    deserve an entry of their own rather than a footnote in this one.
+ *
+ *    This entry is new with the walk. The pattern it replaces read every literal in a span
+ *    of characters, so it caught some of these by accident and reported the operands and the
+ *    keys for the same reason — but only some: a colour inside a statement body,
+ *    `(() => { const c = 'red'; return c; })()`, was missed by that pattern too, because a
+ *    semicolon bounded its span. Half of the entry the rewrite deleted moved here rather
+ *    than being solved.
  *  - an assignment whose operator is not a plain `=`. `el.style.color ??= 'red'` and its
  *    `||=` sibling paint, and neither is a site: only {@link ts.SyntaxKind.EqualsToken} is.
  *    The pattern this replaced missed them for its own reason — it wanted one equals sign
@@ -267,6 +274,18 @@ const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
  *    the four spellings the old entry named, the tree removed two: a comparison operand is
  *    in a condition and an index is a lookup, and neither is walked. A conditional's other
  *    branch is still read, deliberately: either branch can be the value.
+ *  - one paint reported twice, where a destructuring default renames a painting property to
+ *    the same name: `({ color: color = 'red' } = props)`. The tree holds a property called
+ *    `color` whose value is written `color = 'red'`, and that inner node is an assignment to
+ *    a painting name in its own right, so both sites report. Only the spelling where the two
+ *    names match does it — `({ color: c = 'red' } = props)` reports once.
+ *
+ *    Left alone on purpose. Telling this apart from `el.style.color = other.color = 'red'`,
+ *    which really is two paints and really should report twice, means walking up the parents
+ *    to ask whether the enclosing object literal is an assignment *target* — a rule about
+ *    position, with its own edge cases, of exactly the kind this module spent three rounds
+ *    deleting. Reporting a real paint twice is loud; the sweep fails either way and the line
+ *    is named in both entries. A miss would be the expensive answer, and this is not one.
  */
 
 /**
@@ -363,10 +382,22 @@ export const INITIALIZED_DECLARATIONS: readonly string[] = [
 /**
  * The nodes that carry an initializer and that the predicate above deliberately excludes.
  *
- * Read this as the closed complement of {@link INITIALIZED_DECLARATIONS}: between the two,
- * every interface in TypeScript's public typings with a field called `initializer` or
- * `objectAssignmentInitializer` is accounted for. That is the claim, and it is the one the
- * test can re-run rather than take on trust.
+ * Between this list and {@link INITIALIZED_DECLARATIONS}, every interface in TypeScript's
+ * public typings with a field called `initializer` or `objectAssignmentInitializer` is
+ * accounted for — eleven of them, six accepted by the predicate and the five below.
+ *
+ * **Read what holds that claim up, because the two halves are not held up the same way.**
+ * The accepted six are checked against the compiler: the test walks every member of
+ * `ts.SyntaxKind` and fails unless the predicate's answer is exactly that list. Nothing
+ * reads the typings at run time, so *this* list is hand-verified, and the test can only
+ * check it for consistency — that each name is a real kind, and that each is genuinely
+ * rejected by the predicate rather than merely absent from the other list.
+ *
+ * What no test here can tell you is whether a twelfth interface has appeared with an
+ * initializer field that belongs in neither list. That is a `grep` over the typings when the
+ * compiler is bumped, and the reason this comment names the number: if the count of
+ * `initializer` and `objectAssignmentInitializer` fields in `typescript.d.ts` is no longer
+ * eleven, this paragraph is what has gone stale.
  *
  *  - `ShorthandPropertyAssignment` spells its initializer `objectAssignmentInitializer`, and
  *    the predicate keys on the field name, so it falls outside. It is the only member of the
@@ -509,7 +540,7 @@ function declaredName(name: ts.Node): string | undefined {
  * Whether a declaration binds a painting name to its initializer.
  *
  * This is the whole declaration family at once, and asking that question in one place is the
- * point of {@link DECLARATION_SITE_KINDS}. The name comes from `ts.getNameOfDeclaration`
+ * point of {@link INITIALIZED_DECLARATIONS}. The name comes from `ts.getNameOfDeclaration`
  * rather than from a per-kind field, which is what makes a private name and a computed name
  * ordinary rather than two more spellings to discover.
  *
@@ -738,7 +769,7 @@ function findPaintedValues(file: string, source: string): string[] {
       if (declarationPaints(node)) report(node, node.initializer);
     } else if (ts.isShorthandPropertyAssignment(node)) {
       // The one member of the declaration family that sits outside the predicate above,
-      // because its initializer is a different field. See {@link DECLARATION_SITE_KINDS}.
+      // because its initializer is a different field. See {@link INITIALIZERS_HANDLED_BY_HAND}.
       if (paints(node.name.text)) report(node, node.objectAssignmentInitializer);
     } else if (ts.isJsxAttribute(node)) {
       if (paints(attributeName(node))) report(node, node.initializer);
