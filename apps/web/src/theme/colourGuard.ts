@@ -174,10 +174,18 @@ const PALETTE_CLASS = new RegExp(
  *    counted. A data URI can carry a whole stylesheet, so this is the bare-CSS entry above
  *    arriving through a different door. What it paid for was closing the loudest false
  *    positive the rule had, and a percent-encoded stylesheet is not a shape anything in
- *    this tree writes.
+ *    this tree writes. A *hash* encoded that way is the one miss with no backstop at all,
+ *    which is the sentence below rather than this bullet.
  *
- * The hex and colour-function rules, which do scan whole files, are the backstop for every
- * one of them, listed or not: only a *named* colour can hide in any of these.
+ * The hex and colour-function rules, which do scan whole files, are the backstop for nearly
+ * every one of them, listed or not — whatever shape hides a colour from rule 4, a hash or a
+ * function written in the source text is still read. What they do not read is a colour the
+ * source does not spell that way, which is to say one behind an encoding. A percent-encoded
+ * hash inside a data URI is the live example and the one miss with nothing underneath it:
+ * the encoding hides it from the hex rule, and the bullet directly above puts the same value
+ * out of the named rule's reach. This sentence said only a *named* colour could hide, and
+ * the bullet it sat under had already made that false — which is the failure this file keeps
+ * having, a rule widening and the paragraph explaining it staying where it was.
  *
  * In the other direction, the rule has false positives, and they are tracked separately
  * because they are loud: one fails the sweep and gets looked at, where a miss ships a pixel
@@ -187,6 +195,14 @@ const PALETTE_CLASS = new RegExp(
  *  - a value that merely contains a colour word. The url form is closed, since a path is
  *    the one place a colour word turns up in a value often enough to be worth knowing about.
  *    A token whose own name spells one still fires, and that is the shape most likely to.
+ *  - a table keyed by colour name whose values are prose — a label map, most plausibly —
+ *    which fires once per entry. The ANSI words are introducers because xterm's theme keys
+ *    are spelled that way, and a key called `red` set to a sentence containing the word is
+ *    indistinguishable from one set to a colour.
+ *  - a ternary between two quoted colour names with no property in front of it at all. The
+ *    first branch reads as a quoted key introducing the second. Inside a JSX container that
+ *    reading lands on the right answer for the wrong reason; on its own it is a false
+ *    positive, and it is the residue of the same accident the brace fix stopped relying on.
  *  - a statement that ends without a semicolon followed by an unrelated string on the next
  *    line, since the span crosses line ends and only punctuation stops it. This tree is
  *    semicolon-terminated throughout and nothing enforces that, so it is a live trap rather
@@ -515,6 +531,11 @@ export const TOKEN_DEFINITION_STYLESHEETS: readonly string[] = ['src/index.css']
  *
  * Adding an entry is the review: it says somebody looked at what that stylesheet paints and
  * at whether the theme can reach it.
+ *
+ * Which means this list fails in *other people's* diffs, by design, and the entry it holds
+ * today names a file another module owns. Whoever adds the next side-effect import of a
+ * dependency stylesheet meets this as a red test in their own PR, so the assertion carries
+ * a message saying what it wants rather than only what it found.
  */
 export const DEPENDENCY_STYLESHEETS: readonly string[] = ['@xterm/xterm/css/xterm.css'];
 

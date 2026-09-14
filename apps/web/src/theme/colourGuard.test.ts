@@ -36,7 +36,13 @@ const scanned: readonly ScannedFile[] = Object.entries(modules)
   .map(([path, source]) => ({ path: normalize(path), source: String(source) }))
   .filter(({ path }) => !path.endsWith('.test.ts') && !path.startsWith('src/generated/'));
 
-/** The five shapes, written only here — the guard module deliberately contains none. */
+/**
+ * The shapes, written only here — the guard module deliberately contains none.
+ *
+ * More entries than kinds on purpose: the assertion below counts the four kinds a scan can
+ * report, and the extra snippets are the specific shapes each round of this review found
+ * missing, kept so the real sweep exercises them rather than only the fixture tests.
+ */
 const OFFENDERS = [
   { kind: 'hex', snippet: 'style={{ color: "#ff0000" }}' },
   { kind: 'function', snippet: 'style={{ color: "rgb(255 0 0)" }}' },
@@ -587,6 +593,38 @@ describe('the documented residue', () => {
     ).toEqual([]);
   });
 
+  it('misses a hex the source does not spell as one', () => {
+    // The one miss with no backstop under it. The hex rule reads whole files and would
+    // catch this anywhere else; percent-encoding hides the hash from it, and the url bullet
+    // puts the same value out of the named rule's reach, so both halves of the backstop
+    // miss the same literal for different reasons.
+    expect(
+      findColourLiterals(
+        `style={{ background: 'url(data:image/svg+xml,%3Csvg fill=%23ff0000/%3E)' }}`,
+      ),
+    ).toEqual([]);
+  });
+
+  it('does fire on a table keyed by colour name whose values are prose', () => {
+    // The price of the ANSI words being introducers: a key called `red` set to a sentence
+    // that contains the word is indistinguishable from one set to a colour. Once per entry.
+    expect(
+      findColourLiterals(`const LABELS = { red: 'Red alert', green: 'Green light' };`).map(
+        (c) => c.kind,
+      ),
+    ).toEqual(['named-colour', 'named-colour']);
+  });
+
+  it('does fire on a bare ternary between two colour names', () => {
+    // No property in front of it at all: the quoted first branch reads as a key introducing
+    // the second. Inside a JSX container that reading lands on the right answer for the
+    // wrong reason, and the brace fix is what stopped the rule depending on it; on its own
+    // it is what is left of the accident.
+    expect(findColourLiterals(`const c = on ? 'red' : 'gray';`).map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
+  });
+
   it('does fire on a comment that writes a property, a colon and a quoted colour', () => {
     // The rule reads text, not syntax, so a line that only talks about painting is
     // indistinguishable from one that paints. Telling them apart means knowing where the
@@ -639,7 +677,7 @@ describe('hardcoded colour guard', () => {
     expect(scanForColourLiterals(scanned)).toEqual([]);
   });
 
-  it('trips on each of the four shapes, injected into a real file', () => {
+  it('trips on each of the four kinds, injected into a real file', () => {
     // Trap 12, done properly: this runs the *real* sweep over the *real* tree with one
     // line added, rather than handing a string to the regex. A guard that is quietly
     // unwired — scanning an empty file list, or filtering away everything — passes a
@@ -687,7 +725,17 @@ describe('hardcoded colour guard', () => {
     // stylesheet imported by package name lands in it carrying a hex background, a hex
     // foreground, a colour function and a data URI painting a path, and no rule in this
     // module has ever seen any of them.
-    expect(findDependencyStylesheets(scanned)).toEqual([...DEPENDENCY_STYLESHEETS].sort());
+    //
+    // This is the one assertion here that fails on somebody else's diff: add a side-effect
+    // import of a dependency stylesheet anywhere under `apps/web/src` and it goes red in
+    // your PR, not in this one. That is the point of it, and the message says what to do.
+    expect(
+      findDependencyStylesheets(scanned),
+      'a module now imports a dependency stylesheet that DEPENDENCY_STYLESHEETS in ' +
+        'src/theme/colourGuard.ts does not name. That file paints pixels no rule in this ' +
+        'guard can read, so it is reviewed by hand: look at what it paints and whether the ' +
+        'theme can reach it, then add its specifier to that list in the same diff.',
+    ).toEqual([...DEPENDENCY_STYLESHEETS].sort());
   });
 
   it('does not see a stylesheet that arrives any other way', () => {
