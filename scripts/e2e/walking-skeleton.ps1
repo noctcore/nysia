@@ -170,7 +170,7 @@ switch ($Step) {
     'start' {
         Write-Host '== step 1/6: start a daemon and launch the app ==' -ForegroundColor Cyan
         $daemonPid = Start-NysiaDaemon -Nysia $Nysia -RuntimeDir $RuntimeDir
-        $lease = Get-Content (Join-Path $RuntimeDir 'nysiad-v1.pid.json') -Raw | ConvertFrom-Json
+        $lease = Get-Content (Join-Path $RuntimeDir $script:LeaseFile) -Raw | ConvertFrom-Json
         $appPid = Start-App -Binary $App
 
         Write-Check 'the daemon is listening' $true "pid $daemonPid, launch nonce $($lease.launchNonce)"
@@ -276,7 +276,7 @@ switch ($Step) {
         $appPid = Start-App -Binary $state['appBinary']
 
         $daemonPid = [int] $state['daemonPid']
-        $lease = Get-Content (Join-Path $RuntimeDir 'nysiad-v1.pid.json') -Raw | ConvertFrom-Json
+        $lease = Get-Content (Join-Path $RuntimeDir $script:LeaseFile) -Raw | ConvertFrom-Json
         Write-Check 'the daemon never restarted' `
             ($lease.pid -eq $daemonPid -and $lease.launchNonce -eq $state['launchNonce']) `
             "pid $($lease.pid), launch nonce $($lease.launchNonce)"
@@ -341,7 +341,7 @@ switch ($Step) {
 
         $appPid = Start-App -Binary $state['appBinary']
 
-        $lease = Get-Content (Join-Path $RuntimeDir 'nysiad-v1.pid.json') -Raw | ConvertFrom-Json
+        $lease = Get-Content (Join-Path $RuntimeDir $script:LeaseFile) -Raw | ConvertFrom-Json
         Write-Check 'the daemon never restarted across the upgrade' `
             ($lease.pid -eq [int] $state['daemonPid'] -and $lease.launchNonce -eq $state['launchNonce']) `
             "pid $($lease.pid), launch nonce $($lease.launchNonce)"

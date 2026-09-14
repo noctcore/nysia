@@ -1,7 +1,7 @@
 //! The socket server and its wire framing.
 //!
-//! A versioned named pipe on Windows (`\\.\pipe\nysiad-v1-<user>`) and a Unix socket on
-//! macOS (`nysiad-v1.sock`). Every consumer — the GUI, `nysia <verb>`, `nysia hook` — is a
+//! A versioned named pipe on Windows (`\\.\pipe\nysiad-v<protocol>-<user>`) and a Unix socket on
+//! macOS (`nysiad-v<protocol>.sock`). Every consumer — the GUI, `nysia <verb>`, `nysia hook` — is a
 //! client of the same socket and the same verb surface. The window has no privileged path
 //! (D-1).
 //!

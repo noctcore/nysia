@@ -1,7 +1,7 @@
 //! Where the daemon listens, and where the files that describe it live.
 //!
-//! §3.1 puts the protocol version in the *name*: `nysiad-v1.sock` on Unix,
-//! `\\.\pipe\nysiad-v1-<user>` on Windows. `nysia-proto` composes those names and does no
+//! §3.1 puts the protocol version in the *name*: `nysiad-v<protocol>.sock` on Unix,
+//! `\\.\pipe\nysiad-v<protocol>-<user>` on Windows. `nysia-proto` composes those names and does no
 //! IO; this module is the other half — it decides which directory on Unix and which account
 //! on Windows, and it is the only place in the daemon that touches either.
 //!
@@ -9,9 +9,9 @@
 //!
 //! | File | What it is |
 //! |---|---|
-//! | `nysiad-v1.sock` | the Unix socket. On Windows the endpoint is a pipe and has no file. |
-//! | `nysiad-v1.pid.json` | the adoption lease ([`crate::rpc::PidRecordFile`]). |
-//! | `nysiad-v1.lock` | held while a daemon is binding, so two spawners cannot both win. |
+//! | `nysiad-v<protocol>.sock` | the Unix socket. On Windows the endpoint is a pipe and has no file. |
+//! | `nysiad-v<protocol>.pid.json` | the adoption lease ([`crate::rpc::PidRecordFile`]). |
+//! | `nysiad-v<protocol>.lock` | held while a daemon is binding, so two spawners cannot both win. |
 //!
 //! # Overrides
 //!
@@ -96,7 +96,7 @@ pub enum EndpointResolveError {
 ///
 /// One variant per platform rather than a `PathBuf` that means different things: a Windows
 /// pipe name is not a filesystem path, and treating it as one is how a `CreateFile` ends up
-/// making a file literally called `\\.\pipe\nysiad-v1-kacpe`.
+/// making a file literally called `\\.\pipe\nysiad-v<protocol>-kacpe`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Listening {
     /// A Unix domain socket at this path.
@@ -190,13 +190,13 @@ impl Endpoint {
         &self.runtime_dir
     }
 
-    /// The adoption lease's path: `<runtime dir>/nysiad-v1.pid.json`.
+    /// The adoption lease's path: `<runtime dir>/nysiad-v<protocol>.pid.json`.
     #[must_use]
     pub fn pid_record_path(&self) -> PathBuf {
         self.runtime_dir.join(format!("{}.pid.json", self.stem))
     }
 
-    /// The spawn lock's path: `<runtime dir>/nysiad-v1.lock`.
+    /// The spawn lock's path: `<runtime dir>/nysiad-v<protocol>.lock`.
     ///
     /// Held while a daemon binds, so two clients racing to spawn one cannot both believe
     /// they won (§12 Q5).
@@ -400,7 +400,7 @@ fn restrict_to_owner(dir: &Path) {
 /// One helper rather than one per module, because the constraint is easy to violate by
 /// accident and expensive to discover: macOS caps a socket path at 103 bytes and its `TMPDIR`
 /// is already ~49 of them, so `temp_dir().join("nysia-<module>-<tag>-<pid>-<thread>")` plus
-/// `/nysiad-v1.sock` overruns the cap and every test in the module fails to resolve an
+/// `/nysiad-v<protocol>.sock` overruns the cap and every test in the module fails to resolve an
 /// endpoint at all.
 ///
 /// The name is therefore a short digest rather than anything readable. On Unix it hangs off
@@ -464,9 +464,18 @@ mod tests {
         let dir = temp_dir("layout");
         let endpoint = Endpoint::resolve(PROTOCOL_VERSION, source(&dir)).expect("resolves");
         assert_eq!(endpoint.runtime_dir(), dir);
-        assert_eq!(endpoint.pid_record_path(), dir.join("nysiad-v1.pid.json"));
-        assert_eq!(endpoint.lock_path(), dir.join("nysiad-v1.lock"));
-        assert_eq!(endpoint.log_path(), dir.join("nysiad-v1.log"));
+        // Derived from the version rather than written out, because §3.1's whole mechanism is
+        // that these names *move* when the protocol does — a literal here asserts that this
+        // build is v1, which is a different and much less useful claim.
+        let stem = nysia_proto::endpoint_stem(PROTOCOL_VERSION);
+        assert_eq!(
+            endpoint.pid_record_path(),
+            dir.join(format!("{stem}.pid.json"))
+        );
+        assert_eq!(endpoint.lock_path(), dir.join(format!("{stem}.lock")));
+        assert_eq!(endpoint.log_path(), dir.join(format!("{stem}.log")));
+        // And they are versioned at all, which is the property the names carry.
+        assert!(stem.starts_with("nysiad-v"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
