@@ -684,11 +684,15 @@ impl Client {
     ///
     /// It was a stall and never a deadlock, which is what decided this shape. The daemon
     /// cannot make a control reply wait on stream progress: `StreamSink::send` returns
-    /// `Blocked` rather than blocking, `OwnedSession::attach` abandons its replay on the first
-    /// refusal, the output pump sleeps with the terminal-state lock dropped, and an attach's
-    /// answer is written before its replay is enqueued. Had any of those waited, releasing the
-    /// lock would not have been enough and the ack would have needed a path that bypasses it
-    /// altogether.
+    /// `SendOutcome::WouldBlock` rather than blocking, `OwnedSession::attach` abandons its
+    /// replay on the first refusal, the output pump sleeps with the terminal-state lock
+    /// dropped, and an attach's answer is written before its replay is enqueued. Had any of
+    /// those waited, releasing the lock would not have been enough and the ack would have
+    /// needed a path that bypasses it altogether.
+    ///
+    /// **[`Self::attach_channel`] reasons about how long this holds the lock**, so the two
+    /// move together. Putting the wait back under the guard would make the race described
+    /// there as long as the slowest verb again, and its comment wrong a second time.
     ///
     /// # Errors
     ///
@@ -750,9 +754,13 @@ impl Client {
         // connection with it, fails this attach with `Disconnected`, and has the window
         // announce it is not connected to a daemon and reconnect.
         //
-        // The natural window is small but it is not microseconds: this takes the inner
-        // lock, and a control round trip still in flight from the webview being replaced —
-        // a keystroke, a resize — holds that lock for the length of the round trip.
+        // The window is small: this takes the inner lock only long enough to read which
+        // connection is live. It was not always. A control round trip still in flight from
+        // the webview being replaced — a keystroke, a resize — used to hold that lock for
+        // its whole duration, which stretched this window to the length of the slowest verb
+        // in the window. [`Self::request`] drops its guard before it waits now, and
+        // `a_verb_in_flight_does_not_hold_the_lock_the_render_ack_needs` is what holds that
+        // true — delete that test and this paragraph quietly goes back to being wrong.
         //
         // Claiming first inverts the failure. A handshake that then fails leaves a
         // generation no reader owns: nothing can tear this connection down through it, the
