@@ -617,7 +617,8 @@ Each of these cost someone a day already.
    coordinator-owned shared config, not a small diff.
 
 7. **Re-attaching replays queries as well as output, and the shell reads the answers as
-   input.** Deterministic, and it is in D-1's flagship path. On every `stream_attach` the window
+   input.** *(Resolved — see the end of this entry.)* Deterministic, and it was in D-1's
+   flagship path. On every `stream_attach` the window
    issues two `terminal_send` calls that nobody typed — visible in a daemon debug log at first
    attach and again at every re-attach, with no keystrokes in between.
 
@@ -637,13 +638,42 @@ Each of these cost someone a day already.
    acceptance criterion still passes — *the shell survives and the scrollback replays* — but a
    person who does not know to press it loses their next command.
 
-   **Open**, and deliberately not patched in wave 3. The correct fix is a replay boundary on the
-   wire so a client can hold `onData` until the replayed bytes are written; `StreamAttached`
-   carries only `handle` and `streamId`, so that is a `nysia-proto` change (D-13 makes proto the
-   sole authority, so it cannot be worked around client-side) plus the client half. The two
-   workarounds available without it are both worse than the bug: a time-based suppression window
-   drops real keystrokes on a slow machine, and stripping query sequences from every write
-   breaks any full-screen program that legitimately asks.
+   **Resolved.** The fix is the replay boundary this entry asked for, as a frame rather than as
+   a field: `FrameKind::ReplayEnd`, empty payload, sent exactly once per attach after the last
+   replayed byte and before anything live. A byte count on `StreamAttached` was the smaller diff
+   and was rejected — this wire has already shipped a defect where the credit window was
+   specified in payload bytes and one end charged encoded ones, which every unit test on both
+   sides passed and only a real-daemon interop test caught. A count is a number two
+   implementations must keep deriving identically; a marker is a byte that either arrived or did
+   not. A new kind is breaking in one direction, because a decoder that meets one it does not
+   know drops the connection by design, so `PROTOCOL_VERSION` moved to 2 and the attachable
+   range narrowed with it: a v0.1 daemon's sessions are orphaned by a v0.2 window rather than
+   corrupted by one.
+
+   The client half is **not** where the obvious reading puts it, and this is the part worth
+   writing down. The daemon's reader sees the boundary and hands it to the webview milliseconds
+   before xterm has *parsed* the bytes it follows — xterm parses on its own timer to keep the
+   main thread responsive. So a gate in the Rust client that opened when the marker arrived
+   would already be open when the reply appeared, and would have shipped as a non-fix that
+   passed a Rust interop test. The gate lives in `XtermSurface` and opens on the write
+   *callback* for the last chunk issued before the marker, which is the only signal that side
+   gets which says parsed rather than queued. Keystrokes during that window are dropped rather
+   than queued — the pane is painting history and is not interactive yet, and one held and
+   delivered later lands at a prompt that has moved on. If the marker never arrives a five-
+   second deadline opens the gate anyway and raises a notice, because a pane that silently
+   ignored the first seconds of typing is indistinguishable from a broken keyboard.
+
+   Both workarounds this entry rejected stayed rejected, and the tests say so: a live `ESC[c`
+   after the boundary is still answered, which stripping query sequences would have broken, and
+   the deadline is a backstop rather than the mechanism, which is what separates it from the
+   time-based window.
+
+   Proved at the three layers that can each see one part, because no single layer can see them
+   all — the input that corrupted the shell was never written by any code in this repository, so
+   no Rust test can reproduce it. `crates/nysia-core/src/rpc/interop.rs` and
+   `apps/desktop/src-tauri/src/interop.rs` pin the wire contract against a real daemon on a real
+   socket; `apps/web/src/transport/surface/surface.test.ts` pins the gate against a terminal
+   stub that answers queries in the order a real one does.
 
 ---
 

@@ -7,6 +7,30 @@ addition that matters more here than the categories do: every entry says what wa
 **deliberately not** built, because a scope ladder only means something if each rung is
 honest about where it stops.
 
+## [Unreleased]
+
+### Fixed
+
+- **Re-attaching no longer injects input into the shell** (§12 q7). A replay is the bytes the
+  child once wrote, escape sequences intact, so it carries every `ESC[6n` and `ESC[c` it ever
+  emitted; a terminal emulator answers a query when it parses one and cannot tell a replayed one
+  from a live one, and its answers left as keystrokes. The daemon now marks where the replay
+  stops — one empty `replay_end` frame per attach — and the window holds its input channel shut
+  until the renderer has finished *parsing* everything before that marker. Keystrokes typed in
+  that window are dropped rather than queued: the pane is painting history and is not
+  interactive yet, and one delivered late lands at a prompt that has moved on. A live query
+  after the boundary is still answered, so full-screen programs are unaffected.
+
+### Changed — **breaking**
+
+- **The socket protocol is v2, and v1 is no longer served.** The endpoint carries the version
+  (§3.1), so a v0.2 window dials `nysiad-v2` and a v0.1 daemon goes on serving `nysiad-v1`
+  beside it: nothing is corrupted, but **sessions held by a running v0.1 daemon are not adopted
+  by a v0.2 window**. Close them, or leave the old daemon running and reach it with the old
+  CLI. The narrowing is deliberate rather than incidental — v2 adds a frame kind, and a v1
+  decoder treats a kind it does not know as fatal, so serving a v1 client would drop every
+  session on its stream connection the first time anything attached.
+
 ## [0.1.0] — 2026-09-14
 
 **The walking skeleton.** One acceptance criterion, and it holds: *close the window and the
@@ -78,8 +102,7 @@ Not missing — not built, and each has a rung on the ladder:
 
 ### Known defects
 
-Found by driving the real GUI, reported rather than papered over, and both open with their
-evidence in §12:
+Found by driving the real GUI, reported rather than papered over, with their evidence in §12:
 
 - **The window cannot start a daemon, and no build of the app ships one** (§12 q6). On a machine
   with nothing listening, the app launches into *Reconnecting* and the `+` menu fails with
@@ -87,6 +110,8 @@ evidence in §12:
 - **Re-attaching injects input into the shell** (§12 q7). The replay contains the terminal
   queries the child once wrote, xterm answers them, and ConPTY reads a cursor-position report as
   F3 — so after a relaunch the pane shows a phantom command line and the next thing you type is
-  concatenated onto it. `Esc` clears it.
+  concatenated onto it. `Esc` clears it. **Fixed in Unreleased**, and left standing here because
+  it is what 0.1.0 does.
+
 
 [0.1.0]: https://github.com/noctcore/nysia/releases/tag/v0.1.0
