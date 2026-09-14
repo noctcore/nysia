@@ -216,7 +216,35 @@ describe('findColourLiterals', () => {
     }
   });
 
-  it('reads both branches of a braced conditional the same way round', () => {
+  it('reads a colour branch whose sibling is a non-paint keyword', () => {
+    // The greedy quantifier hands back the *last* quoted literal in range, and in a ternary
+    // that is the wrong one half the time. Every keyword below is one the named set leaves
+    // out on purpose, because each follows the theme rather than fixing a colour — and each
+    // is what a component naturally writes as the other branch. `none` is SVG's own default
+    // non-paint value, so a fill that paints on one condition and does not on the other is
+    // the ordinary spelling, and it was the silent one. Reversing the branches made it loud,
+    // which is the tell.
+    for (const branch of ["'none'", "'inherit'", "'transparent'", "'currentColor'", "''"]) {
+      const first = `<path fill={on ? 'red' : ${branch}} />`;
+      const second = `<path fill={on ? ${branch} : 'red'} />`;
+      expect(findColourLiterals(first).map((c) => c.kind), first).toContain('named-colour');
+      expect(findColourLiterals(second).map((c) => c.kind), second).toContain('named-colour');
+    }
+  });
+
+  it('reads a colour branch in an object literal the same way', () => {
+    // The same miss, in the form that has been here since before the container was
+    // admitted, and that no bullet ever named.
+    for (const style of [
+      `style={{ fill: on ? 'red' : 'none' }}`,
+      `style={{ color: failed ? 'navy' : 'inherit' }}`,
+      `el.style.color = on ? 'red' : 'transparent';`,
+    ]) {
+      expect(findColourLiterals(style).map((c) => c.kind), style).toContain('named-colour');
+    }
+  });
+
+  it('reads a braced conditional the same way whichever branch is the colour', () => {
     // Naming the ANSI colour words as introducers had a side effect nothing tested: in a
     // braced ternary the quoted first branch read as a key introducing the second, so the
     // rule fired when the first branch was one of eight words and stayed quiet otherwise.
@@ -276,6 +304,24 @@ describe('findColourLiterals', () => {
     expect(findColourLiterals('{ "background-color": "red" }').map((c) => c.kind)).toEqual([
       'named-colour',
     ]);
+  });
+
+  it('finds a colour either side of a quote the value escapes', () => {
+    // This was a residue entry for three rounds, in both its directions: the scanned text
+    // carries real backslashes, the span reads the escaped quote as a delimiter it is not,
+    // and whichever chunk the greedy quantifier happened to hand back decided the answer.
+    // Checking every chunk closes it — the split is still wrong, but no colour falls in the
+    // half nobody looked at. Both orders, both quote characters.
+    for (const escaped of [
+      String.raw`style={{ background: 'red url('a.png')' }}`,
+      String.raw`style={{ background: "red url(\"a.png\")" }}`,
+      String.raw`style={{ background: 'url('a.png') red' }}`,
+      String.raw`style={{ background: "url(\"a.png\") red" }}`,
+    ]) {
+      expect(findColourLiterals(escaped).map((c) => c.kind), escaped).toContain(
+        'named-colour',
+      );
+    }
   });
 
   it('finds a colour beside a url quoted inside the same value', () => {
@@ -509,23 +555,6 @@ describe('the documented residue', () => {
     expect(findColourLiterals("const tier = 'gold';")).toEqual([]);
   });
 
-  it('misses a value whose own quote appears inside it escaped', () => {
-    // The scanned text carries real backslashes, which is what ends the match early. The
-    // colour has to sit *before* the escape for this to be a miss: after it, the tail of
-    // the value is what the span ends up capturing and the colour is found by accident.
-    //
-    // This fixture used to be the other way round, and stopped demonstrating anything the
-    // moment the span learned to cross a quoted string — which is the residue test earning
-    // its keep in the direction nobody expects. The entry is still real; the example was
-    // not.
-    expect(
-      findColourLiterals(String.raw`style={{ background: 'red url(\'a.png\')' }}`),
-    ).toEqual([]);
-    expect(
-      findColourLiterals(String.raw`style={{ background: "red url(\"a.png\")" }}`),
-    ).toEqual([]);
-  });
-
   it('misses an expression carrying a comma, a semicolon or a brace', () => {
     expect(findColourLiterals("style={{ color: mix(a, b) ?? 'red' }}")).toEqual([]);
     expect(findColourLiterals("style={{ color: run({ x: 1 }) ?? 'red' }}")).toEqual([]);
@@ -603,6 +632,19 @@ describe('the documented residue', () => {
         `style={{ background: 'url(data:image/svg+xml,%3Csvg fill=%23ff0000/%3E)' }}`,
       ),
     ).toEqual([]);
+  });
+
+  it('does fire on a comparison operand that spells a colour', () => {
+    // The price of reading every chunk rather than the last one. An operand and a branch
+    // are both quoted literals inside the same span, and nothing in the text says which is
+    // which — that is a question about syntax, and this rule reads characters. Half of it
+    // was already here: when the operand happened to be the last literal in range it was
+    // taken as the value, so the shape fired or stayed quiet depending on what came after.
+    expect(
+      findColourLiterals(`style={{ color: tier === 'gold' ? a : 'inherit' }}`).map(
+        (c) => c.kind,
+      ),
+    ).toEqual(['named-colour']);
   });
 
   it('does fire on a table keyed by colour name whose values are prose', () => {
