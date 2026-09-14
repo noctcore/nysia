@@ -29,8 +29,16 @@
  *   mentioned in a string is correctly ignored — but nothing here expands macros. Rule (b)
  *   still catches the dependency that would make such a path compile.
  * - **`no-restricted-imports` does not cover `require()`.** ESLint owns `import` and
- *   `export … from`; lint-meta owns `require()` and dynamic `import()`. Neither layer is
- *   complete alone, and that split is deliberate rather than an oversight.
+ *   `export … from`; lint-meta owns `require()`, dynamic `import()` and `import.meta.glob`.
+ *   Neither layer is complete alone, and that split is deliberate rather than an oversight.
+ * - **Rule (d) reads the specifier, so a specifier that is not a literal is invisible.**
+ *   `import(name)`, `import('../store/' + name)` and a template with a `${…}` in it are all
+ *   beyond it, and ESLint is equally blind to the static equivalents. This used to be
+ *   written as "lint-meta owns dynamic `import()`" with no qualification while the rule
+ *   matched only a single-line quoted literal, which over-claimed four spellings that
+ *   passed every gate (#19); the rule now reads whole files with comments blanked, and
+ *   `import.meta.glob` — which need not name the file at all — is reported unless the call
+ *   shows it cannot return a module.
  * - **A file ESLint's `ignores` excludes is covered only by rule (a)'s line scan**, which is
  *   weaker than ESLint's AST.
  *
