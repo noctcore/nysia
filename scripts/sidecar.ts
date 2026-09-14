@@ -21,9 +21,13 @@
  * Read that against D-1. The daemon **outlives the window by design**, so "run the app, close
  * it, build again" is the ordinary sequence rather than an unusual one — and the daemon still
  * running is holding `target/<profile>/nysia`, which is the file about to be deleted.
- * Windows unlinks a running image only while another name for it survives, so the build
- * panicked with `PermissionDenied` as soon as Tauri's own copy had replaced the hardlink
- * cargo leaves from `deps/`.
+ * **Holding it stops the delete only once that file is Tauri's own single-linked copy.**
+ * Windows unlinks a running image while another name for it survives, so a daemon started
+ * from the two-name hardlink cargo leaves from `deps/` does not trip it: measured, the
+ * unlink succeeds through the other name, the link count goes from two to one, and the
+ * build finishes. It is the copy Tauri writes over it — one name, and a daemon running
+ * from that name — where the delete fails, so the build panicked with `PermissionDenied`
+ * as soon as that copy had replaced the hardlink.
  *
  * Declared in a config the bundler merges with `--config` and `cargo` never reads, **the
  * ordinary loop is clear of it**: `cargo build`, `cargo test`, `cargo clippy` and `tauri dev`
