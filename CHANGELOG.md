@@ -16,13 +16,17 @@ honest about where it stops.
   Two halves: `nysia_core::rpc::ensure_daemon` is a synchronous seam over the *existing* spawn
   lock, re-probe, readiness wait and lease check — the window supplies its own blocking dial
   and `nysia <verb>` keeps its async one, so two front ends share one implementation of the
-  race rather than two answers to it — and `tauri.conf.json` now ships the `nysia` binary as a
-  sidecar, with a CI job that builds the bundle on both runners and asserts the runtime is
-  inside it.
-- **A window that cannot start a daemon says why.** A missing sidecar, a runtime that will not
-  execute and one that starts without binding are each a non-retryable failure carrying the
-  path that was tried or the log that explains it, so the notice appears once instead of the
-  status bar cycling *Reconnecting* against something waiting cannot fix.
+  race rather than two answers to it — and the app now ships the `nysia` binary as a sidecar,
+  with a CI job that builds the bundle on both runners and looks inside what a user receives:
+  the macOS `.app`, and on Windows the installer run to a prefix of its own.
+- **A window that cannot start a daemon says why, once.** A missing sidecar, a runtime that
+  will not execute and one that starts without binding are each a non-retryable failure
+  carrying the path that was tried or the log that explains it — and the reconnect loop
+  **ends** on one instead of re-taking the spawn lock and starting a process every twenty
+  seconds for the life of the window.
+- **A busy or refusing endpoint is no longer read as an empty one.** The window classifies dial
+  failures the way `nysia_core::rpc::transport` does, so only `NotFound` — and, on Unix, a
+  socket that refuses — leads it to start a daemon.
 
 ## [0.1.0] — 2026-09-14
 

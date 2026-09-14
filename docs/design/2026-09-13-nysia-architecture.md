@@ -571,20 +571,45 @@ Each of these cost someone a day already.
    folding them together is how a client starts a second daemon beside one that was perfectly
    willing to talk to somebody else.
 
-   **What the window spawns is a file it ships.** `tauri.conf.json` declares the `nysia`
-   binary as an `externalBin`, so the bundle carries the same artefact the CLI installs
-   (D-11) and the window resolves it *beside its own executable* — `Contents/MacOS/nysia` in
-   the app, `nysia.exe` next to `Nysia.exe` on Windows, and the sibling in `target/` during
-   development. Never `PATH`: a window that started whichever `nysia` a shell happened to put
-   first would be running a daemon nobody chose. Because `tauri_build` resolves `externalBin`
-   at *compile* time, `pnpm sidecar` has to have staged it before any `cargo` command that
-   touches the desktop crate — CI does that in both jobs, and a developer whose build says
-   `resource path binaries/nysia-<triple> doesn't exist` is being told to run it.
+   **What the window spawns is a file it ships.** The `nysia` binary is declared as an
+   `externalBin`, so the bundle carries the same artefact the CLI installs (D-11), and the
+   window resolves it *beside its own executable* — `Contents/MacOS/nysia` in the app,
+   `nysia.exe` next to `Nysia.exe` on Windows, and the sibling cargo built in `target/` during
+   development. One rule, both worlds. Never `PATH`: a window that started whichever `nysia` a
+   shell happened to put first would be running a daemon nobody chose.
+
+   **The declaration lives in `tauri.bundle.conf.json`, which only the bundler merges, and
+   that is D-1 defending itself.** `tauri_build` acts on `externalBin` at *compile* time: for
+   every `cargo build` of the desktop crate it deletes `target/<profile>/nysia` and copies the
+   staged file over it, and the delete is an `unwrap`. But the daemon **outlives the window by
+   design**, so "run the app, close it, build again" is the ordinary sequence — and the daemon
+   still running is holding the file about to be deleted. Windows unlinks a running image only
+   while another name for it survives, so the build panicked with `PermissionDenied` as soon as
+   Tauri's own copy had replaced the hardlink cargo leaves from `deps/`. Renaming the sidecar
+   does not help; whatever it is called, something is running from the file being deleted.
+
+   Declared where `cargo` never reads it, none of that happens: `cargo build`, `cargo test`
+   and `cargo clippy` neither need the sidecar nor touch it, a developer's window starts the
+   runtime cargo just compiled rather than a copy of an older one, and the copy happens once —
+   during the bundle build, which is the only time anybody wants it. The flag that merges it
+   lives in `apps/desktop/package.json`, so `pnpm build:app` and CI bundle the same way.
 
    **When it cannot spawn, the window says so and stops.** A missing sidecar, a file that will
    not execute, a daemon that starts and never binds — none of them improve by waiting, so
    each becomes a non-retryable `DaemonError::Spawn` carrying the path that was tried or the
-   log that says why, and the store shows it once instead of reconnecting for ever.
+   log that says why. `DaemonStore.run` **returns** on that answer rather than looping: a
+   retry re-takes the spawn lock, starts a process and waits twenty seconds for it, so a
+   window that kept trying would start one every twenty-odd seconds for its whole life and
+   append to the daemon log each time. The next steps say to reopen Nysia, because a window
+   that has stopped is not going to notice the fix on its own.
+
+   **Only two dial failures mean "nothing is listening".** `NotFound`, and on Unix
+   `ConnectionRefused` — a socket file outlives its daemon and refuses. Everything else is an
+   error rather than a licence to spawn: a busy pipe or an access denial means a daemon *is*
+   there, and starting a second one against it produced a process that could not bind, twenty
+   seconds of waiting, and a complaint pointing at a log whose only line said the endpoint was
+   already held. The window's classification is the one `nysia_core::rpc::transport` uses, and
+   the two are checked against each other in `daemon::endpoint`'s tests.
 
    **Liveness is three steps, and never the pid.** A pid that still exists says nothing: pids
    are reused, and attaching to whatever now holds an old number is the failure the launch
@@ -652,9 +677,12 @@ Each of these cost someone a day already.
      — the window's own client, from nothing listening to a shell that has run what was typed
      at it. Run against the code before the fix it fails on the first line that matters, with
      the `Unreachable` a user saw as *Reconnecting*.
-   - the `bundle` job in CI, which builds the app on both runners and asserts the runtime is
-     beside the window and inside the macOS `.app` — with `pnpm prove:sidecar` proving that
-     check trips on a bundle missing it (traps register #12).
+   - the `bundle` job in CI, which builds the app on both runners and looks **inside what a
+     user receives**: the macOS `.app`, and on Windows the installer run to a prefix of its
+     own — a check of `target/release` alone would have passed with the sidecar declaration
+     deleted, because the build step above it had just written that directory. `pnpm
+     prove:sidecar` proves the check trips on a bundle missing its runtime (traps
+     register #12).
    - `scripts/e2e/first-launch.ps1`, for the two things neither can do: launching the
      *installed* app so the sidecar is found where Tauri put it rather than where cargo did,
      and reading the notice a window shows when its runtime has been taken away.
