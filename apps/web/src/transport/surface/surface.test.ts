@@ -789,6 +789,58 @@ describe('the replay boundary holds input back', () => {
     }
   });
 
+  it('does not report a timeout for a background pane whose marker did arrive', () => {
+    // The deadline is about the marker *arriving*, not about the gate opening, and those come
+    // apart for every pane the user has not clicked on: a hidden surface has no renderer, so
+    // its gate cannot open until `show`, which may be minutes away or never. Anchored to the
+    // gate instead, every background tab raises a notice five seconds after connecting and
+    // accuses the daemon of a protocol violation it did not commit — one per stream, because
+    // the store dedups by message and the message names the stream.
+    vi.useFakeTimers();
+    try {
+      const fixture = gateHarness(3);
+      fixture.surface.write(text.encode(`history ${CURSOR_QUERY}`));
+      fixture.surface.replayEnded();
+
+      vi.advanceTimersByTime(REPLAY_BOUNDARY_DEADLINE_MS * 2);
+      expect(fixture.timeouts).toEqual([]);
+      // Still shut, because nothing has parsed those bytes yet — and when it does, the
+      // replayed query must still go nowhere.
+      expect(fixture.surface.acceptsInput).toBe(false);
+
+      fixture.surface.show(host());
+      fixture.latest().flush();
+      expect(fixture.forwarded).toEqual([]);
+      expect(fixture.surface.acceptsInput).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not force a visible pane open while it is still parsing the replay', () => {
+    // The same confusion, the other way round. A large replay under a tight credit window can
+    // take longer to parse than the deadline, and a deadline anchored to the gate would open
+    // it mid-parse — answering the tail of the replayed queries, which is the defect again,
+    // arriving later and harder to see.
+    vi.useFakeTimers();
+    try {
+      const fixture = gateHarness();
+      fixture.surface.show(host());
+      fixture.surface.write(text.encode(`history ${CURSOR_QUERY}`));
+      fixture.surface.replayEnded();
+
+      vi.advanceTimersByTime(REPLAY_BOUNDARY_DEADLINE_MS * 2);
+      expect(fixture.surface.acceptsInput).toBe(false);
+      expect(fixture.timeouts).toEqual([]);
+
+      fixture.latest().flush();
+      expect(fixture.forwarded).toEqual([]);
+      expect(fixture.surface.acceptsInput).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not leave a hidden pane waiting on a parse that will never happen', () => {
     // Hiding drops the write queue with the terminal, so callbacks for chunks already issued
     // never fire. A gate still counting them would sit shut until its deadline and report a
