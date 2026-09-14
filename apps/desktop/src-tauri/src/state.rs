@@ -156,10 +156,15 @@ pub struct Client {
     /// The generation of the next stream connection, so a superseded reader can be
     /// recognised. Outside `Connected` because it has to outlive every connection it numbers.
     next_generation: Arc<Mutex<Generation>>,
-    /// Signalled whenever the connection is torn down, so [`Self::wait_for_disconnect`] can
-    /// block instead of polling. A condvar rather than a channel because there may be more
-    /// than one waiter and every one of them wants the same edge.
-    dropped: Arc<(Mutex<u64>, Condvar)>,
+    /// Counts connection-lifecycle edges — a tear-down, and a stream connection replaced by
+    /// a reload — so [`Self::wait_for_disconnect`] can block instead of polling.
+    ///
+    /// A condvar rather than a channel because there may be more than one waiter and every
+    /// one of them wants the same edge. A count rather than a flag because a waiter has to
+    /// be able to tell "no edge yet" from "an edge I already saw", which is the same
+    /// distinction that keeps a caller racing a disconnect from waiting for one that has
+    /// already passed.
+    edges: Arc<(Mutex<u64>, Condvar)>,
     /// Where to dial, when it is not to be resolved from the environment.
     ///
     /// `None` for the window, which is the whole point of [`Self::new`]: production has one
@@ -191,7 +196,7 @@ impl Client {
             inner: Arc::new(Mutex::new(None)),
             table: Arc::new(Mutex::new(StreamTable::new())),
             next_generation: Arc::new(Mutex::new(1)),
-            dropped: Arc::new((Mutex::new(0), Condvar::new())),
+            edges: Arc::new((Mutex::new(0), Condvar::new())),
             endpoint,
         }
     }
@@ -440,13 +445,26 @@ impl Client {
         }
     }
 
-    /// Block until the connection is torn down.
+    /// Block until the connection is torn down, or until a reload replaces its output
+    /// connection.
     ///
     /// How the webview learns the daemon went away while no command was in flight, without
     /// `emit` (tauri#12724). Returns immediately when nothing is attached, so a caller that
     /// races a disconnect is not left waiting for an edge that already passed.
+    ///
+    /// **A supersede wakes it too, and that is not a rounding error.** This parks a thread
+    /// from the blocking pool, and the webview that invoked it is gone after a reload — so a
+    /// wait that only ever ended on a disconnect left one more thread parked for every
+    /// reload, against a connection that may stay up for days. Enough of them and the pool
+    /// the *live* webview's commands run on is empty, and the window stops answering with
+    /// nothing in the log to say why.
+    ///
+    /// The replacement webview cannot be woken by its own attach: [`Self::attach_channel`]
+    /// runs to completion inside the connect sequence, and the watch is only invoked once
+    /// that sequence has returned. What wakes here is a watcher from a webview that no
+    /// longer exists, and its answer goes nowhere.
     pub fn wait_for_disconnect(&self) {
-        let (count, signal) = &*self.dropped;
+        let (count, signal) = &*self.edges;
         let Ok(observed) = count.lock() else { return };
         if self.identity().is_none() {
             return;
@@ -464,7 +482,7 @@ impl Client {
     pub fn disconnect(&self) {
         let taken = self.lock().ok().and_then(|mut held| held.take());
         drop(taken);
-        self.announce_disconnect();
+        self.announce_edge();
     }
 
     /// Tear the connection down **only if** `generation` still names its live stream.
@@ -492,13 +510,13 @@ impl Client {
         // from a connection that is working.
         if taken.is_some() {
             drop(taken);
-            self.announce_disconnect();
+            self.announce_edge();
         }
     }
 
-    /// Wake everything waiting on a disconnect.
-    fn announce_disconnect(&self) {
-        let (count, signal) = &*self.dropped;
+    /// Wake everything waiting on a connection-lifecycle edge.
+    fn announce_edge(&self) {
+        let (count, signal) = &*self.edges;
         if let Ok(mut current) = count.lock() {
             *current = current.wrapping_add(1);
         }
@@ -529,10 +547,11 @@ impl Client {
         }
     }
 
-    /// How many times a connection has been torn down, which is what `daemon_watch` waits on.
+    /// How many connection-lifecycle edges have passed, which is what `daemon_watch` waits
+    /// on.
     #[cfg(test)]
-    fn disconnect_count(&self) -> u64 {
-        let (count, _) = &*self.dropped;
+    fn edge_count(&self) -> u64 {
+        let (count, _) = &*self.edges;
         count.lock().map(|held| *held).unwrap_or_default()
     }
 
@@ -558,7 +577,14 @@ impl Client {
         let mut held = self.lock()?;
         let connected = held.as_mut().ok_or(DaemonError::Disconnected)?;
         connected.stream_generation = Some(generation);
-        Ok((generation, connected.stream.take()))
+        let superseded = connected.stream.take();
+        drop(held);
+
+        // Outside the lock, and after it: a watcher parked by the webview this supersedes
+        // has to be let go, or a reload leaks one blocking-pool thread every time. See
+        // [`Self::wait_for_disconnect`].
+        self.announce_edge();
+        Ok((generation, superseded))
     }
 
     /// The generation for a stream connection being opened now.
@@ -668,14 +694,14 @@ mod tests {
 
         // The disconnect counter is what `daemon_watch` waits on, so it is also the proof
         // that nothing woke the store.
-        let quiet = client.disconnect_count();
+        let quiet = client.edge_count();
         client.disconnect_generation(superseded);
         assert!(
             client.identity().is_some(),
             "the reader a reload abandoned took the connection that replaced it down with it"
         );
         assert_eq!(
-            client.disconnect_count(),
+            client.edge_count(),
             quiet,
             "nothing may wake the reconnect loop away from a connection that is working"
         );
@@ -684,7 +710,37 @@ mod tests {
         // the daemon-fault path, and the guard must not have cost it.
         client.disconnect_generation(live);
         assert!(client.identity().is_none());
-        assert!(client.disconnect_count() > quiet);
+        assert!(client.edge_count() > quiet);
+    }
+
+    #[test]
+    fn replacing_the_stream_connection_releases_the_watcher_a_reload_left_parked() {
+        // `daemon_watch` parks a thread of the blocking pool, and the webview that invoked
+        // it is gone after a reload. A wait that only ever ended on a disconnect leaked one
+        // of those threads per reload against a connection that may stay up for days —
+        // until the pool the live webview's commands run on was empty and the window stopped
+        // answering, with nothing in the log.
+        let client = Client::new();
+        client.pretend_connected();
+
+        let first = client.edge_count();
+        let _ = client.supersede_stream().expect("a connection is held");
+        assert!(
+            client.edge_count() > first,
+            "the first attach woke nothing, so a watcher parked before it would never return"
+        );
+
+        let second = client.edge_count();
+        let _ = client
+            .supersede_stream()
+            .expect("the connection is still held");
+        assert!(
+            client.edge_count() > second,
+            "a reload left its predecessor's watcher parked"
+        );
+
+        // And the connection itself is untouched: waking a watcher is not a disconnect.
+        assert!(client.identity().is_some());
     }
 
     #[test]
