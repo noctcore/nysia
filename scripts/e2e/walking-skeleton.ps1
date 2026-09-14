@@ -273,6 +273,16 @@ switch ($Step) {
     'relaunched' {
         Write-Host '== step 4/6: relaunch, and the tab comes back with its scrollback ==' -ForegroundColor Cyan
         $state = Read-State -Expected 'closed'
+
+        # The screen as it stands with no window attached to it. Everything between here and
+        # the comparison below is the app attaching, and the app attaching must not type
+        # anything: a replay carries every terminal query the child ever wrote, a renderer
+        # answers a query when it parses one and cannot tell a replayed one from a live one,
+        # and ConPTY reads the answer to a cursor-position report as F3 — which `cmd` treats as
+        # recall-previous-command. This is the defect reported against v0.1, made into a check
+        # rather than an instruction to look at the screen and notice.
+        $beforeAttach = Invoke-NysiaOk -Nysia $Nysia -Arguments @('terminal', 'read', $state['handle'], '--screen', '--no-spawn')
+
         $appPid = Start-App -Binary $state['appBinary']
 
         $daemonPid = [int] $state['daemonPid']
@@ -294,8 +304,19 @@ switch ($Step) {
             ((@(Compare-Object $shellPids @($state['shellPids'])).Count -eq 0)) `
             "pids $($shellPids -join ', ')"
 
+        # Settle before comparing. A window that injected input produces output — the recalled
+        # line is echoed — so waiting for the session to go quiet is what makes the comparison
+        # meaningful rather than a race the fix happens to win.
+        $null = Invoke-Nysia -Nysia $Nysia -Arguments @('terminal', 'wait', $state['handle'], '--for', 'idle', '--timeout-ms', '20000', '--no-spawn')
+
         $screen = Invoke-NysiaOk -Nysia $Nysia -Arguments @('terminal', 'read', $state['handle'], '--screen', '--no-spawn')
         Write-Check "the scrollback still shows $($script:Token)" ($screen -match [regex]::Escape($script:Token))
+        Write-Check 'attaching typed nothing into the shell' ($screen -eq $beforeAttach) `
+            'the screen changed while the window attached, and nothing was typed at it'
+        if ($screen -ne $beforeAttach) {
+            Write-Host '--- before the window attached ---' -ForegroundColor DarkGray
+            Write-Host $beforeAttach
+        }
         Write-Host '--- the screen the daemon holds ---' -ForegroundColor DarkGray
         Write-Host $screen
 
@@ -308,7 +329,9 @@ switch ($Step) {
         Write-Host 'NOW LOOK AT THE WINDOW. The criterion is met only if all three hold:' -ForegroundColor Yellow
         Write-Host '  - the tab is back, with the same title, and its age is the session age, not 0s;'
         Write-Host "  - the pane shows the scrollback, $($script:Token) included;"
-        Write-Host '  - typing in it still works.'
+        Write-Host '  - typing in it still works, and the prompt is empty before you type —'
+        Write-Host '    a command you never typed sitting at the prompt is the re-attach defect,'
+        Write-Host '    and the check above fails on it rather than leaving it for you to spot.'
         Write-Host ''
         Write-Host 'Then: -Step upgraded -NewAppBinary <path>, or -Step finish.' -ForegroundColor Yellow
     }
