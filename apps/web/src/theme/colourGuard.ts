@@ -236,23 +236,35 @@ const PALETTE_CLASS = new RegExp(
  * against its colon, then one behind a ternary, then a quoted key, then a custom property,
  * then a JSX expression container, then whichever branch a greedy quantifier reached last,
  * then a branch written as a template. Seven of them, each closed by spelling that one out,
- * and the list is in the order they were found. That run is not luck. Whether a string is the value of a painting property is a
- * question about syntax, and a regular expression can be made right about a position
- * somebody has already thought of, never about position itself, because it has no notion of
- * one. The false positives say it from the other side: an operand, a branch, a key and a
- * comment are four different things that look identical to a pattern over characters.
+ * and the list is in the order they were found. That run is not luck. Whether a string is
+ * the value of a painting property is a question about syntax, and a regular expression can
+ * be made right about a position somebody has already thought of, never about position
+ * itself, because it has no notion of one. The false positives say it from the other side:
+ * an operand, a branch, a key and a comment are four different things that look identical
+ * to a pattern over characters.
  *
  * That diagnosis explains the *history*. It does not describe the list, and a previous
  * version of this section said it did — that nearly every entry was positional and a syntax
  * tree would leave two standing. Go through the nine misses instead of counting on it. One
- * turns purely on position, the span bounds, and one is half position and half vocabulary,
- * the setter list with its tuple. The rest are questions about **vocabulary** or about
- * **what a value hides**, and here they are: which property names paint; which library's
- * keys paint; which wrapper calls paint; what a `url()` or a data URI is carrying; what a
- * percent-encoded hash is; what a computed custom-property key resolves to; and what a name
- * holds when the colour arrives through a variable. A syntax tree answers none of those by
- * knowing about syntax — it has to be *told*, exactly as this rule is told, and the lists it
- * would be told with are the ones in this file.
+ * turns purely on position, the span bounds. One is half position and half vocabulary: the
+ * setter bullet, whose tuple half is position and whose other half is which wrapper calls
+ * paint. The remaining seven are questions about **vocabulary** or about **what a value
+ * hides**, and here they are, one per bullet:
+ *
+ *  - what a name holds when the colour arrives through a variable;
+ *  - whether a string nothing introduces is a colour at all;
+ *  - which property names paint;
+ *  - which library's keys paint;
+ *  - what bare CSS inside a string, a tagged template or a markup attribute says — which
+ *    needs a CSS parser and not a TypeScript one, so a syntax tree does not help here even
+ *    in principle;
+ *  - what a computed custom-property key resolves to;
+ *  - what a `url()` or a data URI is carrying.
+ *
+ * A syntax tree answers none of those by knowing about syntax — it has to be *told*, exactly
+ * as this rule is told, and the lists it would be told with are the ones in this file. The
+ * percent-encoded hash is the same kind of question and is not on this list only because it
+ * lives in the backstop sentence rather than in a bullet; it carries over too.
  *
  * So, for whoever picks up issue #45, which rewrites this as a walk over the TypeScript
  * syntax tree — JSX attributes, object-literal properties and assignment targets whose key
@@ -401,9 +413,10 @@ const PROPERTY_INTRO =
  * one spelling this codebase is most likely to use it in — the colour vocabulary here is
  * custom properties, so an interpolated token on one branch against a hardcoded fallback on
  * the other is the natural way to write it, and whoever wrote the branches the other way
- * round got the red gate for the same code. A quoted string in the expression, which is what a comparison like
- * `status === 'failed' ? …` is made of, was taken as the value: the rule read the first
- * literal after the separator, found no colour word in it, and skipped past the real one.
+ * round got the red gate for the same code. A quoted string in the expression, which is
+ * what a comparison like `status === 'failed' ? …` is made of, was taken as the value: the
+ * rule read the first literal after the separator, found no colour word in it, and skipped
+ * past the real one.
  * So the span swallows a complete quoted string as a unit. The alternation is ordered
  * quote-first so a literal is consumed whole rather than a character at a time; both
  * branches are anchored on different characters, so there is no ambiguity for the engine to
