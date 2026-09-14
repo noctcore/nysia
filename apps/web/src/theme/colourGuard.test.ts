@@ -266,6 +266,21 @@ describe('findColourLiterals', () => {
     expect(findColourLiterals('className="bg-[url(/img/red.png)]"')).toEqual([]);
   });
 
+  it('does not fire on a call whose arguments are a property name and a colour', () => {
+    // The comma separator exists for `setProperty`, and it used to accept any call at all
+    // — or no call, since a two-element array is the same three characters. Neither writes
+    // a pixel, and both are shapes a test helper or a lookup table writes without thinking
+    // about colour at all.
+    for (const innocent of [
+      "track('color', 'gold');",
+      `t('background', 'tan')`,
+      "const pair = ['color', 'gold'];",
+      "expect(rule('fill', 'navy')).toBe(1);",
+    ]) {
+      expect(findColourLiterals(innocent), innocent).toEqual([]);
+    }
+  });
+
   it('finds a colour written to a custom property', () => {
     // The blind spot that hid `theme/tokens.ts` entirely: every token in this codebase
     // spells the word as a prefix, and the pattern wanted it as a suffix. The module whose
@@ -453,6 +468,16 @@ describe('the documented residue', () => {
 
   it('misses a custom property whose name is computed', () => {
     expect(findColourLiterals("{ [`--color-${key}`]: 'red' }")).toEqual([]);
+  });
+
+  it('misses a name and value written as a tuple for a setter to consume later', () => {
+    // The comma separator is spelled as part of the DOM call now. Before it was, a tuple
+    // table was caught — but so was every unrelated two-argument call with a property name
+    // in front of a string, which is the false positive that outweighed it.
+    expect(findColourLiterals(`const pairs = [['--color-acc', 'red']];`)).toEqual([]);
+    expect(
+      findColourLiterals(`for (const [k, v] of pairs) root.style.setProperty(k, v);`),
+    ).toEqual([]);
   });
 
   it('misses a colour carried inside a url', () => {
