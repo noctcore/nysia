@@ -375,6 +375,16 @@ impl OwnedSession {
     /// running for an hour sees what is on the screen rather than an empty pane. That is the
     /// reattach half of the D-1 acceptance: the window died, the session did not, and the
     /// scrollback comes back.
+    ///
+    /// **And the replay is marked where it ends.** A replay is indistinguishable from live
+    /// output in the frames themselves — it *is* the bytes the child once wrote, escape
+    /// sequences intact — so it carries every `ESC[6n` and `ESC[c` the child ever emitted,
+    /// and a terminal emulator answers a query when it parses one whether or not it is
+    /// reading history. Those answers leave as input: on Windows ConPTY reads the `…R` of a
+    /// cursor-position report as F3, which `cmd` treats as recall-previous-command, so a
+    /// re-attached pane came back showing a line nobody typed. One
+    /// [`FrameKind::ReplayEnd`] closes that, exactly once per attach, after the last replayed
+    /// byte and before anything live — see [`nysia_proto::stream`] for what a client owes it.
     pub fn attach(&self, sink: &Arc<StreamSink>) {
         let stream = sink.stream_id();
         sink.send(&sink.opening_grant());
@@ -398,6 +408,24 @@ impl OwnedSession {
                 );
                 break;
             }
+        }
+        // **Sent on every path out of that loop, including the `break`.** A client holds its
+        // outbound input from the moment it attaches until this frame arrives, so a marker
+        // skipped because the replay was truncated would leave the pane mute until the
+        // client's own deadline rescued it — and it is the sessions with the most scrollback,
+        // the ones most likely to outrun the opening allowance, that would get it. It costs
+        // no credit: only `Output` spends, so a marker cannot be refused for a window the
+        // replay just drained.
+        if sink.send(&Frame::empty(FrameKind::ReplayEnd, stream)) != SendOutcome::Sent {
+            // The outbox was full or the client has gone. Nothing here can retry — the
+            // replay it would have followed is already partly on the floor — but a pane that
+            // stays mute until its deadline fires needs a reason in the log, or the symptom
+            // is "input does nothing for a few seconds after re-attach" with nothing to read.
+            tracing::warn!(
+                stream = stream.get(),
+                "the replay boundary was not delivered; the client will fall back to its \
+                 deadline before it accepts input"
+            );
         }
         if let Some(status) = self.pty.exit_status() {
             // A session that has already exited still owes the client the exit frame, or an
@@ -990,6 +1018,76 @@ mod tests {
             sink.credit() >= 0,
             "a replay must stop at the allowance rather than overshoot it: {} left",
             sink.credit()
+        );
+        registry.close(&created.handle).expect("closes");
+    }
+
+    #[test]
+    fn a_replay_the_allowance_cut_short_still_ends_with_its_boundary() {
+        // The marker is what a client waits on before it will accept input, so a replay that
+        // ran out of allowance and skipped it would leave the pane refusing keystrokes until
+        // the client's own deadline rescued it — and it is the sessions with the *most*
+        // scrollback, the ones most likely to outrun the opening window, that would get it.
+        // This is the case the `break` in `attach` creates, made deliberate: an allowance
+        // small enough that the replay cannot possibly finish.
+        let window = nysia_proto::CreditWindow {
+            per_stream_initial: 512,
+            per_stream_max: 512,
+            total_initial: 512,
+            total_max: 512,
+            pending_cap: 1024,
+            ack_batch: 128,
+            chunk: 128,
+        };
+        assert!(window.is_coherent());
+        let registry = SessionRegistry::new();
+        let created = create(&registry, None);
+        let session = registry.get(&created.handle).expect("the session is there");
+        await_prompt(&session);
+        session
+            .send(&TerminalSend::line(
+                created.handle.clone(),
+                TestShell::pick().flood,
+            ))
+            .expect("writes");
+        until(&session, |text| text.len() > 4000);
+        let _ = session.wait(WaitFor::Idle, Some(DEADLINE));
+        let replay_len = lock(&session.vt).replay().len();
+        assert!(
+            replay_len > window.per_stream_initial as usize,
+            "the replay is {replay_len} bytes against a {}-byte allowance; it has to outrun \
+             the allowance or this test exercises the ordinary path instead of the cut-short \
+             one",
+            window.per_stream_initial
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4096);
+        let sink = Arc::new(StreamSink::new(nysia_proto::StreamId::FIRST, tx, window));
+        session.attach(&sink);
+
+        let mut kinds = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            let (frame, _) = nysia_proto::decode(&frame)
+                .expect("decodes")
+                .expect("a whole frame");
+            kinds.push(frame.kind);
+        }
+        let replayed = kinds.iter().filter(|k| **k == FrameKind::Output).count();
+        assert!(replayed > 0, "the session had scrollback to replay");
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == FrameKind::ReplayEnd)
+                .count(),
+            1,
+            "a truncated replay still owes exactly one boundary; the attach wrote {kinds:?}"
+        );
+        // And it is last. A marker that arrived mid-replay would open the client's gate while
+        // replayed queries were still on the way, which is the whole defect over again.
+        assert_eq!(
+            kinds.last(),
+            Some(&FrameKind::ReplayEnd),
+            "the boundary must follow the last replayed byte; the attach wrote {kinds:?}"
         );
         registry.close(&created.handle).expect("closes");
     }
