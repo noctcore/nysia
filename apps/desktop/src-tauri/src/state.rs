@@ -44,15 +44,21 @@ const ATTACH_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis
 ///
 /// One binary is both the daemon and the CLI, selected by argv (D-11), and one rule finds it
 /// in both worlds a window runs in: **beside this executable**. In an installed bundle that
-/// is the sidecar Tauri laid down — `nysia.exe` next to `Nysia.exe`, `Contents/MacOS/nysia`
-/// in the app; in a developer's tree it is the binary cargo just built in `target/<profile>`.
-/// Nothing path-shaped is baked in at compile time (traps register #9), and in development it
-/// is always the freshly compiled runtime rather than a copy of one.
+/// is the sidecar Tauri laid down — `nysia.exe` beside `nysia-desktop.exe` on Windows,
+/// `Contents/MacOS/nysia` beside `Contents/MacOS/Nysia` in the app; in a developer's tree it
+/// is the binary cargo just built in `target/<profile>`. Nothing path-shaped is baked in at
+/// compile time (traps register #9), and in development it is always the freshly compiled
+/// runtime rather than a copy of one.
 ///
 /// That second half is only true because the sidecar is declared in
-/// `tauri.bundle.conf.json`, which the bundler merges and an ordinary `cargo build` never
-/// sees — see `scripts/sidecar.ts` for what goes wrong when it is declared in
-/// `tauri.conf.json` instead.
+/// `tauri.bundle.conf.json`, which **`cargo` never reads**. `tauri_build` acts on
+/// `externalBin` at compile time by deleting `target/<profile>/nysia` and copying the staged
+/// file over it, and a daemon that outlived its window is running from the file being
+/// deleted — so keeping the declaration out of `tauri.conf.json` is what stops every
+/// `cargo build` from doing that. It is not that nothing ever does: `tauri build --config`
+/// merges the file and exports `TAURI_CONFIG`, which `tauri_build` does read, so the delete
+/// and the copy still happen on the bundle path — once, when somebody actually wants them.
+/// See `scripts/sidecar.ts`.
 const RUNTIME_BINARY: &str = if cfg!(windows) { "nysia.exe" } else { "nysia" };
 
 /// Which stream id belongs to which session, in both directions.
