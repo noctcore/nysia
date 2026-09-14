@@ -79,10 +79,20 @@ pub struct SessionSpec {
     /// the result, so this cannot reintroduce a scrubbed variable. That is deliberate: see
     /// [`SessionSpec::with_env`].
     pub env: Vec<(OsString, OsString)>,
-    /// Environment applied **after** the scrub, which is the only way to set one of the
-    /// variables the scrub removes. See
-    /// [`SessionSpec::with_env_overriding_the_scrub`] before putting anything here.
-    pub env_overriding_the_scrub: Vec<(OsString, OsString)>,
+    /// Environment applied **after** the scrub, and so the only way to set one of the
+    /// variables the scrub removes.
+    ///
+    /// Private, unlike every other field here, and that asymmetry is the guarantee rather
+    /// than an oversight. A `pub` field is reachable by a struct literal or a `push`, which
+    /// would have made [`SessionSpec::with_env_overriding_the_scrub`] a convention instead
+    /// of the only door — and a security default an ordinary caller can undo is a
+    /// suggestion, not a default. Privacy closes both routes, and it takes struct literals
+    /// of `SessionSpec` with it: outside this module [`SessionSpec::new`] is now the only
+    /// way to build one.
+    ///
+    /// [`SessionSpec::env`] stays public because reaching it directly changes nothing —
+    /// the scrub still runs over whatever is there.
+    env_overriding_the_scrub: Vec<(OsString, OsString)>,
     /// How many output chunks may be queued before the reader stops reading.
     pub output_queue: usize,
 }
@@ -136,10 +146,12 @@ impl SessionSpec {
 
     /// Set an environment variable *after* the scrub has run, defeating it for that name.
     ///
-    /// The only way to set one of [`env::SCRUBBED_VARS`]. Nothing in v1 calls this; it
-    /// exists so that if something ever must, the decision is visible at the call site and
-    /// findable with one grep, instead of being an emergent property of the order two
-    /// loops happen to run in.
+    /// The only way to set one of [`env::SCRUBBED_VARS`], and that is literal rather than a
+    /// figure of speech: the list this appends to is private, so no struct literal and no
+    /// direct `push` reaches around this method. Nothing in v1 calls it; it exists so that
+    /// if something ever must, the decision is visible at the call site and findable with
+    /// one grep, instead of being an emergent property of the order two loops happen to run
+    /// in.
     ///
     /// Reach for [`SessionSpec::with_env`] instead unless the variable is one the scrub
     /// removes and you have a reason that survives being read aloud.
