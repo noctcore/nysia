@@ -391,6 +391,26 @@ mod tests {
             generated.contains("Spelling the tail `string` is not the fix"),
             "naming the cause without warning off the obvious wrong fix invites it"
         );
+        // #63 review: naming the cause was not enough, because the clause explaining *how*
+        // it works was compressed for the TypeScript side and the compression re-attributed
+        // comparability to the bare literal. `"shutting_down" === "unauthorized"` is TS2367,
+        // no overlap — were a constituent comparable with the literal, the union would
+        // narrow, which is the opposite of what this doc exists to explain. What keeps every
+        // constituent is that the narrowed `kind` still carries the tail. Three wordings of
+        // this comment have been wrong about the mechanism and a reader caught none of them,
+        // so the mechanism is pinned here rather than left to the next reviewer.
+        assert!(
+            generated.contains("`\"unauthorized\" | (string & {})`, not the bare"),
+            "narrowing `kind` leaves the tail in it, not a bare literal"
+        );
+        assert!(
+            generated.contains("every constituent stays comparable with that narrowed `kind`"),
+            "comparability is against the narrowed `kind`, never against the literal"
+        );
+        assert!(
+            !generated.contains("comparable with the literal it is compared to"),
+            "the third wrong mechanism is back: no constituent is comparable with the literal"
+        );
     }
 
     #[test]
