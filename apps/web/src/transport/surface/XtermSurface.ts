@@ -328,6 +328,16 @@ export class XtermSurface implements TerminalSurface {
     if (this.#inputOpen || this.#disposed) {
       return;
     }
+    // **Stood down here, on arrival, not when the gate opens.** The deadline asks one
+    // question — did the daemon mark the end of its replay? — and the marker has just
+    // answered it. The gate opens later, and how much later is not the daemon's business:
+    // a hidden pane's gate cannot open until it is shown, which may be minutes away or
+    // never, and a large replay under a tight window can take longer to parse than the
+    // deadline allows. Anchored to the gate instead, every background tab accused the daemon
+    // of a protocol violation five seconds after connecting, and a slow parse had its gate
+    // forced open part-way through the replay — which is the defect again, arriving later
+    // and harder to see.
+    this.#clearDeadline();
     if (this.#terminal === null) {
       // Nothing is parsing, so nothing can be answering — but the buffer collected so far is
       // replay, and the next `show` feeds it to a fresh terminal that *will* answer it.

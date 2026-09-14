@@ -138,6 +138,12 @@ export const RESET_SEQUENCE = 'c';
  * would be the race the marker exists to remove — it would drop real keystrokes on a slow
  * machine and still let a replayed query answer on a fast one.
  *
+ * It measures the wait for the marker to **arrive**, and nothing else. Not the wait for the
+ * gate to open: a hidden pane's gate cannot open until it is shown, and a large replay can
+ * take longer to parse than this allows, so a deadline anchored to the gate accuses the daemon
+ * of a fault whenever a tab sits in the background — and forces a slow pane open part-way
+ * through its own replay.
+ *
  * This is what happens when the marker does **not** arrive, which a v2 daemon only does by
  * violating its own protocol or by losing the frame to a full outbox. Long enough that a
  * large replay under a tight credit window is never mistaken for one, short enough that a
