@@ -434,6 +434,13 @@ describe('the connection', () => {
   it('gives up rather than looping when waiting cannot help', async () => {
     // A protocol mismatch never resolves itself. A window that kept saying "reconnecting"
     // would be lying about what it is waiting for.
+    //
+    // **And the loop has to actually end.** `daemon_connect` starts a daemon when it finds
+    // none — the spawn lock, the process, twenty seconds of waiting for it to answer — so a
+    // loop that retried this answer would start one process every twenty-odd seconds for the
+    // life of the window. Asserting the status alone passed against exactly that code: the
+    // snapshot said `failed` while the loop went on connecting underneath it. Awaiting `run`
+    // is what makes the difference observable — it never resolves unless the loop returns.
     const daemon = new FakeDaemon();
     daemon.failures.set('daemon_connect', {
       message: 'this build speaks protocol v1, which is outside v2..=v2',
@@ -449,10 +456,22 @@ describe('the connection', () => {
       }),
       retryDelaysMs: [0],
     });
-    void store.run();
+    const running = store.run();
 
-    await until(() => store.getSnapshot().status === 'failed');
+    const dials = (): number =>
+      daemon.calls.filter((call) => call.command === 'daemon_connect').length;
+
+    await running;
+    expect(store.getSnapshot().status).toBe('failed');
     expect(store.getSnapshot().errors[0]?.message).toContain('protocol');
+    expect(dials()).toBe(1);
+
+    // Nothing dials again afterwards, which is the part a user would have seen as a daemon
+    // log growing by a line every twenty seconds. The fixture's refusal is one-shot, so a
+    // loop that retried would not merely try again — it would *succeed*, and the window
+    // would end up ready on a build it had just refused to speak to.
+    await until(() => dials() > 1, 20);
+    expect(dials()).toBe(1);
     store.dispose();
   });
 
