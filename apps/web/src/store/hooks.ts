@@ -54,6 +54,12 @@ export function useSnapshot(): StoreSnapshot {
  * call site. That was the shape this package spent a PR removing everywhere else: a
  * component reading through a hook and then reaching past it for the object to write to is
  * two routes to one thing, and the second is the one that gets copied.
+ *
+ * The pair is memoised because pairing them means building an object, and a fresh object
+ * every render is a dependency array that never settles for whoever consumes this next.
+ * `failures` is the whole dependency list: the sink is created once at module scope and
+ * never reassigned, so `dismiss` is the same function for the life of the window, and
+ * `getSnapshot` hands back the same array until the list actually changes.
  */
 export interface UnexpectedFailures {
   readonly failures: readonly StoreError[];
@@ -66,5 +72,5 @@ export function useUnexpectedFailures(): UnexpectedFailures {
     unexpectedFailures.getSnapshot,
     unexpectedFailures.getSnapshot,
   );
-  return { failures, dismiss: unexpectedFailures.dismiss };
+  return useMemo(() => ({ failures, dismiss: unexpectedFailures.dismiss }), [failures]);
 }
