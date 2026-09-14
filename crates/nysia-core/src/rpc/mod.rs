@@ -88,7 +88,9 @@ pub(crate) mod testing;
 
 pub use client::{Client, ClientError};
 pub use control::{ControlError, ControlReader, ControlWriter, MAX_CONTROL_LINE_BYTES};
-pub use discovery::{Discovered, DiscoveryError, SpawnPolicy, discover};
+pub use discovery::{
+    Discovered, DiscoveryError, EnsureError, Ensured, Probed, SpawnPolicy, discover, ensure_daemon,
+};
 pub use endpoint::{
     ENDPOINT_VAR, Endpoint, EndpointResolveError, EnvSource, Listening, RUNTIME_DIR_VAR,
 };
