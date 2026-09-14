@@ -32,6 +32,15 @@
     of its own, which on Windows reaches the pipe name as well as the directory, so the app it
     launches finds this daemon and no other.
 
+    **Step 4 types, and then proves that typing could have caught something.** Comparing the
+    screen either side of an attach only catches phantom input that *echoes*, and the reported
+    defect did not echo: F3 put a recalled line into the editor without submitting it, and the
+    user's next command ran concatenated onto it. So after the comparison the step sends a
+    command of its own and asserts a whole screen line equal to a token the shell computed —
+    which a concatenated line cannot produce — and then repeats it with two characters left
+    sitting in the editor and asserts the same check fails. A check with no demonstration that
+    it can fail is the one this replaces (#44).
+
 .PARAMETER Step
     Which step to run. See the description.
 
@@ -83,6 +92,37 @@ $script:Recipe = @{
     cmd      = @('set /a NYS=6*7', 'echo NYSIA-%NYS%')
     git_bash = @('echo "NYSIA-$((6*7))"')
 }
+
+# The second token: computed by the shell *after* the relaunch, which is the half of the
+# re-attach defect a screen comparison cannot see.
+#
+# Neither token contains the other, deliberately. The reported defect was `echo STILL-ALIVE`
+# running as `echo NYSIA-%NYS%echo STILL-ALIVE` — a line whose *output* still contains the
+# second token as a substring. A check that searched for it would have passed on the very
+# corruption it was written for. What is asserted instead is a whole screen line equal to the
+# token, which the concatenation cannot produce.
+$script:Reattach = 'NYSIA-REATTACH-84'
+$script:ReattachRecipe = @{
+    pwsh     = @('Write-Output ("NYSIA" + "-REATTACH-" + (2*42))')
+    cmd      = @('set /a RE=2*42', 'echo NYSIA-REATTACH-%RE%')
+    git_bash = @('echo "NYSIA-REATTACH-$((2*42))"')
+}
+
+# The same shape again, over a variable nothing has set, for the control that proves the check
+# above can fail. A second recipe rather than a re-run of the first: after the real check `RE`
+# holds 84, so a control that reused it would print the token even with its first line broken
+# and would report a working check as working for the wrong reason.
+$script:Control = 'NYSIA-CONTROL-21'
+$script:ControlRecipe = @{
+    pwsh     = @('Write-Output ("NYSIA" + "-CONTROL-" + (3*7))')
+    cmd      = @('set /a CO=3*7', 'echo NYSIA-CONTROL-%CO%')
+    git_bash = @('echo "NYSIA-CONTROL-$((3*7))"')
+}
+
+# What the control leaves sitting in the line editor: two characters nobody submitted. The
+# defect leaves a whole recalled command line there, but the property under test is "something
+# was waiting", and two characters are the smallest version of it this can type.
+$script:Prepended = 'X_'
 
 $script:StatePath = Join-Path $RuntimeDir 'walking-skeleton.state.json'
 
@@ -149,6 +189,77 @@ function Get-ShellPids {
     return ,$pids
 }
 
+# The rendered screen the daemon holds: what a person looking at the pane would see.
+function Read-Screen {
+    param([Parameter(Mandatory)] [string] $Handle)
+
+    return Invoke-NysiaOk -Nysia $Nysia -Arguments @(
+        'terminal', 'read', $Handle, '--screen', '--no-spawn'
+    )
+}
+
+# The scrolled-out lines as well as the viewport, for a claim about something that may have
+# scrolled off the top by the time it is checked.
+function Read-Scrollback {
+    param([Parameter(Mandatory)] [string] $Handle)
+
+    return Invoke-NysiaOk -Nysia $Nysia -Arguments @(
+        'terminal', 'read', $Handle, '--stream', '--no-spawn'
+    )
+}
+
+# Let the session settle. `idle` is a heuristic by construction — a repainting TUI never truly
+# stops — but a shell that has finished a command does, and every wait here is for one of those.
+function Wait-Idle {
+    param([Parameter(Mandatory)] [string] $Handle, [int] $TimeoutMs = 20000)
+
+    $null = Invoke-Nysia -Nysia $Nysia -Arguments @(
+        'terminal', 'wait', $Handle, '--for', 'idle', '--timeout-ms', "$TimeoutMs", '--no-spawn'
+    )
+}
+
+# Type at the session the way the daemon's own clients do, and wait for what it produced.
+function Send-Line {
+    param(
+        [Parameter(Mandatory)] [string] $Handle,
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Text,
+        [switch] $NoEnter
+    )
+
+    $arguments = @('terminal', 'send', $Handle, '--text', $Text)
+    if (-not $NoEnter) { $arguments += '--enter' }
+    $arguments += '--no-spawn'
+    $null = Invoke-NysiaOk -Nysia $Nysia -Arguments $arguments
+    Wait-Idle -Handle $Handle
+}
+
+function Send-Recipe {
+    param([Parameter(Mandatory)] [string] $Handle, [Parameter(Mandatory)] [string[]] $Lines)
+
+    foreach ($line in $Lines) { Send-Line -Handle $Handle -Text $line }
+}
+
+# Ctrl-C, to leave a clean prompt behind for whatever runs next.
+function Clear-Prompt {
+    param([Parameter(Mandatory)] [string] $Handle)
+
+    $null = Invoke-NysiaOk -Nysia $Nysia -Arguments @(
+        'terminal', 'send', $Handle, '--interrupt', '--no-spawn'
+    )
+    Wait-Idle -Handle $Handle
+}
+
+# **A whole line, never a substring.** See `$script:Reattach` for why the difference is the
+# whole point: the corruption this looks for produces output that *contains* the token.
+function Test-HasLine {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Text, [Parameter(Mandatory)] [string] $Line)
+
+    foreach ($row in ($Text -split "`r?`n")) {
+        if ($row.Trim() -eq $Line) { return $true }
+    }
+    return $false
+}
+
 function Start-App {
     param([string] $Binary)
 
@@ -170,7 +281,7 @@ switch ($Step) {
     'start' {
         Write-Host '== step 1/6: start a daemon and launch the app ==' -ForegroundColor Cyan
         $daemonPid = Start-NysiaDaemon -Nysia $Nysia -RuntimeDir $RuntimeDir
-        $lease = Get-Content (Join-Path $RuntimeDir $script:LeaseFile) -Raw | ConvertFrom-Json
+        $lease = Get-Content (Get-NysiaLeasePath -RuntimeDir $RuntimeDir) -Raw | ConvertFrom-Json
         $appPid = Start-App -Binary $App
 
         Write-Check 'the daemon is listening' $true "pid $daemonPid, launch nonce $($lease.launchNonce)"
@@ -210,7 +321,7 @@ switch ($Step) {
         Assert-NoFailures
         $handle = $rows[0].handle
 
-        $screen = Invoke-NysiaOk -Nysia $Nysia -Arguments @('terminal', 'read', $handle, '--screen', '--no-spawn')
+        $screen = Read-Screen -Handle $handle
         Write-Check "the shell computed $($script:Token)" ($screen -match [regex]::Escape($script:Token))
         $shellPids = Get-ShellPids -DaemonPid ([int] $state['daemonPid'])
         Write-Check 'the daemon owns a shell process' ($shellPids.Count -ge 1) "pids $($shellPids -join ', ')"
@@ -257,9 +368,7 @@ switch ($Step) {
         Write-Check 'the same shell process is still running' $same `
             "was $(@($state['shellPids']) -join ', '), now $($shellPids -join ', ')"
 
-        $screen = Invoke-NysiaOk -Nysia $Nysia -Arguments @(
-            'terminal', 'read', $state['handle'], '--screen', '--no-spawn'
-        )
+        $screen = Read-Screen -Handle $state['handle']
         Write-Check "the screen still shows $($script:Token)" ($screen -match [regex]::Escape($script:Token))
 
         $state['step'] = 'closed'
@@ -274,6 +383,9 @@ switch ($Step) {
         Write-Host '== step 4/6: relaunch, and the tab comes back with its scrollback ==' -ForegroundColor Cyan
         $state = Read-State -Expected 'closed'
 
+        $handle = $state['handle']
+        $shell = $state['shell']
+
         # The screen as it stands with no window attached to it. Everything between here and
         # the comparison below is the app attaching, and the app attaching must not type
         # anything: a replay carries every terminal query the child ever wrote, a renderer
@@ -281,12 +393,12 @@ switch ($Step) {
         # and ConPTY reads the answer to a cursor-position report as F3 — which `cmd` treats as
         # recall-previous-command. This is the defect reported against v0.1, made into a check
         # rather than an instruction to look at the screen and notice.
-        $beforeAttach = Invoke-NysiaOk -Nysia $Nysia -Arguments @('terminal', 'read', $state['handle'], '--screen', '--no-spawn')
+        $beforeAttach = Read-Screen -Handle $handle
 
         $appPid = Start-App -Binary $state['appBinary']
 
         $daemonPid = [int] $state['daemonPid']
-        $lease = Get-Content (Join-Path $RuntimeDir $script:LeaseFile) -Raw | ConvertFrom-Json
+        $lease = Get-Content (Get-NysiaLeasePath -RuntimeDir $RuntimeDir) -Raw | ConvertFrom-Json
         Write-Check 'the daemon never restarted' `
             ($lease.pid -eq $daemonPid -and $lease.launchNonce -eq $state['launchNonce']) `
             "pid $($lease.pid), launch nonce $($lease.launchNonce)"
@@ -307,11 +419,11 @@ switch ($Step) {
         # Settle before comparing. A window that injected input produces output — the recalled
         # line is echoed — so waiting for the session to go quiet is what makes the comparison
         # meaningful rather than a race the fix happens to win.
-        $null = Invoke-Nysia -Nysia $Nysia -Arguments @('terminal', 'wait', $state['handle'], '--for', 'idle', '--timeout-ms', '20000', '--no-spawn')
+        Wait-Idle -Handle $handle
 
-        $screen = Invoke-NysiaOk -Nysia $Nysia -Arguments @('terminal', 'read', $state['handle'], '--screen', '--no-spawn')
+        $screen = Read-Screen -Handle $handle
         Write-Check "the scrollback still shows $($script:Token)" ($screen -match [regex]::Escape($script:Token))
-        Write-Check 'attaching typed nothing into the shell' ($screen -eq $beforeAttach) `
+        Write-Check 'attaching typed nothing the shell echoed' ($screen -eq $beforeAttach) `
             'the screen changed while the window attached, and nothing was typed at it'
         if ($screen -ne $beforeAttach) {
             Write-Host '--- before the window attached ---' -ForegroundColor DarkGray
@@ -319,6 +431,47 @@ switch ($Step) {
         }
         Write-Host '--- the screen the daemon holds ---' -ForegroundColor DarkGray
         Write-Host $screen
+
+        # **The check the screen comparison above is a proxy for**, and the reason it is not
+        # enough on its own (#44). That comparison catches phantom input only if it *echoes*,
+        # and it says nothing about what the child would do with the next thing typed at it.
+        # The reported defect was not an echo: F3 put a recalled line into the editor without
+        # submitting it, and the user's next command ran concatenated onto it — `echo
+        # STILL-ALIVE` ran as `echo NYSIA-%NYS%echo STILL-ALIVE`.
+        #
+        # So this types, and asserts the child ran exactly what was typed and nothing else: a
+        # whole screen line equal to a token the shell computed. The concatenation cannot
+        # produce one, because whatever was already in the editor is part of the line the shell
+        # parses, and either the command fails or its output carries the leftovers with it.
+        #
+        # What this deliberately does **not** do is assert that the replayed scrollback
+        # contained a query. There is no way to: the replay ring is raw bytes and
+        # `terminal read` hands back text with the escapes already stripped, so nothing a
+        # script can call can see one. The answer is not to assert a precondition it cannot
+        # reach but to stop depending on it — the claim below is about what the child ran, and
+        # the control after it proves the claim is one that can fail.
+        Write-Host ''
+        Write-Host "--- typing $($script:Reattach) at the re-attached session ---" -ForegroundColor DarkGray
+        Send-Recipe -Handle $handle -Lines $script:ReattachRecipe[$shell]
+        $typed = Read-Screen -Handle $handle
+        Write-Check "the shell ran exactly what was sent, and computed $($script:Reattach)" `
+            (Test-HasLine -Text $typed -Line $script:Reattach) `
+            'no line is that token alone; something was already in the line editor'
+
+        # Traps register #12: a gate ships with a proof that it trips. Two characters are put
+        # into the editor without a newline — which is the shape of the defect, a line nobody
+        # submitted — and the same recipe is sent after them. It must not produce its token.
+        # Without this the check above is a sentence about a property nothing has demonstrated
+        # it can observe, which is exactly the complaint #44 makes about the step it replaces.
+        Send-Line -Handle $handle -Text $script:Prepended -NoEnter
+        Send-Recipe -Handle $handle -Lines $script:ControlRecipe[$shell]
+        $control = Read-Screen -Handle $handle
+        Write-Check "that check fails when '$($script:Prepended)' is waiting at the prompt" `
+            (-not (Test-HasLine -Text $control -Line $script:Control)) `
+            "$($script:Control) appeared even with something prepended, so the check above proves nothing"
+        Clear-Prompt -Handle $handle
+        Write-Host '--- after the assertion and its control ---' -ForegroundColor DarkGray
+        Write-Host (Read-Screen -Handle $handle)
 
         $state['step'] = 'relaunched'
         $state['appPid'] = $appPid
@@ -329,9 +482,9 @@ switch ($Step) {
         Write-Host 'NOW LOOK AT THE WINDOW. The criterion is met only if all three hold:' -ForegroundColor Yellow
         Write-Host '  - the tab is back, with the same title, and its age is the session age, not 0s;'
         Write-Host "  - the pane shows the scrollback, $($script:Token) included;"
-        Write-Host '  - typing in it still works, and the prompt is empty before you type —'
-        Write-Host '    a command you never typed sitting at the prompt is the re-attach defect,'
-        Write-Host '    and the check above fails on it rather than leaving it for you to spot.'
+        Write-Host "  - the pane also shows $($script:Reattach), then the failed control below it,"
+        Write-Host '    and typing in it still works. The script typed those two itself through the'
+        Write-Host '    daemon; what it cannot do is type at the *window*, so try a line of your own.'
         Write-Host ''
         Write-Host 'Then: -Step upgraded -NewAppBinary <path>, or -Step finish.' -ForegroundColor Yellow
     }
@@ -364,7 +517,7 @@ switch ($Step) {
 
         $appPid = Start-App -Binary $state['appBinary']
 
-        $lease = Get-Content (Join-Path $RuntimeDir $script:LeaseFile) -Raw | ConvertFrom-Json
+        $lease = Get-Content (Get-NysiaLeasePath -RuntimeDir $RuntimeDir) -Raw | ConvertFrom-Json
         Write-Check 'the daemon never restarted across the upgrade' `
             ($lease.pid -eq [int] $state['daemonPid'] -and $lease.launchNonce -eq $state['launchNonce']) `
             "pid $($lease.pid), launch nonce $($lease.launchNonce)"
@@ -376,8 +529,13 @@ switch ($Step) {
             ((@(Compare-Object $shellPids @($state['shellPids'])).Count -eq 0)) `
             "pids $($shellPids -join ', ')"
 
-        $screen = Invoke-NysiaOk -Nysia $Nysia -Arguments @('terminal', 'read', $state['handle'], '--screen', '--no-spawn')
-        Write-Check "the scrollback survived the upgrade" ($screen -match [regex]::Escape($script:Token))
+        # The scrollback, not the screen. Step 4 types at the session twice after its own
+        # checks — the assertion it makes and the control that proves the assertion can fail —
+        # so the token this looks for may have scrolled off the top of a short pane by now.
+        # Read against the viewport alone, a pass would mean "the pane is short" as readily as
+        # "the scrollback survived".
+        $scrollback = Read-Scrollback -Handle $state['handle']
+        Write-Check "the scrollback survived the upgrade" ($scrollback -match [regex]::Escape($script:Token))
 
         $state['step'] = 'upgraded'
         $state['appPid'] = $appPid
