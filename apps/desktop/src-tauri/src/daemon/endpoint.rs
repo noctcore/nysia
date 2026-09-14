@@ -142,18 +142,12 @@ pub fn open(listening: &Listening) -> Result<Box<dyn Socket>, DaemonError> {
                 .security_qos_flags(SECURITY_IDENTIFICATION)
                 .open(name)
                 .map(|pipe| Box::new(pipe) as Box<dyn Socket>)
-                .map_err(|error| DaemonError::Unreachable {
-                    endpoint: name.clone(),
-                    cause: error.to_string(),
-                })
+                .map_err(|error| dial_failure(name.clone(), &error))
         }
         #[cfg(not(windows))]
         Listening::UnixSocket(path) => std::os::unix::net::UnixStream::connect(path)
             .map(|socket| Box::new(socket) as Box<dyn Socket>)
-            .map_err(|error| DaemonError::Unreachable {
-                endpoint: path.display().to_string(),
-                cause: error.to_string(),
-            }),
+            .map_err(|error| dial_failure(path.display().to_string(), &error)),
 
         // Resolution is shared, so the wrong variant can only come from an explicit
         // `NYSIA_ENDPOINT` naming the other platform's transport. Refused with the endpoint
@@ -168,6 +162,41 @@ pub fn open(listening: &Listening) -> Result<Box<dyn Socket>, DaemonError> {
         Listening::NamedPipe(name) => Err(DaemonError::Endpoint(format!(
             "{name} is a Windows named pipe, which this build cannot dial"
         ))),
+    }
+}
+
+/// Which dial failures mean *nothing is listening*, and which mean something else went wrong.
+///
+/// **The same two kinds `nysia_core::rpc::transport::connect` treats that way, and no more.**
+/// [`DaemonError::Unreachable`] is not a generic "could not connect": it is the one answer
+/// that lets [`crate::state::Client::connect`] take the spawn lock and start a daemon, so
+/// every failure folded into it is a failure that starts a process instead of reporting
+/// itself.
+///
+/// The two that do mean it:
+///
+/// - **`NotFound`** — on Windows a pipe name that does not exist is the whole of "no daemon",
+///   because the name *is* the object and stops existing with the last handle.
+/// - **`ConnectionRefused`**, on Unix only, where a socket file outlives its daemon and
+///   refuses the connection. Classifying only `NotFound` there would leave the macOS window
+///   unable to start a daemon over a post-crash socket for as long as the file was there.
+///
+/// Everything else is [`DaemonError::Io`]: retryable, so the window keeps dialling, but never
+/// a reason to spawn. A busy pipe (`ERROR_PIPE_BUSY`) means a daemon is *right there* and all
+/// its instances are in use; an access denial means one is there and this caller may not talk
+/// to it. Spawning against either produced a daemon that could not bind, twenty seconds of
+/// waiting, and then a complaint pointing at a log whose only line says the endpoint is
+/// already held.
+fn dial_failure(endpoint: String, error: &std::io::Error) -> DaemonError {
+    let absent = matches!(error.kind(), std::io::ErrorKind::NotFound)
+        || (cfg!(unix) && matches!(error.kind(), std::io::ErrorKind::ConnectionRefused));
+    if absent {
+        DaemonError::Unreachable {
+            endpoint,
+            cause: error.to_string(),
+        }
+    } else {
+        DaemonError::Io(format!("could not open {endpoint}: {error}"))
     }
 }
 
@@ -373,6 +402,60 @@ mod tests {
             outgoing: Vec::new(),
             incoming: Cursor::new(format!("{json}\n").into_bytes()),
         }) as Box<dyn Socket>)
+    }
+
+    #[test]
+    fn only_the_kinds_core_calls_absent_are_reported_as_nothing_listening() {
+        // The window may start a daemon when — and only when — it sees this answer, so the
+        // set has to be the one `nysia_core::rpc::transport::connect` uses. A busy pipe or an
+        // access denial means something *is* listening: spawning against it produces a daemon
+        // that cannot bind, twenty seconds of waiting, and a log line saying so.
+        let dial = |kind: std::io::ErrorKind| {
+            dial_failure(
+                "the endpoint".to_owned(),
+                &std::io::Error::new(kind, "as it happens"),
+            )
+        };
+
+        assert!(
+            matches!(
+                dial(std::io::ErrorKind::NotFound),
+                DaemonError::Unreachable { .. }
+            ),
+            "a name that does not exist is the whole of `no daemon`"
+        );
+        // Unix only: a socket file outlives its daemon and refuses. On Windows a refusal is
+        // not how an absent pipe presents, so it stays an error there.
+        let refused = dial(std::io::ErrorKind::ConnectionRefused);
+        if cfg!(unix) {
+            assert!(
+                matches!(refused, DaemonError::Unreachable { .. }),
+                "a stale socket refuses, and the window has to be able to replace its daemon"
+            );
+        } else {
+            assert!(matches!(refused, DaemonError::Io(_)), "got {refused:?}");
+        }
+
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::Other,
+        ] {
+            let failure = dial(kind);
+            assert!(
+                matches!(failure, DaemonError::Io(_)),
+                "{kind:?} became {failure:?}, which is a licence to start a second daemon"
+            );
+            assert!(
+                failure.retryable(),
+                "{kind:?} must still have the window keep dialling"
+            );
+            assert!(
+                failure.to_string().contains("the endpoint"),
+                "{kind:?} lost the endpoint it was about: {failure}"
+            );
+        }
     }
 
     #[test]
