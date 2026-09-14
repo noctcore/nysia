@@ -227,25 +227,37 @@ const PALETTE_CLASS = new RegExp(
  *    comment — this module has one carrying a backtick — and fall silent over everything
  *    after it. That failure is quiet and this one is not, so this one stays. Marking a
  *    property up in prose is safe; putting a separator after it is what fires. *
- * ## Why this list keeps growing
+ * ## What kind of list that is — read this before adding to it
  *
- * Read the two lists above together and they say one thing. Every round of review has found
- * another *position* this rule reads wrongly — a property flush against its colon, then one
- * behind a ternary, then a quoted key, then a custom property, then a JSX container, then
- * whichever branch the quantifier reached last — and each was closed by spelling that
- * position out. That is not a run of bad luck. "Is this string the value of a painting
- * property" is a question about syntax, and every answer here is a pattern over characters.
- * A pattern can be made right about a position somebody has thought of; it cannot be made
- * right about position, because it has no idea what one is. The false positives say the
- * same thing from the other side: an operand, a branch, a key and a comment are four
- * different things that look identical to a regex.
+ * Nearly every entry above is *positional*. Not "this colour is hard to recognise" — the
+ * words are a fixed list and recognising one is trivial — but "the rule did not know that
+ * *this place* in the text was where the value goes". A property flush against its colon,
+ * then one behind a ternary, then a quoted key, then a custom property, then a JSX
+ * expression container, then whichever branch a greedy quantifier reached last: five rounds
+ * of review, five new positions, each closed by spelling that one out. The false positives
+ * are the same fact from the other side — an operand, a branch, a key and a comment are
+ * four different things that look identical to a pattern over characters.
  *
- * The answer is to walk a TypeScript syntax tree — find JSX attributes, object-literal
- * properties and assignment targets whose key paints, and look at the value — which is the
- * same argument that took the architecture rules from a lexer to a parser. No spans, no
- * greedy quantifiers, no ordering accidents, and most of the residue above stops existing
- * rather than being described. That is deliberate separate work, tracked as its own issue,
- * and not another patch on this one.
+ * So: that list is **a property of this implementation, not of the problem**. Whether a
+ * string is the value of a painting property is a question about syntax, and a regular
+ * expression cannot answer a question about syntax — it can be made right about a position
+ * someone has already thought of, never about position itself, because it has no notion of
+ * one. Nothing in the list is there because finding hardcoded colours is inherently hard.
+ *
+ * Which is why the next change to this rule should not be another entry. Issue #45 rewrites
+ * it as a walk over the TypeScript syntax tree — JSX attributes, object-literal properties
+ * and assignment targets whose key paints, then look at the value — and the positional
+ * entries above do not get better documentation there, they stop existing. No spans, no
+ * greedy quantifiers, no ordering accidents, and no sixth position waiting to be found. The
+ * two entries that would survive are the genuinely non-syntactic ones: a colour reached
+ * through a variable, which needs types, and bare CSS inside a string, which needs a CSS
+ * parser rather than a TypeScript one.
+ *
+ * The precedent is next door. The architecture rules hand-rolled a lexer for the same class
+ * of question, hit the same run of positional misses, and deleted it for a syntax-tree walk
+ * this round; their rules module lost around six hundred lines in the exchange. If you are
+ * reading this list in six months and it has grown again, that is the fix — not another
+ * bullet.
 
  */
 const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
