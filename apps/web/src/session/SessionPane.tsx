@@ -62,6 +62,16 @@ export function SessionPane() {
  * The copy names what v0.1 can actually do. The `+` menu does offer Claude, but starting it
  * opens a pty running `claude`, not the agent surface — so the promise made here is a
  * terminal, and the transcript-and-prompt half is dated rather than implied.
+ *
+ * It also names the control the way the control names itself. The line used to read *press
+ * the `+` in the title bar*, and both halves of that were wrong for anyone not looking at
+ * the screen: the button is announced as **New session**, so a listener went hunting for a
+ * control called plus, and there is no keyboard shortcut for *press* to be about (#40). The
+ * accessible name is the copy now, and the glyph beside it is `aria-hidden` decoration —
+ * the sentence read aloud and the sentence on screen point at the same button.
+ *
+ * `SessionPane.render.test.ts` takes that name from `NewTabButton` rather than repeating
+ * the string, so renaming the button fails this copy instead of quietly parting from it.
  */
 function NoSession() {
   return (
@@ -74,8 +84,11 @@ function NoSession() {
       </div>
       <div className="text-row font-semibold">No session open</div>
       <p className="text-fg2 text-term leading-normal">
-        Press <span className="text-fg font-mono">{GLYPH.add}</span> in the title bar to open
-        a shell.
+        Choose{' '}
+        <span aria-hidden="true" className="text-fg font-mono">
+          {GLYPH.add}
+        </span>{' '}
+        <span className="text-fg">New session</span> in the title bar to open a shell.
       </p>
       <p className="text-fg3 text-chip leading-normal">
         Every v0.1 session is a terminal, and you type into the terminal itself. The agent
