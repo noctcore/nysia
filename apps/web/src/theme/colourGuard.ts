@@ -423,12 +423,57 @@ export function scanForColourLiterals(
 export const TOKEN_DEFINITION_MODULES: readonly string[] = ['src/theme/themes.ts'];
 
 /**
- * The one stylesheet in the package, which is the Tailwind `@theme` block itself.
+ * The one stylesheet `src` owns, which is the Tailwind `@theme` block itself.
  *
  * Its contents cannot be scanned: vitest runs with CSS processing off, so a `?raw` import
  * of a stylesheet comes back empty, and turning it on is a change to the shared root
  * `vitest.config.ts`. The guard covers the same ground a different way — it asserts this is
- * the *only* stylesheet in `apps/web`, so a second one cannot appear without failing here
- * and forcing the colours in it to be reviewed.
+ * the only stylesheet *under `src`*, so a second one cannot appear without failing here and
+ * forcing the colours in it to be reviewed.
+ *
+ * The qualifier is the point, and it used to be missing: the sentence here claimed the only
+ * stylesheet in `apps/web`, which is a claim about the bundle, and the check behind it is a
+ * glob rooted at this file. A stylesheet a dependency ships and a module imports by package
+ * name is outside that glob and inside the built CSS. There is one today — reading the built
+ * output rather than the source is what found it — and it carries a hex background, a hex
+ * foreground, a colour function and a data URI painting a path, none of which any rule here
+ * has ever seen. {@link DEPENDENCY_STYLESHEETS} is the honest half of the claim.
  */
 export const TOKEN_DEFINITION_STYLESHEETS: readonly string[] = ['src/index.css'];
+
+/**
+ * Every stylesheet the package pulls in from a dependency, by the specifier that pulls it.
+ *
+ * Not an allowlist of things that are *fine*: the one entry paints pixels this guard cannot
+ * check and has no token in it. It is a list of what is known, so the set cannot grow by
+ * accident. A dependency stylesheet arrives in one line of somebody else's module, bundles
+ * into the built CSS, and is invisible to every rule above — which is the same failure mode
+ * as the accent module being invisible to the property prefix, arriving from outside the
+ * package instead of from inside it.
+ *
+ * Adding an entry is the review: it says a reviewer looked at what that stylesheet paints
+ * and at whether the theme can reach it.
+ */
+export const DEPENDENCY_STYLESHEETS: readonly string[] = ['@xterm/xterm/css/xterm.css'];
+
+/**
+ * A stylesheet imported for its side effect by package name rather than by path.
+ *
+ * Relative specifiers are excluded because the glob already sees those. This module's own
+ * source cannot match it: the pattern wants literal whitespace where the source has the two
+ * characters that stand for it.
+ */
+const DEPENDENCY_STYLESHEET_IMPORT = /import\s+['"]((?!\.)[^'"]+\.css)['"]/g;
+
+/** Which dependency stylesheets `files` pull in, deduplicated and ordered. */
+export function findDependencyStylesheets(
+  files: readonly ScannedFile[],
+): readonly string[] {
+  const found = new Set<string>();
+  for (const file of files) {
+    for (const match of file.source.matchAll(DEPENDENCY_STYLESHEET_IMPORT)) {
+      found.add(match[1] ?? '');
+    }
+  }
+  return [...found].sort();
+}
