@@ -128,12 +128,36 @@ expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dynstore.ts', 
 // carries — not everything whose name begins with it.
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/main.helper.tsx', 12);
 
+// #19. Four more spellings of the same call, each of which passed lint-meta, ESLint, tsc
+// *and* the Vite build while the rule claimed to match any path ending in `StoreContext`.
+// Exact lines, because the locator is half of what makes the rule usable.
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dyn-template.ts', 5);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dyn-multiline.ts', 6);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dyn-blockcomment.ts', 5);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dyn-glob.ts', 5);
+
+// The false-negative guards. Scanning a whole file rather than a line at a time means the
+// scanner has to know where comments end, and a literal that opens one it never closes
+// blanks every line below it — the rule then reports nothing and the gate reports success.
+// Each literal sits alone in its own file: a later quote or `*/` anywhere would close the
+// runaway and rescue the import by accident, which is how a first attempt at the astral
+// fixtures passed while the defect was still there.
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/str-block-open.ts', 9);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/str-line-open.ts', 4);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/str-template-open.ts', 4);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/str-escaped-quote.ts', 5);
+
 expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
 process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');
 // The clean fixture also reaches StoreContext by call from store/ and from main.tsx. If
 // rule (d) stopped honouring its allowlist those two would report and the line above would
 // fail, which is what stops the carve-out silently becoming a ban.
 process.stdout.write('  clean: store/** and main.tsx may reach the provider by call\n');
+// And the two shapes rule (d) must not report, both of which `apps/web` really contains:
+// comments that discuss the ban in the exact words of the ban, and the glob imports that
+// read source text or stylesheets rather than modules. Without these the rule could be
+// widened until it reported everything, which is the other way to stop being a gate.
+process.stdout.write('  clean: comments may discuss the ban, raw and css globs may run\n');
 
 // ---------------------------------------------------------------------------------------
 // Rules (b) and (c) — cargo's own resolution of a real workspace.

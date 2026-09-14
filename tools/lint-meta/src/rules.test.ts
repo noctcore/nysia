@@ -1,9 +1,17 @@
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { CargoMetadataError } from './cargoGraph.ts';
 import { findRepoRoot } from './repoRoot.ts';
-import { blankRustComments, runCargoRules, runSourceRules, walk } from './rules.ts';
+import {
+  blankJsComments,
+  blankRustComments,
+  runCargoRules,
+  runSourceRules,
+  walk,
+} from './rules.ts';
 
 const repoRoot = findRepoRoot();
 const fixture = (name: string): string => join(repoRoot, 'tools/lint-meta/fixtures', name);
@@ -216,5 +224,132 @@ describe('the cargo dependency rules', () => {
 
   it('pass against the real repository', () => {
     expect(runCargoRules(repoRoot)).toEqual([]);
+  });
+});
+
+/*
+ * Rule (d) reads whole files, so it has to know where a comment ends. The dangerous
+ * direction is over-blanking: a literal the scanner does not recognise opens a comment it
+ * never closes, every call below goes invisible, and the gate keeps reporting success.
+ */
+describe('blankJsComments', () => {
+  it('keeps every byte position so line numbers stay right', () => {
+    const source = ["const a = 1; // import('./store/StoreContext')", '/* x */ const b = 2;'].join(
+      '\n',
+    );
+    const blanked = blankJsComments(source);
+
+    expect(blanked).toHaveLength(source.length);
+    expect(blanked.split('\n')).toHaveLength(2);
+    expect(blanked).toContain('const a = 1;');
+    expect(blanked).toContain('const b = 2;');
+    expect(blanked).not.toContain('StoreContext');
+  });
+
+  it('leaves the code after a block comment on the same line', () => {
+    // The #19 spelling. The old guard threw away any line whose trim started with `/*`.
+    const source = "/* lazily */ const s = await import('../store/StoreContext');\n";
+    expect(blankJsComments(source)).toContain("import('../store/StoreContext')");
+  });
+
+  it.each([
+    ['a block-comment opener in a string', 'const OPEN = "/*";'],
+    ['a line-comment opener in a string', "const LINE = '//';"],
+    ['a block-comment opener in a template', 'const T = `/*`;'],
+    ['an escaped quote before one', 'const E = "he said \\"/*\\"";'],
+    ['a URL', "const U = 'https://example.test/*';"],
+    ['both quote characters inside a regex', "const R = /['\"]/;"],
+  ])('does not let %s swallow the call after it', (_what, literal) => {
+    const source = `${literal}\nconst s = await import('../store/StoreContext');\n`;
+    const blanked = blankJsComments(source);
+
+    expect(blanked).toHaveLength(source.length);
+    expect(blanked).toContain("import('../store/StoreContext')");
+  });
+
+  it('blanks a comment that spans lines, and only that', () => {
+    const source = [
+      '/*',
+      " * await import('../store/StoreContext') — prose about the ban.",
+      ' */',
+      "const s = await import('../store/StoreContext');",
+    ].join('\n');
+    const blanked = blankJsComments(source);
+
+    expect(blanked).toHaveLength(source.length);
+    expect(blanked.split('\n')[1]?.trim()).toBe('');
+    expect(blanked).toContain("const s = await import('../store/StoreContext');");
+  });
+
+  it('refuses to return a string of a different length than it was given', () => {
+    const astral = `// ${'\u{1F525}'.repeat(30)}\nconst s = await import('./StoreContext');\n`;
+    expect(blankJsComments(astral)).toHaveLength(astral.length);
+    expect(blankJsComments(astral)).toContain("import('./StoreContext')");
+  });
+});
+
+/*
+ * `import.meta.glob` returns modules the specifier never names, so no specifier test can
+ * decide it. Rule (d) reports one by default and reads the two exits off the call.
+ */
+describe('rule (d) and glob imports', () => {
+  /** One webview file in a throwaway tree, run through the real rule. */
+  const scan = (relative: string, source: string): string[] => {
+    const root = mkdtempSync(join(tmpdir(), 'nysia-rules-'));
+    try {
+      const absolute = join(root, relative);
+      mkdirSync(dirname(absolute), { recursive: true });
+      writeFileSync(absolute, source);
+      return runSourceRules(root)
+        .filter((v) => v.rule === 'no-store-context-outside-store')
+        .map((v) => v.message);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  const WEBVIEW_FILE = 'apps/web/src/chrome/Probe.ts';
+
+  it.each([
+    ['an unrestricted glob', "export const m = import.meta.glob('../store/*');"],
+    ['a glob over bundled extensions', "export const m = import.meta.glob('../**/*.{ts,tsx}');"],
+    ['the eager spelling', "export const m = import.meta.globEager('../**/*.ts');"],
+    // The query belongs to a different call; reading it off this one would be the bug.
+    [
+      'a raw glob beside a live one',
+      "export const m = [\n  import.meta.glob('../a/*.ts', { query: '?raw' }),\n" +
+        "  import.meta.glob('../store/*.ts'),\n];",
+    ],
+  ])('reports %s', (_what, source) => {
+    expect(scan(WEBVIEW_FILE, source)).toContain(
+      'glob-imports modules it does not name, so it may hand back the store provider; ' +
+        'only apps/web/src/store/** and apps/web/src/main.* may touch it. Read the files as ' +
+        "text with query: '?raw', or pin the glob to an extension that cannot be a module",
+    );
+  });
+
+  it.each([
+    [
+      'source text rather than modules',
+      "export const m = import.meta.glob('../**/*.{ts,tsx}', {\n  query: '?raw',\n" +
+        "  import: 'default',\n  eager: true,\n});",
+    ],
+    ['an extension that cannot be a module', "export const m = import.meta.glob('../**/*.css');"],
+    ['a query written into the pattern', "export const m = import.meta.glob('../**/*.ts?raw');"],
+  ])('allows a glob returning %s', (_what, source) => {
+    expect(scan(WEBVIEW_FILE, source)).toEqual([]);
+  });
+
+  it('says nothing about a specifier that is not a literal', () => {
+    // The honest limit, pinned so it is a known gap rather than a surprise: reading source
+    // text cannot resolve a name. ESLint's no-restricted-imports is equally blind to the
+    // static equivalent, and `rules.ts` says so at the rule (#19).
+    const computed = "const where = '../store/' + 'StoreContext';\nexport const s = await import(where);\n";
+    expect(scan(WEBVIEW_FILE, computed)).toEqual([]);
+  });
+
+  it('leaves the carve-outs alone', () => {
+    expect(scan('apps/web/src/store/loader.ts', "export const m = import.meta.glob('./*.ts');")).toEqual([]);
+    expect(scan('apps/web/src/main.tsx', "export const m = import.meta.glob('./store/*.ts');")).toEqual([]);
   });
 });
