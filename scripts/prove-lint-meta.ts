@@ -224,6 +224,17 @@ expectLine(
 );
 expectMessage(trips, 'renderer-must-mute-replies', 'never calls muteTerminalReplies()');
 
+// And the module that constructs nothing and is reported anyway: a bare re-export hands the
+// constructor on under this module's name, so whoever builds a terminal from it names
+// `./reexport` and a rule that matches on specifiers stops seeing the library at all.
+expectLine(
+  trips,
+  'renderer-must-mute-replies',
+  'apps/web/src/transport/surface/reexport.ts',
+  7,
+);
+expectMessage(trips, 'renderer-must-mute-replies', 're-exports Terminal');
+
 expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
 process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');
 // The clean fixture also reaches StoreContext by call from store/ and from main.tsx. If
@@ -240,6 +251,13 @@ process.stdout.write('  clean: comments may discuss the ban, raw and css globs m
 // builds one. A rule matching every `@xterm/xterm` subpath would oblige a stylesheet to call
 // a function, and a clean fixture with no stylesheet in it would never have said so.
 process.stdout.write('  clean: a muted terminal passes, and a stylesheet builds nothing\n');
+// And the three modules rule (e) must not oblige, which are the over-reports it shipped
+// with: `import type { Terminal }`, the per-specifier `{ type Terminal }` that
+// `verbatimModuleSyntax` keeps as a statement, and a script that reaches past the package
+// for `EscapeSequenceParser` alone. None of the three builds a terminal, and lint-meta has
+// no suppression mechanism, so a module reported here has no way out but to stop importing
+// the thing it needs.
+process.stdout.write('  clean: a type-only import and a lone parser oblige nothing\n');
 
 // ---------------------------------------------------------------------------------------
 // Rules (b) and (c) — cargo's own resolution of a real workspace.

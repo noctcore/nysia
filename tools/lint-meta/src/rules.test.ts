@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { CargoMetadataError } from './cargoGraph.ts';
-import { callSites } from './moduleReferences.ts';
+import { callSites, importedValues, reExports } from './moduleReferences.ts';
 import { findRepoRoot } from './repoRoot.ts';
 import {
   blankRustComments,
@@ -213,6 +213,98 @@ describe('a renderer that answers queries the daemon has already answered', () =
       rmSync(scratch, { recursive: true, force: true });
     }
   });
+  it('obliges nothing of a module that only names the type', () => {
+    // The over-report this rule shipped with. Both spellings erase — `import type { … }` and
+    // the per-specifier `{ type … }`, which `verbatimModuleSyntax` keeps as a statement while
+    // binding no value from it — so neither module can construct anything to mute. lint-meta
+    // has no suppression mechanism, so a module reported here has no way out but to stop
+    // importing the type it needs.
+    for (const [name, spelling] of [
+      ['types.ts', 'import type { Terminal }'],
+      ['inline.ts', 'import { type ITerminalOptions, type Terminal }'],
+    ]) {
+      const file = `apps/web/src/transport/surface/${name}`;
+      expect(readFileSync(join(fixture('clean'), file), 'utf8'), file).toContain(spelling);
+      expect(noUnmutedRenderer(fixture('clean'), [file]), file).toEqual([]);
+    }
+  });
+
+  it('obliges nothing of a script that reaches past the package for the parser alone', () => {
+    // The realistic trigger, not a hypothetical one: the executed proof of this parser's
+    // handler ordering imports `EscapeSequenceParser` from a deep path and constructs one.
+    // That is a value, from a build of the library, and it builds no terminal.
+    const file = 'scripts/ordering.test.ts';
+    const source = readFileSync(join(fixture('clean'), file), 'utf8');
+    expect(source, file).toContain("from '@xterm/xterm/src/common/parser/EscapeSequenceParser'");
+    expect(source, 'the fixture must construct it, or it proves nothing').toContain('new EscapeSequenceParser()');
+    expect(noUnmutedRenderer(fixture('clean'), [file])).toEqual([]);
+  });
+
+  it('still obliges a module that renames the class as it imports it', () => {
+    // What the narrowing must not open. The rule reads what the library exports, not what
+    // the importer calls it, so an alias hides nothing.
+    const file = 'apps/web/src/transport/surface/aliased.ts';
+    const source = [
+      "import { Terminal as T } from '@xterm/xterm';",
+      'export const build = (): T => new T({ cols: 80, rows: 24 });',
+    ].join('\n');
+
+    const scratch = mkdtempSync(join(tmpdir(), 'lint-meta-alias-'));
+    try {
+      mkdirSync(join(scratch, 'apps/web/src/transport/surface'), { recursive: true });
+      writeFileSync(join(scratch, file), source, 'utf8');
+      expect(noUnmutedRenderer(scratch, [file])).toHaveLength(1);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a module that hands the constructor on under its own name', () => {
+    // A re-export launders the specifier: whoever builds the terminal then imports it from
+    // here, and a rule that matches on specifiers stops seeing the library. Reported rather
+    // than obliged — this module constructs nothing, so a mute call here would be a lie.
+    const file = 'apps/web/src/transport/surface/reexport.ts';
+    const violations = noUnmutedRenderer(fixture('trips'), [file]);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]?.line).toBe(7);
+    expect(violations[0]?.message).toContain('re-exports Terminal');
+  });
+});
+
+describe('what a module binds from another', () => {
+  const read = (source: string): string[] =>
+    importedValues('x.ts', source).map((value) => `${value.imported} as ${value.local}`);
+
+  it('reads type-ness at the clause and at each specifier', () => {
+    expect(read("import type { Terminal } from '@xterm/xterm';")).toEqual([]);
+    expect(read("import { type Terminal } from '@xterm/xterm';")).toEqual([]);
+    // One `type` specifier does not make its neighbour one.
+    expect(read("import { type Terminal, FitAddon } from '@xterm/xterm';")).toEqual([
+      'FitAddon as FitAddon',
+    ]);
+  });
+
+  it('keeps the exported name and the local one apart', () => {
+    expect(read("import { Terminal as T } from '@xterm/xterm';")).toEqual(['Terminal as T']);
+    expect(read("import Term from '@xterm/xterm';")).toEqual(['default as Term']);
+    expect(read("import * as xterm from '@xterm/xterm';")).toEqual(['* as xterm']);
+    // A side-effect import binds nothing, which is what a stylesheet is.
+    expect(read("import '@xterm/xterm/css/xterm.css';")).toEqual([]);
+  });
+
+  it('separates a re-export from an import, and erases a type-only one', () => {
+    const names = (source: string): string[][] =>
+      reExports('x.ts', source).map((re) => [...re.names]);
+
+    expect(read("export { Terminal } from '@xterm/xterm';")).toEqual([]);
+    expect(names("export { Terminal } from '@xterm/xterm';")).toEqual([['Terminal']]);
+    expect(names("export * from '@xterm/xterm';")).toEqual([['*']]);
+    expect(names("export type { Terminal } from '@xterm/xterm';")).toEqual([]);
+    expect(names("export { type Terminal, FitAddon } from '@xterm/xterm';")).toEqual([
+      ['FitAddon'],
+    ]);
+  });
+
 });
 
 describe('the cargo dependency rules', () => {
