@@ -669,17 +669,21 @@ describe('the documented residue', () => {
     ).toEqual([]);
   });
 
-  it('does fire on a comparison operand that spells a colour', () => {
-    // The price of reading every chunk rather than the last one. An operand and a branch
-    // are both quoted literals inside the same span, and nothing in the text says which is
-    // which — that is a question about syntax, and this rule reads characters. Half of it
-    // was already here: when the operand happened to be the last literal in range it was
-    // taken as the value, so the shape fired or stayed quiet depending on what came after.
-    expect(
-      findColourLiterals(`style={{ color: tier === 'gold' ? a : 'inherit' }}`).map(
-        (c) => c.kind,
-      ),
-    ).toEqual(['named-colour']);
+  it('does fire on any literal in the value expression, not only the value', () => {
+    // The price of reading every chunk rather than the last one, and it is wider than a
+    // comparison: an operand, a discarded branch and a lookup key are all quoted literals
+    // in the same span, and nothing in the text says which of them the property is set to.
+    // Half of it was already here — whichever literal the quantifier reached last was taken
+    // as the value outright, so these fired or stayed quiet by accident of what came after.
+    for (const expression of [
+      `style={{ color: tier === 'gold' ? a : 'inherit' }}`,
+      `style={{ color: palette['gold'] ?? shade }}`,
+      `style={{ color: labelFor(kind) === 'navy' ? a : b }}`,
+    ]) {
+      expect(findColourLiterals(expression).map((c) => c.kind), expression).toEqual([
+        'named-colour',
+      ]);
+    }
   });
 
   it('does fire on a table keyed by colour name whose values are prose', () => {
