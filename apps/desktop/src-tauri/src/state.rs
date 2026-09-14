@@ -29,6 +29,16 @@ use nysia_proto::handshake::{ClientRole, DaemonIdentity};
 use nysia_proto::identity::SessionHandle;
 use nysia_proto::stream::{StreamAttach, StreamDetach, StreamId};
 
+/// How long [`Client::attach_session`] keeps retrying a refusal the daemon called retryable.
+///
+/// Long enough to cover a daemon binding its stream hub just after the handshake, short
+/// enough that a session which genuinely cannot be attached still says so while the user is
+/// looking at the pane.
+const ATTACH_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The pause between those attempts.
+const ATTACH_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Which stream id belongs to which session, in both directions.
 ///
 /// Shared between the control plane, which learns the mapping from `stream_attach`, and the
@@ -335,9 +345,17 @@ impl Client {
             return Ok(existing);
         }
 
-        let answer = self.request(RequestPayload::StreamAttach(StreamAttach {
-            handle: handle.clone(),
-        }))?;
+        // Retried while the daemon says the attempt could still work. The two connections
+        // are independent: `connect` returns once the daemon has answered the control
+        // `hello`, which is a moment before it has served the *stream* connection's
+        // handshake and bound the hub that a stream id would route to. An attach in that gap
+        // is refused with `retryable`, and the refusal is marked so precisely because the
+        // race is ordinary rather than a fault.
+        //
+        // Today a `session_list` round trip happens to sit in front of this and usually
+        // hides the gap. That is luck, not ordering — nothing makes it true, and a window
+        // whose first attach lost the race put a pane on screen that no output ever reached.
+        let answer = self.attach_once(&handle)?;
         let ResponsePayload::StreamAttach(attached) = answer else {
             return Err(DaemonError::Protocol(format!(
                 "stream_attach was answered with a {} payload",
@@ -353,6 +371,34 @@ impl Client {
         // which cannot race the frames the daemon is already entitled to send. See
         // `daemon::stream::route`.
         Ok(attached.stream_id)
+    }
+
+    /// Ask the daemon to route `handle`, retrying while it says another attempt could work.
+    ///
+    /// Bounded, and deliberately short: the only refusal this is meant to ride out is the
+    /// daemon binding the stream hub a moment after answering the handshake. Anything still
+    /// refusing after [`ATTACH_RETRY_BUDGET`] is a real answer and belongs in front of the
+    /// user, not in a loop.
+    ///
+    /// [`Self::request`] tears the connection down on an `Io` or `Protocol` failure, and
+    /// those are not retried here — reusing a socket that will never answer again is the
+    /// thing that teardown exists to prevent.
+    fn attach_once(&self, handle: &SessionHandle) -> Result<ResponsePayload, DaemonError> {
+        let deadline = std::time::Instant::now() + ATTACH_RETRY_BUDGET;
+        loop {
+            let attempt = self.request(RequestPayload::StreamAttach(StreamAttach {
+                handle: handle.clone(),
+            }));
+            let Err(refusal) = attempt else {
+                return attempt;
+            };
+            let worth_retrying =
+                matches!(&refusal, DaemonError::Daemon(envelope) if envelope.is_retryable());
+            if !worth_retrying || std::time::Instant::now() >= deadline {
+                return Err(refusal);
+            }
+            std::thread::sleep(ATTACH_RETRY_PAUSE);
+        }
     }
 
     /// Stop routing a session's output and release its credit.
