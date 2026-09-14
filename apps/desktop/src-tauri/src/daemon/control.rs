@@ -77,15 +77,47 @@ impl Control {
         Self {
             calls,
             worker: None,
-            identity: DaemonIdentity {
-                pid: 0,
-                started_at_ms: 0,
-                launch_nonce: "0e2fa1f4-4f3e-4c5f-9f2a-1b2c3d4e5f60"
-                    .parse()
-                    .expect("a well-formed nonce"),
-                app_version: "0.1.0".to_owned(),
-            },
+            identity: nowhere(),
         }
+    }
+
+    /// A control plane that accepts a verb and does not answer until a test says so.
+    ///
+    /// For the one property [`crate::state::Client::request`] has to hold: that the client
+    /// lock is free while a verb is in flight. Proving that needs a verb which is genuinely
+    /// in flight — [`Self::detached`] fails immediately and never occupies anything — and a
+    /// way to end it, so the returned [`Parked`] reports when a call has reached the worker
+    /// and releases it on demand.
+    ///
+    /// A real socket would do as well and cost a daemon, a handshake and a timing assumption.
+    #[cfg(test)]
+    pub fn parked() -> (Self, Parked) {
+        let (calls, inbox) = mpsc::channel::<Call>();
+        let (arrived, arrivals) = mpsc::channel::<()>();
+        let (release, releases) = mpsc::channel::<()>();
+
+        let worker = thread::Builder::new()
+            .name("nysia-control-parked".to_owned())
+            .spawn(move || {
+                while let Ok(call) = inbox.recv() {
+                    // Announce first, hold second. A test that waited for the announcement
+                    // knows the caller is past the lock and blocked on the answer, which is
+                    // the only moment at which the question is worth asking.
+                    let _ = arrived.send(());
+                    let _ = releases.recv();
+                    let _ = call.answer.send(Err(DaemonError::Disconnected));
+                }
+            })
+            .ok();
+
+        (
+            Self {
+                calls,
+                worker,
+                identity: nowhere(),
+            },
+            Parked { arrivals, release },
+        )
     }
 
     /// Who answered the handshake.
@@ -125,6 +157,41 @@ impl Control {
 impl Drop for Control {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// The handle on a [`Control::parked`] plane: it says when a verb arrived and lets it go.
+#[cfg(test)]
+pub struct Parked {
+    arrivals: mpsc::Receiver<()>,
+    release: Sender<()>,
+}
+
+#[cfg(test)]
+impl Parked {
+    /// Block until a verb has reached the worker and is waiting for its answer.
+    pub fn in_flight(&self) {
+        let _ = self
+            .arrivals
+            .recv_timeout(std::time::Duration::from_secs(10));
+    }
+
+    /// Let the held verb finish, so the caller blocked on it can return.
+    pub fn release(&self) {
+        let _ = self.release.send(());
+    }
+}
+
+/// The identity of a control plane with no daemon behind it.
+#[cfg(test)]
+fn nowhere() -> DaemonIdentity {
+    DaemonIdentity {
+        pid: 0,
+        started_at_ms: 0,
+        launch_nonce: "0e2fa1f4-4f3e-4c5f-9f2a-1b2c3d4e5f60"
+            .parse()
+            .expect("a well-formed nonce"),
+        app_version: "0.1.0".to_owned(),
     }
 }
 

@@ -210,7 +210,17 @@ enum RuntimeBinary {
 
 /// Everything one connection owns.
 struct Connected {
-    control: Control,
+    /// Shared rather than owned outright, so a verb can be issued with the lock released.
+    ///
+    /// [`Client::request`] clones this, drops the guard, and only then waits for the answer —
+    /// which is the whole of the module rule above, applied to the hottest path in the file.
+    /// Two consequences follow and both are wanted. The connection stays alive for as long as
+    /// a verb is in flight on it, so tearing it down never blocks on a round trip that may run
+    /// for minutes: the last `Arc` to go runs `Control`'s drop, on whichever thread holds it.
+    /// And the pointer is the connection's identity, which is what
+    /// [`Client::disconnect_control`] compares — a reconnect installs a *different* `Control`,
+    /// so a failure reported by the old one can no longer take down the new one.
+    control: Arc<Control>,
     /// `None` until the webview has handed over its `Channel`.
     stream: Option<Stream>,
     identity: DaemonIdentity,
@@ -635,7 +645,7 @@ impl Client {
             return Ok(settled);
         }
         *held = Some(Connected {
-            control,
+            control: Arc::new(control),
             stream: None,
             identity: identity.clone(),
             // No generation yet, deliberately. Generations number *stream* connections, and
@@ -658,15 +668,41 @@ impl Client {
     /// [`Self::connect`] starts a fresh one instead of reusing a socket that will never
     /// answer again.
     ///
+    /// ## The round trip does not happen under the client lock
+    ///
+    /// The guard is taken to read which connection is live and dropped again before the
+    /// answer is waited for. Holding it across the trip broke this module's one rule on its
+    /// busiest path: a verb blocks on the control worker, so every other command — and, far
+    /// worse, [`Self::rendered`], which takes the same lock — queued behind it.
+    ///
+    /// That is not only a delay between commands. Credit comes back through `rendered` and
+    /// nothing else, so while a slow verb held the lock no pane could return any. `session
+    /// create` opens a pty and three threads, seconds of it on Windows, and `terminal wait` is
+    /// a verb a caller may hold open for minutes. Once a busy pane spent its allowance the
+    /// daemon's pump stopped reading that pty and the child blocked in `write(2)` — so one
+    /// slow verb stalled output on **every** pane, not just its own.
+    ///
+    /// It was a stall and never a deadlock, which is what decided this shape. The daemon
+    /// cannot make a control reply wait on stream progress: `StreamSink::send` returns
+    /// `Blocked` rather than blocking, `OwnedSession::attach` abandons its replay on the first
+    /// refusal, the output pump sleeps with the terminal-state lock dropped, and an attach's
+    /// answer is written before its replay is enqueued. Had any of those waited, releasing the
+    /// lock would not have been enough and the ack would have needed a path that bypasses it
+    /// altogether.
+    ///
     /// # Errors
     ///
     /// [`DaemonError::Disconnected`] when nothing is attached, or whatever the daemon said.
     pub fn request(&self, payload: RequestPayload) -> Result<ResponsePayload, DaemonError> {
-        let outcome = {
+        // Cloned, not borrowed: the guard has to be gone before the wait, and the `Arc` is
+        // also what says *which* connection this answer is about.
+        let control = {
             let held = self.lock()?;
             let connected = held.as_ref().ok_or(DaemonError::Disconnected)?;
-            connected.control.request(payload)
+            Arc::clone(&connected.control)
         };
+
+        let outcome = control.request(payload);
 
         if let Err(error) = &outcome
             && matches!(
@@ -674,7 +710,13 @@ impl Client {
                 DaemonError::Io(_) | DaemonError::Protocol(_) | DaemonError::Disconnected
             )
         {
-            self.disconnect();
+            // **Only this connection.** With the lock released for the length of the trip, a
+            // reconnect can install a replacement while a verb is still in flight on the old
+            // socket — and the old socket failing is exactly what a reconnect follows. An
+            // unconditional teardown here would then throw away the healthy connection that
+            // replaced it, and the window would announce it had no daemon moments after
+            // finding one.
+            self.disconnect_control(&control);
         }
         outcome
     }
@@ -907,12 +949,20 @@ impl Client {
         let _unused = signal.wait_while(observed, |current| *current == seen);
     }
 
-    /// Tear the connection down and wake every waiter.
+    /// Tear the connection down and wake every waiter, whichever one is live.
     ///
     /// The connection is taken out under the lock and dropped **after** it is released.
     /// Dropping a `Connected` drops its `Stream`, and although that only signals rather than
     /// joins, doing it outside the lock keeps the rule in this module's docs exact: nothing
     /// touches another thread's lifetime while holding the client lock.
+    ///
+    /// **Tests only, and that is the point.** Every production teardown now names the thing it
+    /// means to close — [`Self::disconnect_control`] or [`Self::disconnect_generation`] —
+    /// because each of them can be reached by something that outlived the connection it
+    /// belongs to. An unconditional version left on the ordinary path is exactly how a late
+    /// failure takes down the healthy connection that replaced it, so what is left here is
+    /// reachable only from a test, where "close whatever is open" is what is meant.
+    #[cfg(test)]
     pub fn disconnect(&self) {
         let taken = self.lock().ok().and_then(|mut held| held.take());
         drop(taken);
@@ -948,6 +998,34 @@ impl Client {
         }
     }
 
+    /// Tear the connection down **only if** `control` is still the live one.
+    ///
+    /// The sibling of [`Self::disconnect_generation`], for the other race that a lock released
+    /// across IO creates. That one guards a *stream* reader outliving its reload; this one
+    /// guards a *control* verb outliving its connection — [`Self::request`] no longer holds
+    /// the lock while it waits, so by the time a failure comes back the connection it was
+    /// issued on may already have been replaced by a working one.
+    ///
+    /// Identity is the pointer rather than a number, because there is already something that
+    /// is unique per control connection and it is the connection itself. A counter beside it
+    /// would be a second answer to the same question, free to disagree with the first.
+    fn disconnect_control(&self, control: &Arc<Control>) {
+        let taken = self.lock().ok().and_then(|mut held| {
+            let live = held
+                .as_ref()
+                .is_some_and(|c| Arc::ptr_eq(&c.control, control));
+            if live { held.take() } else { None }
+        });
+
+        // Nothing to announce when it did not match: the connection that failed was already
+        // gone, and waking `daemon_watch` would have the store reconnect away from a
+        // connection that is working.
+        if taken.is_some() {
+            drop(taken);
+            self.announce_edge();
+        }
+    }
+
     /// Wake everything waiting on a connection-lifecycle edge.
     fn announce_edge(&self) {
         let (count, signal) = &*self.edges;
@@ -962,11 +1040,37 @@ impl Client {
     /// It holds no stream, exactly as it would between [`Self::connect`] and the first
     /// [`Self::attach_channel`]. Nothing behind it is real; that is enough for the one thing
     /// these tests ask — whether a dying reader is allowed to tear this down.
+    /// Pretend a control connection is live, on a plane that parks mid-verb.
+    ///
+    /// The sibling of [`Self::pretend_connected`], for the tests that need a verb to be
+    /// genuinely *in flight* rather than merely refused. The returned handle says when one has
+    /// reached the worker and lets it go again.
+    #[cfg(test)]
+    fn pretend_parked(&self) -> crate::daemon::control::Parked {
+        let (control, parked) = Control::parked();
+        if let Ok(mut held) = self.lock() {
+            *held = Some(Connected {
+                control: Arc::new(control),
+                stream: None,
+                identity: DaemonIdentity {
+                    pid: std::process::id(),
+                    started_at_ms: 0,
+                    launch_nonce: "0e2fa1f4-4f3e-4c5f-9f2a-1b2c3d4e5f60"
+                        .parse()
+                        .expect("a well-formed nonce"),
+                    app_version: "0.1.0".to_owned(),
+                },
+                stream_generation: None,
+            });
+        }
+        parked
+    }
+
     #[cfg(test)]
     fn pretend_connected(&self) {
         if let Ok(mut held) = self.lock() {
             *held = Some(Connected {
-                control: Control::detached(),
+                control: Arc::new(Control::detached()),
                 stream: None,
                 identity: DaemonIdentity {
                     pid: std::process::id(),
@@ -1487,6 +1591,84 @@ mod tests {
                 "a generation repeated"
             );
         }
+    }
+
+    /// #25: what queues behind a verb, and why it is not only other verbs.
+    ///
+    /// `rendered` is how credit gets back to the daemon and there is no other path. It takes
+    /// the client lock, so while `request` held that lock for a whole round trip no pane could
+    /// return any — and once a busy pane spent its allowance the daemon's pump stopped reading
+    /// that pty and the child blocked in `write(2)`. One `session create`, seconds of it on
+    /// Windows, stalled output on every pane in the window.
+    ///
+    /// The probe runs on a thread of its own so that a regression **fails** instead of hanging
+    /// the suite: with the lock held across the trip it would wait for ever, and a test that
+    /// hangs says far less than one that reports.
+    #[test]
+    fn a_verb_in_flight_does_not_hold_the_lock_the_render_ack_needs() {
+        let client = Client::new();
+        let parked = client.pretend_parked();
+
+        let caller = client.clone();
+        let verb = std::thread::spawn(move || {
+            caller.request(RequestPayload::SessionList(
+                nysia_proto::session::SessionList {},
+            ))
+        });
+        parked.in_flight();
+
+        let (answered, probe) = std::sync::mpsc::channel();
+        let probing = client.clone();
+        std::thread::spawn(move || {
+            // The result does not matter — no stream is attached, so this refuses. That it
+            // *returns at all* is the property.
+            let _ = answered.send(probing.rendered(StreamId::FIRST, 1).is_err());
+        });
+
+        assert!(
+            probe
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "the render ack could not take the client lock while a verb was in flight"
+        );
+
+        parked.release();
+        let _ = verb.join();
+    }
+
+    /// The other half of releasing the lock: a failure must not outlive its own connection.
+    ///
+    /// With the lock held for the whole trip this could not happen. Without it, a reconnect
+    /// can install a working connection while a verb is still in flight on the old socket —
+    /// and the old socket failing is exactly what a reconnect follows. An unconditional
+    /// teardown on the error path would throw the replacement away, and the window would
+    /// announce it had no daemon moments after finding one.
+    #[test]
+    fn a_verb_that_fails_cannot_tear_down_the_connection_that_replaced_its_own() {
+        let client = Client::new();
+        let parked = client.pretend_parked();
+
+        let caller = client.clone();
+        let verb = std::thread::spawn(move || {
+            caller.request(RequestPayload::SessionList(
+                nysia_proto::session::SessionList {},
+            ))
+        });
+        parked.in_flight();
+
+        // The reconnect, while that verb is still waiting: a different `Control` entirely.
+        client.pretend_connected();
+        assert!(client.identity().is_some());
+
+        // Now let the old one fail. `Disconnected` is on the fatal list, so the unguarded
+        // version would take whatever was live.
+        parked.release();
+        assert!(verb.join().expect("the caller returns").is_err());
+
+        assert!(
+            client.identity().is_some(),
+            "a failure on a superseded control connection tore down the live one"
+        );
     }
 
     #[test]
