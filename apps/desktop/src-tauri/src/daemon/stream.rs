@@ -376,23 +376,11 @@ fn read(
                 }
             };
 
-            match route(frame, table, &mut ledger, dispatcher) {
-                Routed::Continue => {}
-                Routed::DropConnection => return,
-                Routed::Await(frame) => {
-                    if matches!(hold(&mut pending, *frame), Routed::DropConnection) {
-                        return;
-                    }
-                    // Again straight away: the control worker can record the id in the
-                    // moment between `route` reading the table and this line, and the next
-                    // pass may not come until the daemon sends something else.
-                    if matches!(
-                        settle_pending(&mut pending, table, &mut ledger, dispatcher),
-                        Routed::DropConnection
-                    ) {
-                        return;
-                    }
-                }
+            if matches!(
+                route_or_hold(frame, &mut pending, table, &mut ledger, dispatcher),
+                Routed::DropConnection
+            ) {
+                return;
             }
         }
     }
@@ -407,6 +395,44 @@ enum Routed {
     Await(Box<Frame>),
     /// The peer and this client disagree about what is on the wire.
     DropConnection,
+}
+
+/// Route one decoded frame, or add it to what is already held for its stream.
+///
+/// **The pending buffer is consulted before the table, and that ordering is the whole fix.**
+/// Between frame one of a read buffer being held and frame two of the *same* buffer being
+/// decoded, the control worker can record the id. [`route`]'s known branch would then deliver
+/// frame two on the spot while frame one waited for the next pass — and because both came out
+/// of one buffer they are adjacent bytes of one session's output, so the replay's opening
+/// chunk paints *after* the output that followed it and the pane stays garbled until something
+/// forces a full redraw. Credit accounting is correct either way, which is why nothing
+/// downstream ever noticed.
+fn route_or_hold(
+    frame: Frame,
+    pending: &mut Option<Pending>,
+    table: &Arc<Mutex<StreamTable>>,
+    ledger: &mut CreditLedger,
+    dispatcher: &Dispatcher,
+) -> Routed {
+    if pending
+        .as_ref()
+        .is_some_and(|held| held.stream == frame.stream)
+    {
+        return hold(pending, frame);
+    }
+
+    match route(frame, table, ledger, dispatcher) {
+        Routed::Await(frame) => {
+            if matches!(hold(pending, *frame), Routed::DropConnection) {
+                return Routed::DropConnection;
+            }
+            // Again straight away: the control worker can record the id in the moment between
+            // `route` reading the table and this line, and the next pass may not come until
+            // the daemon sends something else.
+            settle_pending(pending, table, ledger, dispatcher)
+        }
+        other => other,
+    }
 }
 
 /// Send one frame to its session, or decide what to do because it has none.
@@ -715,6 +741,46 @@ mod tests {
         }
     }
 
+    /// A sink that remembers every window it was handed, so a test can ask about **order**.
+    ///
+    /// [`Counting`] cannot: a count is the same whichever way round two frames arrived, which
+    /// is exactly why the ordering defect below survived every test over this file.
+    #[derive(Clone, Default)]
+    struct Recording {
+        windows: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl Recording {
+        /// The output payloads delivered so far, in order, across every window.
+        fn payloads(&self) -> Vec<Vec<u8>> {
+            let windows = self
+                .windows
+                .lock()
+                .expect("no test panics while holding this");
+            let mut decoder = FrameDecoder::new();
+            for window in windows.iter() {
+                decoder.push(window);
+            }
+            let mut payloads = Vec::new();
+            while let Some(frame) = decoder.next_frame().expect("valid frames") {
+                if frame.kind == FrameKind::Output {
+                    payloads.push(frame.payload);
+                }
+            }
+            payloads
+        }
+    }
+
+    impl FrameSink for Recording {
+        fn deliver(&self, bytes: Vec<u8>) -> Result<(), String> {
+            self.windows
+                .lock()
+                .map_err(|_| "recorder poisoned".to_owned())?
+                .push(bytes);
+            Ok(())
+        }
+    }
+
     struct Harness {
         /// Dropping this unparks a reader waiting on an exhausted script.
         _open: Option<mpsc::Sender<()>>,
@@ -804,6 +870,65 @@ mod tests {
     fn output(stream: StreamId, len: usize) -> Vec<u8> {
         nysia_proto::frame::encode(&Frame::new(FrameKind::Output, stream, vec![b'x'; len]))
             .expect("a frame under the ceiling")
+    }
+
+    /// A held frame overtaken by a later one decoded from the **same read buffer**.
+    ///
+    /// Every test around this one feeds a script holding a single frame, so none of them can
+    /// express this: the stream has to become known *between* two frames that came out of one
+    /// read. Through the socket that is a race nothing can schedule, which is why the defect
+    /// sat here unobserved — so this drives the per-frame step directly instead. No threads
+    /// and no sleeps: the interleaving is the assertion rather than something to wait for.
+    ///
+    /// What it costs when it goes wrong is a pane, not a byte. Credit accounting stays correct
+    /// either way and nothing downstream complains; the replay's opening chunk simply paints
+    /// after the output that followed it, and the session stays garbled until something forces
+    /// a full redraw.
+    #[test]
+    fn a_held_frame_is_not_overtaken_by_a_later_one_from_the_same_read_buffer() {
+        let recorder = Recording::default();
+        let mut dispatcher = Dispatcher::spawn(recorder.clone());
+        let table = Arc::new(Mutex::new(StreamTable::new()));
+        let mut ledger = CreditLedger::new(CreditWindow::DEFAULT);
+        let mut pending: Option<Pending> = None;
+
+        // Frame one: nothing attached, so the id sits exactly at the watermark and is held.
+        let first = Frame::new(FrameKind::Output, StreamId::FIRST, b"first".as_slice());
+        assert!(!matches!(
+            route_or_hold(first, &mut pending, &table, &mut ledger, &dispatcher),
+            Routed::DropConnection
+        ));
+        assert!(
+            pending.is_some(),
+            "the opening frame must be held, not routed"
+        );
+
+        // The control worker records the id — between the two frames of one read buffer.
+        table
+            .lock()
+            .expect("fresh")
+            .remember(StreamId::FIRST, handle(1));
+
+        // Frame two, out of that same buffer. Before the fix this took `route`'s known branch
+        // and went straight to the sink, ahead of the frame still sitting in `pending`.
+        let second = Frame::new(FrameKind::Output, StreamId::FIRST, b"second".as_slice());
+        assert!(!matches!(
+            route_or_hold(second, &mut pending, &table, &mut ledger, &dispatcher),
+            Routed::DropConnection
+        ));
+
+        // What the top of the next pass does.
+        assert!(!matches!(
+            settle_pending(&mut pending, &table, &mut ledger, &dispatcher),
+            Routed::DropConnection
+        ));
+        dispatcher.shutdown();
+
+        assert_eq!(
+            recorder.payloads(),
+            vec![b"first".to_vec(), b"second".to_vec()],
+            "the pane must paint in the order the daemon wrote"
+        );
     }
 
     /// The flagship re-attach path: a frame that beats the response that names its id.
