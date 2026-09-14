@@ -245,6 +245,23 @@ describe('findColourLiterals', () => {
     ).toEqual(['named-colour']);
   });
 
+  it('finds a colour through the other two setters that take a property name', () => {
+    // Coverage the narrowing lost. Before the comma form was tied to a named call these
+    // were caught, by the same accident that caught every unrelated two-argument call; the
+    // fix for the accident took them with it. The namespaced setter puts its namespace
+    // first, so the name is the second argument rather than the first, and the typed-OM
+    // map spells the verb on its own.
+    for (const written of [
+      `el.setAttributeNS(null, 'fill', 'red');`,
+      `el.setAttributeNS('http://www.w3.org/2000/svg', 'stroke', 'navy');`,
+      `el.attributeStyleMap.set('fill', 'red');`,
+    ]) {
+      expect(findColourLiterals(written).map((c) => c.kind), written).toContain(
+        'named-colour',
+      );
+    }
+  });
+
   it('finds a colour under a quoted key', () => {
     // The quote between the property and the colon used to break the match.
     expect(findColourLiterals("{ 'color': 'red' }").map((c) => c.kind)).toEqual([
@@ -544,10 +561,14 @@ describe('the documented residue', () => {
     expect(findColourLiterals("{ [`--color-${key}`]: 'red' }")).toEqual([]);
   });
 
-  it('misses a name and value written as a tuple for a setter to consume later', () => {
-    // The comma separator is spelled as part of the DOM call now. Before it was, a tuple
-    // table was caught — but so was every unrelated two-argument call with a property name
-    // in front of a string, which is the false positive that outweighed it.
+  it('misses a setter it does not name, and a tuple written for one it does', () => {
+    // The comma separator is spelled as part of a named call now. Before it was, both of
+    // these were caught — but so was every unrelated two-argument call with a property name
+    // in front of a string, which is the false positive that outweighed them. A project's
+    // own wrapper is indistinguishable from that false positive: same two arguments,
+    // different intent, nothing in the text to tell them apart.
+    expect(findColourLiterals(`applyStyle(el, 'color', 'red');`)).toEqual([]);
+    expect(findColourLiterals(`paint('background', 'navy');`)).toEqual([]);
     expect(findColourLiterals(`const pairs = [['--color-acc', 'red']];`)).toEqual([]);
     expect(
       findColourLiterals(`for (const [k, v] of pairs) root.style.setProperty(k, v);`),
