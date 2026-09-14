@@ -67,11 +67,14 @@ export function SessionPane() {
  * the `+` in the title bar*, and both halves of that were wrong for anyone not looking at
  * the screen: the button is announced as **New session**, so a listener went hunting for a
  * control called plus, and there is no keyboard shortcut for *press* to be about (#40). The
- * accessible name is the copy now, and the glyph beside it is `aria-hidden` decoration —
- * the sentence read aloud and the sentence on screen point at the same button.
+ * copy says the name now and keeps the glyph beside it as `aria-hidden` decoration, so the
+ * sentence read aloud and the sentence on screen point at the same button.
  *
- * `SessionPane.render.test.ts` takes that name from `NewTabButton` rather than repeating
- * the string, so renaming the button fails this copy instead of quietly parting from it.
+ * That name is a literal here rather than a shared constant, because it belongs to
+ * `NewTabButton` and `chrome/` is not this component's to export from. What holds the two
+ * together is `SessionPane.render.test.ts`: it renders that button, reads its `aria-label`
+ * and asserts this copy contains it. Rename the button and this line fails rather than
+ * quietly parting from it — but the string itself still has to be changed by hand.
  */
 function NoSession() {
   return (
