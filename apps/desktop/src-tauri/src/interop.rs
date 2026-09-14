@@ -381,6 +381,60 @@ fn a_flood_keeps_flowing_past_the_per_stream_ceiling() {
     );
 }
 
+/// **Blocked on the daemon half, and ignored until it lands — not passing, not deleted.**
+///
+/// Measured against the daemon on `main` at the time this was written: six runs in ten fail,
+/// and both causes are on the daemon's side of the seam. It reissues `StreamId(2)` rather
+/// than numbering per stream connection, and its hub and sinks are not keyed by connection —
+/// so the superseded connection's unbind closes sinks the new one owns and nothing reaches
+/// the pane. Neither is reachable from `apps/**`.
+///
+/// It is `#[ignore]`d rather than removed because it is the finished proof for the fix that
+/// is coming: remove the attribute once the daemon PR is in, and it either passes or says
+/// exactly what is still wrong. Run it with `cargo test -- --ignored a_reload`.
+#[test]
+#[ignore = "needs the daemon-side hub keying and per-connection stream ids; see the doc above"]
+fn a_reload_reattaches_over_a_second_stream_connection() {
+    // What a webview reload is, against the real daemon: the control connection stays, a
+    // second stream connection is opened under the same client id, every id learned on the
+    // first is void, and the sessions attach again. The daemon has to accept the second
+    // connection as the same client, and the ids it hands out have to route to the new sink.
+    let harness = Harness::start("reload");
+    let first = Webview::new();
+    let client = harness.window(first.clone());
+    first.acks_for(&client);
+
+    let handle = open_shell(&client);
+    let before = client
+        .attach_session(handle.clone())
+        .expect("attached once");
+
+    // The reload. `connect` short-circuits — the control socket is already held — and only
+    // the stream connection is replaced, which is the case the reader's generation exists
+    // for.
+    let second = Webview::new();
+    client
+        .attach_channel(second.clone())
+        .expect("a second stream connection opens under the same client id");
+    second.acks_for(&client);
+
+    let after = client
+        .attach_session(handle.clone())
+        .expect("the session attaches again on the new connection");
+    assert_ne!(
+        client.identity(),
+        None,
+        "the reload tore down a control connection that was working"
+    );
+
+    type_line(&client, &handle, "echo NYSIA-RELOADED");
+    assert!(
+        eventually(|| second.delivered(after) > 0),
+        "nothing reached the pane after the reload; it was attached as {after:?} \
+         (it held {before:?} before)"
+    );
+}
+
 /// The isolation this module's honesty rests on.
 ///
 /// If the scratch endpoint ever collided with the real one, these tests would bind over a
