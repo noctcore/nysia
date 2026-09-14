@@ -1200,6 +1200,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_hello_binds_nothing_and_leaves_the_stream_it_named_alone() {
+        // The other half of "bound before the answer, and after the vet". A bind *supersedes*
+        // whatever held that client id — closing its sinks, which can never be acked again,
+        // and waking its reader — so binding before the account check hands an unauthorised
+        // peer a way to take somebody else's live stream down by naming their id in a hello
+        // that is about to be refused. The refusal still goes out; the damage is already done.
+        //
+        // Driven through the serve loop rather than against `reject_reason`, because what is
+        // being asserted is not which answer the vet picks but that nothing reaches the
+        // registry before it picks one.
+        let endpoint = crate::rpc::endpoint::scratch("refused");
+        let (daemon, listener) = Daemon::bind(DaemonConfig {
+            idle_retire_after: None,
+            ..DaemonConfig::new(endpoint.clone())
+        })
+        .expect("binds");
+        let client_id: ClientId = "nysia-test".parse().expect("a well-formed client id");
+
+        // The client that is already here, with a session's output routed to it.
+        let mine = daemon.streams().bind(&client_id);
+        let live = daemon.streams().attach(&client_id).expect("attaches").sink;
+        let bound_before = daemon.streams().bound();
+
+        // A peer from another account, in the stream role, naming that client's id.
+        let theirs = PeerCredentials {
+            pid: Some(std::process::id()),
+            user: "them".to_owned(),
+            daemon_user: "me".to_owned(),
+        };
+        let (peer, ours) = tokio::io::duplex(4096);
+        let (ours_reader, ours_writer) = tokio::io::split(ours);
+        let (_peer_reader, peer_writer) = tokio::io::split(peer);
+        ControlWriter::new(peer_writer)
+            .write_frame(&HelloRequest::new(
+                PROTOCOL_VERSION,
+                ClientRole::Stream,
+                client_id.clone(),
+            ))
+            .await
+            .expect("the hello goes out");
+
+        // Returns as soon as the refusal is written; there is nothing to serve after one.
+        daemon
+            .serve_io(
+                ControlReader::new(ours_reader),
+                ControlWriter::new(ours_writer),
+                Some(theirs),
+            )
+            .await;
+
+        assert_eq!(
+            daemon.streams().bound(),
+            bound_before,
+            "a hello that is refused must bind nothing: the bind is what supersedes, so a \
+             peer that failed the account check reaching the registry at all is the failure"
+        );
+        assert!(
+            !live.is_closed(),
+            "the refused peer named somebody else's live stream, and a supersede closes \
+             sinks that can never be acked again — the session behind this one would stall \
+             for as long as the daemon runs"
+        );
+        assert_eq!(
+            daemon
+                .streams()
+                .attach(&client_id)
+                .map(|opened| opened.connection),
+            Some(mine.key),
+            "and the client id must still route to the connection that holds it, not to the \
+             one that was just turned away"
+        );
+
+        daemon.shutdown();
+        drop(listener);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    #[tokio::test]
     async fn every_hello_that_is_not_acceptable_is_refused_with_the_right_retryability() {
         let endpoint = crate::rpc::endpoint::scratch("hello");
         let (daemon, listener) = Daemon::bind(DaemonConfig::new(endpoint.clone())).expect("binds");
