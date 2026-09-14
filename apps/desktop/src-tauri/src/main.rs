@@ -22,6 +22,8 @@
 mod channel;
 mod commands;
 mod daemon;
+#[cfg(test)]
+mod interop;
 mod state;
 
 use std::process::ExitCode;

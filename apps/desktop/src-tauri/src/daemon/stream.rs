@@ -23,9 +23,9 @@
 //! spent. With one session those differ by three quarters of the budget, and the wrong
 //! question wedges the session on its first burst. See [`crate::channel::credit`].
 //!
-//! **It must write grants from the same pass that notices they are owed.** Credit is
-//! returned by this thread and no other, so anything that only happened on the render report
-//! that filled a batch would never happen at all for a burst that fell short of one.
+//! **It must write acks from the same pass that notices they are owed.** Credit is returned
+//! by this thread and no other, so anything that only happened on the render report that
+//! filled a batch would never happen at all for a burst that fell short of one.
 
 use std::io::{BufReader, Read};
 use std::sync::mpsc::{self, Sender};
@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use nysia_proto::credit::{CreditFrame, CreditGrant, CreditWindow};
+use nysia_proto::credit::{CreditAck, CreditFrame, CreditWindow};
 use nysia_proto::frame::{Frame, FrameDecoder, FrameKind};
 use nysia_proto::stream::{StreamId, UnattachedFrame};
 
@@ -170,13 +170,13 @@ fn apply(
             {
                 ledger.attach(stream);
             }
-            render_and_grant(ledger, socket, stream, bytes)
+            render_and_ack(ledger, socket, stream, bytes)
         }
     }
 }
 
 /// Return credit for `bytes` the webview rendered on `stream`. `false` means stop.
-fn render_and_grant(
+fn render_and_ack(
     ledger: &mut CreditLedger,
     socket: &mut BufReader<Box<dyn Socket>>,
     stream: StreamId,
@@ -187,7 +187,7 @@ fn render_and_grant(
         // race, not a fault: the pane went away while its last frames were still in
         // flight. There is no credit to return, and nothing to report.
         Err(crate::channel::credit::CreditError::UnknownStream(_)) | Ok(None) => true,
-        Ok(Some(grant)) => send_grant(socket, stream, &grant).is_ok(),
+        Ok(Some(ack)) => send_ack(socket, stream, ack).is_ok(),
         Err(error) => {
             // A webview claiming credit it was never given has made the ceiling
             // unenforceable. There is nothing to salvage.
@@ -197,18 +197,18 @@ fn render_and_grant(
     }
 }
 
-/// Return any credit that has been earned but not yet granted.
+/// Return any credit that has been earned but not yet acknowledged.
 ///
 /// Walked on every pass rather than only when a render report fills a batch: this thread is
 /// the only one that can write to the socket, so a burst that ended just short of a batch
 /// would otherwise sit on its credit until more output arrived — which it never would,
-/// because the daemon was waiting for exactly that grant.
-fn flush_grants(ledger: &mut CreditLedger, socket: &mut BufReader<Box<dyn Socket>>) -> bool {
-    for stream in ledger.streams_owing_a_grant() {
-        let Some(grant) = ledger.drain_grant(stream) else {
+/// because the daemon was waiting for exactly that ack.
+fn flush_acks(ledger: &mut CreditLedger, socket: &mut BufReader<Box<dyn Socket>>) -> bool {
+    for stream in ledger.streams_owing_an_ack() {
+        let Some(ack) = ledger.drain_ack(stream) else {
             continue;
         };
-        if send_grant(socket, stream, &grant).is_err() {
+        if send_ack(socket, stream, ack).is_err() {
             return false;
         }
     }
@@ -237,7 +237,7 @@ fn read(
                 return;
             }
         }
-        if !flush_grants(&mut ledger, &mut socket) {
+        if !flush_acks(&mut ledger, &mut socket) {
             return;
         }
 
@@ -393,15 +393,22 @@ fn adopt_window(ledger: &mut CreditLedger, payload: &[u8]) {
     }
 }
 
-/// Send a grant back up the stream socket.
-fn send_grant(
+/// Send an ack back up the stream socket.
+///
+/// **An ack, and never a grant.** The daemon is the producer: it owns the window, issues the
+/// allowance, and honours only [`CreditFrame::Ack`] — a grant arriving from a client is
+/// ignored, because a client claiming to set the window would be claiming to be the daemon.
+/// Sending grants from here was therefore silence: nothing replenished, and a flood stopped
+/// dead at `per_stream_initial` with the daemon's pump blocked behind it, which also froze
+/// `terminal read` for that session for the CLI and for hooks.
+fn send_ack(
     socket: &mut BufReader<Box<dyn Socket>>,
     stream: StreamId,
-    grant: &CreditGrant,
+    ack: CreditAck,
 ) -> Result<(), DaemonError> {
     use std::io::Write;
 
-    let payload = serde_json::to_vec(&CreditFrame::Grant(*grant))
+    let payload = serde_json::to_vec(&CreditFrame::Ack(ack))
         .map_err(|error| DaemonError::Protocol(error.to_string()))?;
     let wire = nysia_proto::frame::encode(&Frame::new(FrameKind::Credit, stream, payload))
         .map_err(|error| DaemonError::Protocol(error.to_string()))?;
@@ -419,6 +426,7 @@ mod tests {
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use nysia_proto::credit::CreditGrant;
     use nysia_proto::identity::SessionHandle;
 
     use super::*;
@@ -583,10 +591,14 @@ mod tests {
     /// One stream, spent to its per-stream ceiling while the shared total is still three
     /// quarters full, against a daemon that has correctly stopped sending. The earlier loop
     /// asked only whether the total was spent, went back into `read`, and never wrote the
-    /// grant that would have freed it. Nothing about the ledger was wrong, which is why a
+    /// ack that would have freed it. Nothing about the ledger was wrong, which is why a
     /// test on the ledger alone could not see this.
+    ///
+    /// It also pins the *shape* of what goes back, because the loop being unwedged is only
+    /// half of it: the daemon honours acks and ignores a grant from a client, so a reader
+    /// that wrote the wrong variant here was writing into a void that no gate could see.
     #[test]
-    fn a_stream_at_its_own_ceiling_still_gets_its_grant_written() {
+    fn a_stream_at_its_own_ceiling_gets_an_ack_written_not_a_grant() {
         let window = CreditWindow::DEFAULT;
         let stream_id = StreamId(1);
 
@@ -605,14 +617,37 @@ mod tests {
         harness.quiesce();
 
         // The webview renders a full batch. The reader is the only thing that can write the
-        // grant, and at this point it is out of per-stream credit — which is exactly the
+        // ack, and at this point it is out of per-stream credit — which is exactly the
         // state the old loop could not get out of.
         assert!(harness.stream.rendered(stream_id, window.ack_batch));
 
         assert!(
             eventually(|| !harness.written.lock().map(|w| w.is_empty()).unwrap_or(true)),
-            "no grant was ever written: the reader wedged with credit owed"
+            "nothing was ever written: the reader wedged with credit owed"
         );
+
+        let wire = harness
+            .written
+            .lock()
+            .expect("the recorder is not poisoned")
+            .clone();
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&wire);
+        let frame = decoder
+            .next_frame()
+            .expect("what the reader wrote is well framed")
+            .expect("a whole frame was written");
+        assert_eq!(frame.kind, FrameKind::Credit);
+        assert_eq!(frame.stream, stream_id);
+
+        let credit: CreditFrame =
+            serde_json::from_slice(&frame.payload).expect("the payload is a credit frame");
+        match credit {
+            CreditFrame::Ack(ack) => assert_eq!(ack.bytes, window.ack_batch),
+            CreditFrame::Grant(_) => panic!(
+                "the reader sent a grant; the daemon owns the window and honours only acks,                  so this replenishes nothing and the next flood stalls at the ceiling"
+            ),
+        }
     }
 
     #[test]
