@@ -111,6 +111,16 @@ const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
  *  - an object-literal property, including a quoted key and a computed key that is a
  *    literal — all three are the same node with a different `name`;
  *  - a variable or class-field declaration, `const color = …`;
+ *  - a default, wherever one can be written: a parameter's, a destructured binding's, an
+ *    enum member's. `function Dot({ color = 'red' })` is the ordinary React spelling of a
+ *    hardcoded colour, and the three of them are one branch because the language writes
+ *    them the same way. The pattern this replaced caught all of them by accident — it
+ *    matched an equals sign and did not care which kind — and the first version of this
+ *    walk dropped them, which is a gate getting narrower than the one it replaced;
+ *  - a destructuring declaration, which is read through the thing being taken apart rather
+ *    than through a name: `const [color, setColor] = useState('red')` is where the other
+ *    live React idiom keeps a colour, and it is the one declaration shape whose value is
+ *    not written next to the name that receives it. See {@link patternPaints};
  *  - an assignment, `el.style.color = …`, through a member, an index or a bare name;
  *  - one of the four DOM setters at {@link writtenProperty}, where the name is an argument.
  *
@@ -143,14 +153,15 @@ const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
  * the unlisted ones are precisely the shapes nobody thought of. Read this as the known blind
  * spots, which is useful, and not as the boundary of them, which it never was.
  *
- * Nine entries. Eight are vocabulary or value questions that survive a change of technique,
+ * Ten entries. Eight are vocabulary or value questions that survive a change of technique,
  * and they carried over from the pattern this replaced — but read them rather than counting
  * on that sentence, because two of the eight did move. The computed-key entry narrowed: a
  * key computed from a literal reads like any other key now, and only a name assembled at run
  * time is left. The library-key entry kept its shape and changed its reason: `pointBackground`
  * is outside the vocabulary because the vocabulary does not name it, where before it was a
- * word-boundary guard holding it out. The ninth entry is new, and it is the price of the
- * walk being narrow:
+ * word-boundary guard holding it out. The last two are new: the ninth is the price of the
+ * walk being narrow, and the tenth was missed by the pattern too and had simply never been
+ * written down:
  *
  *  - a colour that reaches CSS through a variable rather than a literal: the value is a
  *    name at the point where the rule looks, and what it holds is decided somewhere else,
@@ -194,7 +205,17 @@ const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
  *    stops everywhere else, and stopping is the point — it is what keeps a condition's
  *    operand and a lookup's key out of the answer. This one is new with the walk. The
  *    pattern it replaces read every literal in a span of characters, so it caught some of
- *    these by accident and reported the operands and the keys for the same reason.
+ *    these by accident and reported the operands and the keys for the same reason — but
+ *    only some: a colour inside a statement body, `(() => { const c = 'red'; return c; })()`,
+ *    was missed by that pattern too, because a semicolon bounded its span. Half of the entry
+ *    the rewrite deleted moved here rather than being solved.
+ *  - an assignment whose operator is not a plain `=`. `el.style.color ??= 'red'` and its
+ *    `||=` sibling paint, and neither is a site: only {@link ts.SyntaxKind.EqualsToken} is.
+ *    The pattern this replaced missed them for its own reason — it wanted one equals sign
+ *    and these have two characters in front of it — so this is a blind spot both
+ *    implementations have and neither had written down. It is listed rather than closed
+ *    because widening the site set is a decision, and a decision belongs in a diff of its
+ *    own rather than in the margin of a refactor.
  *
  * The hex and colour-function rules, which do scan whole files, are the backstop for nearly
  * every one of them, listed or not — whatever shape hides a colour from rule 4, a hash or a
@@ -395,10 +416,50 @@ function literalText(node: ts.Node | undefined): string | undefined {
  * A computed name assembled at run time — a template with a substitution — has no name to
  * return, which is the residue entry it belongs to.
  */
-function declaredName(name: ts.PropertyName): string | undefined {
+function declaredName(name: ts.Node): string | undefined {
   if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text;
   if (ts.isComputedPropertyName(name)) return literalText(name.expression);
   return undefined;
+}
+
+/**
+ * Whether a parameter, a destructured binding or an enum member names something that
+ * paints.
+ *
+ * A binding element carries two names when it renames — `{ color: c }` reads `color` and
+ * binds `c` — and a default written on it is the value of both. Either one is enough:
+ * `{ color: c = 'red' }` fixes what the property `color` resolves to, and
+ * `{ tier: color = 'red' }` fixes what the name `color` holds. The pattern this replaced
+ * caught both, because it matched on the equals sign and did not care which name was in
+ * front of it.
+ */
+function bindingPaints(
+  node: ts.ParameterDeclaration | ts.BindingElement | ts.EnumMember,
+): boolean {
+  const bound = declaredName(node.name);
+  if (bound !== undefined && paints(bound)) return true;
+  if (!ts.isBindingElement(node) || node.propertyName === undefined) return false;
+  const source = declaredName(node.propertyName);
+  return source !== undefined && paints(source);
+}
+
+/**
+ * Whether a destructuring pattern binds a painting name at its top level.
+ *
+ * This is what reaches `const [color, setColor] = useState('red')`, where the colour is in
+ * neither name nor a default but in the thing being taken apart. A pattern is the one
+ * declaration shape whose value is not written next to the name that receives it.
+ *
+ * An array pattern is positional and nothing here checks which slot a name sits in, so
+ * `const [setColor, color] = useState('red')` reads the same. That is imprecision rather
+ * than the which-way-was-it-written asymmetry this rule keeps being held for: both
+ * spellings fire, and knowing that the first element is the value and the second the setter
+ * is a fact about `useState` and not about syntax.
+ */
+function patternPaints(pattern: ts.BindingPattern): boolean {
+  return pattern.elements.some(
+    (element) => ts.isBindingElement(element) && bindingPaints(element),
+  );
 }
 
 /** The name an assignment writes to, through a member, an index or a bare identifier. */
@@ -515,6 +576,15 @@ function valueStrings(node: ts.Node | undefined, into: string[]): void {
     for (const argument of node.arguments ?? []) valueStrings(argument, into);
   } else if (ts.isJsxExpression(node)) {
     valueStrings(node.expression, into);
+  } else if (ts.isAwaitExpression(node)) {
+    // `await x` hands back whatever `x` produces, so it passes a value through the way a
+    // parenthesis does. It cannot invent a literal — a colour behind a real promise is a
+    // colour behind a variable, which is the first residue entry — so following it only
+    // finds literals that were written down. Found by running this walk and the pattern it
+    // replaced over a cross-product of every context, name and value spelling and diffing
+    // the answers; it was the last shape the pattern caught and the walk did not, and no
+    // reviewer or author had thought of it.
+    valueStrings(node.expression, into);
   } else if (ts.isExpression(node)) {
     const inner = unwrap(node);
     if (inner !== node) valueStrings(inner, into);
@@ -562,9 +632,17 @@ function findPaintedValues(file: string, source: string): string[] {
       const name = declaredName(node.name);
       if (name !== undefined && paints(name)) report(node, node.initializer);
     } else if (ts.isVariableDeclaration(node)) {
-      if (ts.isIdentifier(node.name) && paints(node.name.text)) {
+      if (ts.isIdentifier(node.name)) {
+        if (paints(node.name.text)) report(node, node.initializer);
+      } else if (patternPaints(node.name)) {
         report(node, node.initializer);
       }
+    } else if (
+      ts.isParameter(node) ||
+      ts.isBindingElement(node) ||
+      ts.isEnumMember(node)
+    ) {
+      if (bindingPaints(node)) report(node, node.initializer);
     } else if (
       ts.isBinaryExpression(node) &&
       node.operatorToken.kind === ts.SyntaxKind.EqualsToken

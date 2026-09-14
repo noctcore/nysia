@@ -280,6 +280,29 @@ describe('the rule that reads a syntax tree', () => {
     ).toEqual(['named-colour']);
   });
 
+  it('reads a value an await hands back', () => {
+    // `await x` produces whatever `x` produces, so it passes a value through the way a
+    // parenthesis does. This was the last shape the rule it replaced caught and the walk
+    // did not, and neither a reviewer nor the author thought of it: it turned up by running
+    // both implementations over a cross-product of every context, painting name and value
+    // spelling and diffing the answers, which is the only method here that finds a position
+    // nobody has already imagined.
+    for (const awaited of [
+      `async function f() { el.style.color = await 'red'; }`,
+      `async function f() { el.style.color = await (on ? 'red' : 'gray'); }`,
+      `async function f() { const s = { color: await 'red' }; }`,
+      `async function f({ color = await 'red' }) {}`,
+    ]) {
+      expect(findColourLiterals(awaited).map((c) => c.kind), awaited).toEqual([
+        'named-colour',
+      ]);
+    }
+    // A promise of a colour is a colour behind a name, which is the first residue entry.
+    expect(
+      findColourLiterals(`async function f() { el.style.color = await load(); }`),
+    ).toEqual([]);
+  });
+
   it('reports a nested paint once, not once per value that encloses it', () => {
     // The walk over the file already visits every property, so the walk over a *value*
     // stops at an object literal rather than descending into it. Descending would report
@@ -542,6 +565,82 @@ describe('the rule that reads a syntax tree', () => {
     ).toEqual(['named-colour']);
     expect(
       findColourLiterals(`const s = { color: new Shade('red') };`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+  });
+
+  it('finds a colour written as a default, wherever a default can be written', () => {
+    // The eighth position, and the only one found by comparing against the rule this
+    // replaced rather than by reading this one. A pattern matching `=` did not care what
+    // kind of equals sign it had, so it caught every shape below; the first version of the
+    // walk enumerated sites and left all of them out. A gate that got narrower than the one
+    // it replaced is the one outcome the rewrite was not allowed to have.
+    //
+    // The first two are the ordinary React default-prop spelling of a hardcoded colour,
+    // which is exactly what this gate exists to catch.
+    for (const defaulted of [
+      `function Dot({ color = 'red' }: Props) {}`,
+      `const Dot = ({ color = 'red' }: Props) => null;`,
+      `const { color = 'red' } = props;`,
+      `function paint(fill = 'red') {}`,
+      `enum Swatch { color = 'red' }`,
+      // A parameter property, which is a parameter and a field at once.
+      `class A { constructor(private color = 'red') {} }`,
+      // Nested, and inside an array pattern: a binding element is a binding element at any
+      // depth, which is the thing a span of characters had to be taught one shape at a time.
+      `function f({ style: { color = 'red' } = {} }) {}`,
+      `const [{ color = 'red' }] = list;`,
+      // Renamed, both directions. A binding carries two names and a default belongs to
+      // both, so either one painting is enough.
+      `const { color: c = 'red' } = props;`,
+      `const { tier: color = 'red' } = props;`,
+    ]) {
+      expect(findColourLiterals(defaulted).map((c) => c.kind), defaulted).toEqual([
+        'named-colour',
+      ]);
+    }
+  });
+
+  it('stays quiet on a default that is not a colour, and on a binding with none', () => {
+    for (const innocent of [
+      `function paint(fill = tokenFor(x)) {}`,
+      `function Dot({ color = 'inherit' }: Props) {}`,
+      `const { color } = props;`,
+      `enum Swatch { color }`,
+      `function Tag({ tier = 'gold' }: Props) {}`,
+    ]) {
+      expect(findColourLiterals(innocent), innocent).toEqual([]);
+    }
+  });
+
+  it('finds a colour a destructuring declaration takes apart', () => {
+    // The other live React idiom for holding a colour, and the one declaration shape whose
+    // value is not written next to the name that receives it: there is no default here and
+    // no key, only a pattern and the thing it is applied to. Missed by the rule this
+    // replaced as well, so this is new coverage rather than restored coverage.
+    for (const held of [
+      `const [color, setColor] = useState('red');`,
+      `const [background, setBackground] = useState(initial ?? 'navy');`,
+      `const { fill } = pick('red');`,
+      `const [color] = ['red'];`,
+    ]) {
+      expect(findColourLiterals(held).map((c) => c.kind), held).toEqual(['named-colour']);
+    }
+  });
+
+  it('does not read a pattern that binds nothing which paints', () => {
+    // The pattern is what admits the value, so a pattern full of names that do not paint
+    // leaves the initializer alone however loudly it spells a colour.
+    expect(findColourLiterals(`const [tier, setTier] = useState('red');`)).toEqual([]);
+    expect(findColourLiterals(`const { label } = pick('navy');`)).toEqual([]);
+    // And an ordinary destructure of something with no literal in it stays quiet either way.
+    expect(findColourLiterals(`const { color, background } = useTheme();`)).toEqual([]);
+  });
+
+  it('reports a default once, not once for the binding and once for the declaration', () => {
+    // `const { color = 'red' } = props` is a binding element with a default inside a
+    // declaration whose pattern paints. Both branches can see it; only one reports.
+    expect(
+      findColourLiterals(`const { color = 'red' } = props;`).map((c) => c.kind),
     ).toEqual(['named-colour']);
   });
 
@@ -841,11 +940,19 @@ const tier = 'gold'`;
  * Both directions have already happened here — a gap closing, and an example quietly
  * ceasing to demonstrate its own entry.
  *
- * Eight of the nine are the vocabulary and value questions that survived the rewrite,
+ * Eight of the ten are the vocabulary and value questions that survived the rewrite,
  * because a syntax tree fixes where you look and not what you are looking for. Two of those
  * eight moved rather than staying put — the computed key narrowed to a name assembled at
  * run time, and the library key kept its shape while its reason changed — and the guard's
- * own comment says which. The ninth is the walk's own narrowness and is new.
+ * own comment says which. The ninth is the walk's own narrowness and is new with it. The
+ * tenth, a logical assignment, is older than either implementation and new only to the
+ * list: both miss it, and nobody had written it down.
+ *
+ * A miss that is *not* here is the one this round was held for. A default — a parameter's,
+ * a destructured binding's, an enum member's — was caught by the pattern and dropped by the
+ * first version of the walk, and it is a site kind rather than a residue entry: the fix
+ * restores coverage rather than documenting its absence, so the count above moved for the
+ * logical assignment alone.
  */
 describe('the documented residue', () => {
   it('misses a colour that arrives through a variable', () => {
@@ -929,6 +1036,27 @@ describe('the documented residue', () => {
     // other direction.
     expect(findColourLiterals(`<div style={{ color: (() => 'red')() }} />`)).toEqual([]);
     expect(findColourLiterals(`const s = { color: css${TICK}red${TICK} };`)).toEqual([]);
+    // And the half of the deleted entry that moved here rather than being solved. The
+    // rewrite's own PR first called that entry "purely a span bound", which was true of the
+    // comma and the brace and not of the semicolon: a statement body hid a colour from the
+    // pattern too, for a different reason, and hides it from the walk now.
+    expect(
+      findColourLiterals(`const s = { color: (() => { const c = 'red'; return c; })() };`),
+    ).toEqual([]);
+  });
+
+  it('misses an assignment whose operator is not a plain equals sign', () => {
+    // A blind spot both implementations have and neither had written down: these paint, and
+    // only `=` is a site. The rule this replaced missed them for its own reason — it wanted
+    // one equals sign and these carry two characters in front of it — so nothing regressed
+    // here, it had just never been said out loud. Listed rather than closed, because
+    // widening the site set is a decision that belongs in its own diff.
+    expect(findColourLiterals(`el.style.color ??= 'red';`)).toEqual([]);
+    expect(findColourLiterals(`el.style.color ||= 'red';`)).toEqual([]);
+    // The plain assignment next to them still fires, so this is a gap and not a dead rule.
+    expect(findColourLiterals(`el.style.color = 'red';`).map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
   });
 
   it('misses a hex the source does not spell as one', () => {
