@@ -63,6 +63,16 @@ import type { TerminalRouter } from './terminals';
  * reconnect loop — goes through {@link DaemonStore.fail}, which records *and* rejects with
  * the right type.
  */
+
+/**
+ * What one connection attempt leaves the reconnect loop to do.
+ *
+ * Three outcomes rather than a boolean, because "it did not work" hides the distinction the
+ * loop has to act on: a daemon that is not up yet and a runtime that is not installed both
+ * fail the same call, and only one of them is worth another twenty seconds.
+ */
+type ConnectOutcome = 'connected' | 'retry' | 'stopped';
+
 export class DaemonStore implements Store {
   #snapshot: StoreSnapshot = emptySnapshot('connecting');
   readonly #listeners = new Set<() => void>();
@@ -322,17 +332,32 @@ export class DaemonStore implements Store {
   }
 
   /**
-   * Connect, load, and keep reconnecting for as long as the window lives.
+   * Connect, load, and keep reconnecting for as long as waiting could still help.
    *
    * Started once, from {@link createDaemonStore}. It never throws: a store whose connect
    * loop rejected would leave the chrome rendering `connecting` forever with nothing said
    * about why, which is the state this whole file exists to avoid.
+   *
+   * **It stops on a failure the daemon side called permanent**, and that is not a detail of
+   * the backoff. `daemon_connect` starts a daemon when it cannot find one — it takes the
+   * spawn lock, runs the runtime and waits twenty seconds for it to answer — so a loop that
+   * retried a `retryable: false` answer would start one process every twenty-odd seconds for
+   * the life of the window, appending to the daemon log each time, against a runtime that is
+   * missing or will not run. Nothing about that improves by repeating it, the notice is
+   * already on screen with what to do about it, and the status is `failed` rather than
+   * `reconnecting` precisely because the window is no longer waiting for anything.
+   *
+   * The way back is a restart, which is what those next steps say: reinstall, or start a
+   * daemon by hand, then reopen Nysia.
    */
   async run(): Promise<void> {
     let attempt = 0;
     while (!this.#disposed) {
-      const connected = await this.#connectOnce();
-      if (connected) {
+      const outcome = await this.#connectOnce();
+      if (outcome === 'stopped') {
+        return;
+      }
+      if (outcome === 'connected') {
         attempt = 0;
         // Resolves when the socket drops — a blocking command rather than an `emit`,
         // because tauri#12724 leaks on sustained emits and a second mechanism for one
@@ -373,18 +398,28 @@ export class DaemonStore implements Store {
     return new StoreCommandError(command, message, id);
   }
 
-  /** One connection attempt. `true` once the first snapshot is on screen. */
-  async #connectOnce(): Promise<boolean> {
+  /**
+   * One connection attempt.
+   *
+   * `connected` once the first snapshot is on screen, `retry` for a failure another attempt
+   * could get past, and `stopped` for one it could not — which {@link run} obeys by ending.
+   */
+  async #connectOnce(): Promise<ConnectOutcome> {
     try {
       await this.#bridge.invoke('daemon_connect');
     } catch (cause) {
-      // `failed` rather than `reconnecting` once the daemon has said something that waiting
-      // will not change — a protocol mismatch never resolves itself, and a window that kept
-      // saying "reconnecting" would be lying about what it is waiting for.
-      const status = isRetryable(cause) ? 'reconnecting' : 'failed';
-      this.#update((current) => ({ ...current, status }));
+      // `failed` rather than `reconnecting` once the daemon side has said something that
+      // waiting will not change — a protocol mismatch never resolves itself, a runtime that
+      // is not installed does not appear — and a window that kept saying "reconnecting"
+      // would be lying about what it is waiting for.
+      if (!isRetryable(cause)) {
+        this.#update((current) => ({ ...current, status: 'failed' }));
+        this.#recordOnce('openTab', describeFailure(cause));
+        return 'stopped';
+      }
+      this.#update((current) => ({ ...current, status: 'reconnecting' }));
       this.#recordOnce('openTab', describeFailure(cause));
-      return false;
+      return 'retry';
     }
 
     try {
@@ -424,11 +459,11 @@ export class DaemonStore implements Store {
     } catch (cause) {
       this.#update((current) => ({ ...current, status: 'reconnecting' }));
       this.#recordOnce('openTab', describeFailure(cause));
-      return false;
+      return 'retry';
     }
 
     this.#update((current) => ({ ...current, status: 'ready' }));
-    return true;
+    return 'connected';
   }
 
   /** Re-read the session list and rebuild everything derived from it. */
