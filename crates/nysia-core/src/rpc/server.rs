@@ -40,10 +40,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nysia_proto::{
-    ClientId, ClientRole, CreditFrame, DaemonIdentity, ErrorCode, ErrorEnvelope, FrameDecoder,
-    FrameKind, HelloAccepted, HelloRejected, HelloRequest, HelloResponse, LaunchNonce,
-    MutationReceipt, PROTOCOL_VERSION, ProtocolRange, RejectReason, RequestEnvelope, RequestId,
-    RequestPayload, ResponseEnvelope, ResponsePayload, SessionList, StreamAttached,
+    ClientId, ClientRole, CreditFrame, CreditWindow, DaemonIdentity, ErrorCode, ErrorEnvelope,
+    FrameDecoder, FrameKind, HelloAccepted, HelloRejected, HelloRequest, HelloResponse,
+    LaunchNonce, MutationReceipt, PROTOCOL_VERSION, ProtocolRange, RejectReason, RequestEnvelope,
+    RequestId, RequestPayload, ResponseEnvelope, ResponsePayload, SessionList, StreamAttached,
+    StreamId,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -52,8 +53,8 @@ use crate::rpc::endpoint::Endpoint;
 use crate::rpc::errors::{IntoEnvelope, envelope};
 use crate::rpc::lease::PidRecordFile;
 use crate::rpc::peer::{CallerSession, PeerCredentials};
-use crate::rpc::session::SessionRegistry;
-use crate::rpc::stream::StreamRegistry;
+use crate::rpc::session::{OwnedSession, SessionRegistry};
+use crate::rpc::stream::{BoundStream, ConnectionKey, StreamRegistry, StreamSink};
 use crate::rpc::transport::{Connection, Listener, TransportError};
 
 /// How long a connected peer has to send its `hello`.
@@ -101,6 +102,14 @@ pub struct DaemonConfig {
     pub app_version: String,
     /// How long to stay up with no clients and no sessions. `None` never retires.
     pub idle_retire_after: Option<Duration>,
+    /// The credit window every stream this daemon opens is given.
+    ///
+    /// Configurable because `nysia-proto` sends the window to the client in the opening
+    /// grant rather than having it hold a copy of the constants — which is exactly what
+    /// makes tuning it a daemon-side decision instead of a protocol change. An incoherent
+    /// window would deadlock, so [`StreamRegistry::with_window`] refuses one and serves
+    /// [`CreditWindow::DEFAULT`] instead.
+    pub credit_window: CreditWindow,
 }
 
 impl DaemonConfig {
@@ -111,6 +120,7 @@ impl DaemonConfig {
             endpoint,
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
             idle_retire_after: Some(DEFAULT_IDLE_RETIRE),
+            credit_window: CreditWindow::DEFAULT,
         }
     }
 }
@@ -166,7 +176,7 @@ impl Daemon {
                 lease,
                 idle_retire_after: config.idle_retire_after,
                 sessions: Arc::new(SessionRegistry::new()),
-                streams: Arc::new(StreamRegistry::new()),
+                streams: Arc::new(StreamRegistry::with_window(config.credit_window)),
                 receipts: Mutex::new(Receipts::default()),
                 clients: AtomicUsize::new(0),
                 in_flight: AtomicUsize::new(0),
@@ -194,6 +204,16 @@ impl Daemon {
     #[must_use]
     pub fn sessions(&self) -> &Arc<SessionRegistry> {
         &self.sessions
+    }
+
+    /// The streams this daemon is writing.
+    ///
+    /// Exposed so a test can wait for a disconnect the daemon has actually *observed* rather
+    /// than for one the client merely initiated — the two are a socket apart, and asserting
+    /// across that gap is how a test starts passing for the wrong reason.
+    #[must_use]
+    pub fn streams(&self) -> &Arc<StreamRegistry> {
+        &self.streams
     }
 
     /// Serve until the daemon retires or is interrupted.
@@ -426,9 +446,27 @@ impl Daemon {
                 }
             };
             self.in_flight.fetch_add(1, Ordering::AcqRel);
-            let response = self.dispatch(request, caller).await;
+            let mut deferred = None;
+            let response = self.dispatch(request, caller, &mut deferred).await;
+            let written = writer.write_frame(&response).await.is_ok();
+            // Decision D, and the whole of it: **the attach response goes out before any frame
+            // of the replay is enqueued.** The client can only record the id by parsing this
+            // response, and control and stream are separate sockets with nothing ordering
+            // them — so a replay enqueued first can beat the answer that explains it, and a
+            // client applying proto's own rule classifies those frames as an id never
+            // assigned and drops the connection. Nothing orders two sockets, so the side that
+            // *can* provide the ordering has to.
+            if let Some(pending) = deferred {
+                if written {
+                    pending.start().await;
+                } else {
+                    // The client will never learn the id, so nothing may be routed to it. A
+                    // sink left open here can never be acked and would stall its session.
+                    pending.abandon(&self.streams);
+                }
+            }
             self.in_flight.fetch_sub(1, Ordering::AcqRel);
-            if writer.write_frame(&response).await.is_err() {
+            if !written {
                 break;
             }
         }
@@ -439,6 +477,7 @@ impl Daemon {
         self: &Arc<Self>,
         request: RequestEnvelope,
         caller: &Caller,
+        deferred: &mut Option<PendingReplay>,
     ) -> ResponseEnvelope {
         let incoming = request.request_id.clone();
         let is_mutation = request.payload.is_mutation();
@@ -465,7 +504,7 @@ impl Daemon {
             });
         }
 
-        let payload = self.run(request.payload, caller).await;
+        let payload = self.run(request.payload, caller, deferred).await;
         if is_mutation && payload.error().is_none() {
             lock(&self.receipts).put(&caller.fingerprint, &incoming, payload.clone());
         }
@@ -481,7 +520,12 @@ impl Daemon {
     }
 
     /// Run one verb against the registries.
-    async fn run(self: &Arc<Self>, payload: RequestPayload, caller: &Caller) -> ResponsePayload {
+    async fn run(
+        self: &Arc<Self>,
+        payload: RequestPayload,
+        caller: &Caller,
+        deferred: &mut Option<PendingReplay>,
+    ) -> ResponsePayload {
         let sessions = Arc::clone(&self.sessions);
         match payload {
             RequestPayload::SessionCreate(request) => {
@@ -541,25 +585,35 @@ impl Daemon {
                 }
                 Err(err) => ResponsePayload::Error(err.into_envelope()),
             },
-            RequestPayload::StreamAttach(request) => self.attach(&request.handle, caller),
+            RequestPayload::StreamAttach(request) => self.attach(&request.handle, caller, deferred),
             RequestPayload::StreamDetach(request) => {
                 // Detaching a stream that has already gone is not an error. Proto is explicit
                 // that an id naming nothing live is the routine detach race rather than a
                 // fault, and answering "no such stream" would have clients retrying a
                 // teardown that has already happened.
-                self.streams.detach(request.stream_id);
+                self.streams.detach(&caller.client_id, request.stream_id);
                 ResponsePayload::StreamDetach
             }
         }
     }
 
-    /// Start routing a session's output to this client's stream connection.
-    fn attach(&self, handle: &nysia_proto::SessionHandle, caller: &Caller) -> ResponsePayload {
+    /// Reserve a stream id for a session's output, leaving the replay to the caller.
+    ///
+    /// The id is assigned and registered here; **nothing is written to the stream connection
+    /// yet**. The replay comes back in `deferred` so that [`Self::serve_control`] can start it
+    /// only once the answer carrying the id has gone out — see the comment there for why the
+    /// order is not negotiable.
+    fn attach(
+        &self,
+        handle: &nysia_proto::SessionHandle,
+        caller: &Caller,
+        deferred: &mut Option<PendingReplay>,
+    ) -> ResponsePayload {
         let session = match self.sessions.get(handle) {
             Ok(session) => session,
             Err(err) => return ResponsePayload::Error(err.into_envelope()),
         };
-        let Some(sink) = self.streams.attach(&caller.client_id) else {
+        let Some(attached) = self.streams.attach(&caller.client_id) else {
             return ResponsePayload::Error(
                 envelope(
                     ErrorCode::InvalidRequest,
@@ -574,10 +628,16 @@ impl Daemon {
                 .retryable(true),
             );
         };
-        session.attach(&sink);
+        let stream_id = attached.sink.stream_id();
+        *deferred = Some(PendingReplay {
+            session,
+            connection: attached.connection,
+            sink: attached.sink,
+            stream_id,
+        });
         ResponsePayload::StreamAttach(StreamAttached {
             handle: handle.clone(),
-            stream_id: sink.stream_id(),
+            stream_id,
         })
     }
 
@@ -591,7 +651,11 @@ impl Daemon {
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let mut outbox = self.streams.bind(client_id);
+        let BoundStream {
+            key,
+            mut outbox,
+            superseded,
+        } = self.streams.bind(client_id);
         // The two halves run concurrently on purpose: a client that has stopped acking must
         // not also stop the daemon from *reading* its acks, which is the one thing that would
         // turn a temporary stall into a permanent one.
@@ -603,13 +667,32 @@ impl Daemon {
                 }
             }
         });
-        self.read_credit(reader).await;
+        // The second wake path is not a nicety. A webview reload leaves this connection
+        // superseded with its reader parked, and a parked named-pipe read cannot be cancelled
+        // on Windows — so without this the task, its slot in the client count and its socket
+        // are held until the client happens to send something, and the client's own reader
+        // waits for an EOF that only arrives when this side lets go.
+        tokio::select! {
+            () = self.read_credit(reader, key) => {}
+            () = superseded.notified() => {
+                tracing::debug!(
+                    client = %client_id,
+                    connection = key.get(),
+                    "letting go of a stream connection a newer one replaced"
+                );
+            }
+        }
         pumping.abort();
-        self.streams.unbind(client_id);
+        self.streams.unbind(key);
     }
 
     /// Read credit acks until the client goes away.
-    async fn read_credit<R>(&self, reader: ControlReader<R>)
+    ///
+    /// Scoped to `connection`, because a stream id means nothing off its own connection: ids
+    /// are counted per connection, so two of them — two clients, or one client across a
+    /// reload — both hold [`StreamId::FIRST`], and an unscoped lookup would credit whichever
+    /// of them a shared map happened to hold.
+    async fn read_credit<R>(&self, reader: ControlReader<R>, connection: ConnectionKey)
     where
         R: tokio::io::AsyncRead + Unpin,
     {
@@ -633,7 +716,7 @@ impl Daemon {
                     Ok(Some(frame)) if frame.kind == FrameKind::Credit => {
                         match serde_json::from_slice::<CreditFrame>(&frame.payload) {
                             Ok(credit) => {
-                                self.streams.apply_credit(frame.stream, &credit);
+                                self.streams.apply_credit(connection, frame.stream, &credit);
                             }
                             Err(err) => {
                                 tracing::debug!(%err, "ignored an unreadable credit frame");
@@ -662,6 +745,49 @@ impl Daemon {
 impl Drop for Daemon {
     fn drop(&mut self) {
         self.lease.remove();
+    }
+}
+
+/// An attach that holds an id but has not written a byte to the stream connection yet.
+///
+/// It exists so that the two halves of an attach can be *ordered*: the id is reserved while
+/// the verb runs, the answer naming it goes out, and only then does the opening grant and the
+/// replay ring follow. Enqueued the other way round they race the answer across two sockets
+/// that nothing orders, and a client applying proto's discard-versus-drop rule reads the
+/// early frames as an id that was never assigned and drops the connection — on the re-attach
+/// path that is D-1's flagship promise.
+#[derive(Debug)]
+struct PendingReplay {
+    /// The session whose scrollback is owed to the client.
+    session: Arc<OwnedSession>,
+    /// The connection the id belongs to, so a rollback undoes the one that was attached even
+    /// if a newer connection has taken the client id over since.
+    connection: ConnectionKey,
+    /// Where the replay goes.
+    sink: Arc<StreamSink>,
+    /// The id that was reserved.
+    stream_id: StreamId,
+}
+
+impl PendingReplay {
+    /// Send the opening grant and the replay ring, now that the client knows the id.
+    ///
+    /// On a blocking thread: the replay takes the session's terminal-state lock and can write
+    /// the whole scrollback, and a runtime worker held for that stalls every other session
+    /// sharing it.
+    async fn start(self) {
+        let Self { session, sink, .. } = self;
+        if let Err(err) = tokio::task::spawn_blocking(move || session.attach(&sink)).await {
+            tracing::warn!(%err, "a replay did not run; the pane will fill from live output");
+        }
+    }
+
+    /// Give the id back, for an attach whose answer never reached the client.
+    ///
+    /// A client that never learned the id can never ack it, so a sink left open here would
+    /// spend its allowance once and stall the session it feeds for as long as the daemon runs.
+    fn abandon(self, streams: &StreamRegistry) {
+        streams.detach_on(self.connection, self.stream_id);
     }
 }
 

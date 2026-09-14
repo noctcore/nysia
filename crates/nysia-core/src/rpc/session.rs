@@ -400,6 +400,18 @@ impl OwnedSession {
         lock(&self.sinks).push(Arc::clone(sink));
     }
 
+    /// The terminal state this session feeds, for tests that need to hold its lock.
+    ///
+    /// Holding it is how a test pins down the attach ordering without a sleep: the replay
+    /// ring cannot be read while it is held, so a daemon that replays *before* it answers
+    /// cannot answer at all, while a daemon that answers first is unaffected. What would
+    /// otherwise be a race becomes an assertion either way.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn terminal_state(&self) -> &Arc<Mutex<TerminalState>> {
+        &self.vt
+    }
+
     /// Stop routing to a stream.
     pub fn detach(&self, stream: nysia_proto::StreamId) {
         lock(&self.sinks).retain(|sink| sink.stream_id() != stream);
@@ -839,11 +851,19 @@ fn flush(sinks: &Mutex<Vec<Arc<StreamSink>>>, pending: &mut Vec<u8>, oldest: &mu
     }
 }
 
-/// Write the coalesced bytes to every sink that will take them.
+/// Write the coalesced bytes to every sink that will take them, and drop what all of them did.
 ///
 /// A sink that will not take them keeps the bytes pending: this is where "stop reading"
 /// becomes true, because the caller loops back and finds `pending` non-empty and the sink
 /// still blocked.
+///
+/// Each sink resumes from [`StreamSink::delivered`] rather than from the head of the buffer,
+/// and only the bytes the *slowest* sink has taken are dropped. Re-offering the buffer from
+/// the start instead — which is what "did everybody take all of it?" amounts to — re-sends
+/// what has already been sent, and under sustained backpressure never converges: the buffer
+/// grows to [`FLUSH_CEILING`] while each turn delivers only an allowance's worth of its head,
+/// so the terminal both duplicates and stops advancing. That is precisely the state a `yes`
+/// flood reaches once the opening window is spent.
 fn flush_all(
     sinks: &Mutex<Vec<Arc<StreamSink>>>,
     pending: &mut Vec<u8>,
@@ -861,25 +881,37 @@ fn flush_all(
         *oldest = None;
         return;
     }
-    let mut delivered = true;
+    let mut common = pending.len();
     for sink in sinks.iter() {
-        for chunk in pending.chunks(sink.window().chunk as usize) {
+        let mut done = sink.delivered().min(pending.len());
+        let chunk = sink.window().chunk as usize;
+        while done < pending.len() {
+            let end = pending.len().min(done + chunk);
             match sink.send(&Frame::new(
                 FrameKind::Output,
                 sink.stream_id(),
-                chunk.to_vec(),
+                pending[done..end].to_vec(),
             )) {
-                SendOutcome::Sent => {}
-                SendOutcome::WouldBlock => {
-                    delivered = false;
+                SendOutcome::Sent => done = end,
+                SendOutcome::WouldBlock => break,
+                // A sink that has gone is retained out on the next turn. Counting it as
+                // finished keeps it from holding the buffer for everybody else in between.
+                SendOutcome::Closed => {
+                    done = pending.len();
                     break;
                 }
-                SendOutcome::Closed => break,
             }
         }
+        sink.set_delivered(done);
+        common = common.min(done);
     }
-    if delivered {
-        pending.clear();
+    if common > 0 {
+        pending.drain(..common);
+        for sink in sinks.iter() {
+            sink.set_delivered(sink.delivered().saturating_sub(common));
+        }
+    }
+    if pending.is_empty() {
         *oldest = None;
     }
 }
@@ -932,6 +964,63 @@ mod tests {
 
     /// The token the chosen shell computes. It appears in no line that is typed.
     const TOKEN: &str = "NYSIA-42";
+
+    #[test]
+    fn a_sink_that_stops_half_way_resumes_rather_than_being_offered_the_buffer_again() {
+        // Sustained backpressure is the case where the coalesced buffer is bigger than the
+        // allowance, so every flush stops part way through it. Offering it from the head
+        // again re-sends what has already gone and never converges: the buffer grows to the
+        // flush ceiling while each turn moves only an allowance's worth of its head, and the
+        // pane both duplicates and stops advancing. Reaching that state takes nothing more
+        // exotic than `yes` once the opening window is spent.
+        let window = nysia_proto::CreditWindow {
+            per_stream_initial: 256,
+            per_stream_max: 256,
+            total_initial: 256,
+            total_max: 256,
+            pending_cap: 1024,
+            ack_batch: 256,
+            chunk: 64,
+        };
+        assert!(window.is_coherent());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4096);
+        let sink = Arc::new(StreamSink::new(nysia_proto::StreamId::FIRST, tx, window));
+        let sinks = Mutex::new(vec![Arc::clone(&sink)]);
+
+        // A pattern rather than a repeated byte, so an out-of-order or duplicated stretch
+        // cannot pass for the real thing.
+        let source: Vec<u8> = (0..4096u32).map(|byte| (byte % 251) as u8).collect();
+        let mut pending = source.clone();
+        let mut oldest = Some(Instant::now());
+        let mut turns = 0;
+        while !pending.is_empty() && turns < 200 {
+            flush_all(&sinks, &mut pending, &mut oldest);
+            // The client rendering what it was sent and acking it, which is the only thing
+            // that makes the next turn possible.
+            sink.replenish(window.per_stream_max);
+            turns += 1;
+        }
+        assert!(
+            pending.is_empty(),
+            "the buffer never drained: {} bytes left after {turns} turns",
+            pending.len()
+        );
+        assert!(oldest.is_none(), "a drained buffer has no age");
+
+        let mut delivered = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            let (frame, _) = nysia_proto::decode(&frame)
+                .expect("decodes")
+                .expect("a whole frame");
+            assert_eq!(frame.kind, FrameKind::Output);
+            delivered.extend_from_slice(&frame.payload);
+        }
+        assert_eq!(
+            delivered, source,
+            "every byte exactly once and in order; a re-offered buffer shows up here as a \
+             repeated stretch"
+        );
+    }
 
     fn create(registry: &SessionRegistry, pane: Option<PaneKey>) -> SessionCreated {
         registry
