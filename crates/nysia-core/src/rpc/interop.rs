@@ -22,7 +22,7 @@
 //! | [`a_flood_keeps_flowing_past_the_per_stream_ceiling`] | credit round-trips, in units both ends agree on |
 //! | [`an_attach_answers_before_a_byte_of_replay_is_enqueued`] | the response cannot lose to the replay it explains |
 //! | [`a_second_stream_connection_does_not_take_the_first_one_s_streams_down`] | a reload does not deafen the window |
-//! | [`a_client_grant_cannot_talk_the_daemon_out_of_its_own_window`] | the producer grants; a consumer's grant is not one |
+//! | [`a_client_grant_cannot_talk_the_daemon_out_of_its_own_window`] | the producer's window holds against a consumer's grant |
 //!
 //! Each fails against the code as it was and passes against the code as it is.
 
@@ -158,6 +158,13 @@ struct StreamPeer {
     rendered: HashMap<u32, Vec<u8>>,
     /// How many payload bytes have been rendered in total, across every stream.
     total_rendered: u64,
+    /// Whether rendering sends an ack back.
+    ///
+    /// A consumer that acks is the normal case and the only one a flood can flow through.
+    /// Turning it off is how a test watches the allowance *hold*: with nothing coming back,
+    /// whatever still arrives arrived on credit the daemon granted, and the total is then a
+    /// direct measurement of the window in force rather than of the round trip.
+    acks: bool,
 }
 
 impl StreamPeer {
@@ -177,7 +184,13 @@ impl StreamPeer {
             unacked: HashMap::new(),
             rendered: HashMap::new(),
             total_rendered: 0,
+            acks: true,
         }
+    }
+
+    /// Stop acking, so the daemon gets no credit back from here on.
+    fn stop_acking(&mut self) {
+        self.acks = false;
     }
 
     /// Record an id the daemon has just handed this connection, moving the watermark.
@@ -265,7 +278,7 @@ impl StreamPeer {
                 *owed = owed.saturating_add(
                     u32::try_from(frame.payload.len()).expect("a frame payload fits a u32"),
                 );
-                if *owed >= batch {
+                if self.acks && *owed >= batch {
                     return Some(std::mem::take(owed));
                 }
                 None
@@ -668,7 +681,14 @@ async fn a_client_grant_cannot_talk_the_daemon_out_of_its_own_window() {
         "a client with no stream connection has nothing to attach to"
     );
 
-    // A grant from the consumer. The daemon must not act on it.
+    // Stop acking. From here the daemon gets nothing back, so whatever still arrives
+    // arrived on credit the daemon itself granted — which is what makes the total below a
+    // measurement of the window rather than of a round trip.
+    stream.stop_acking();
+
+    // A grant from the consumer, for far more than the window allows. The daemon must not
+    // act on it: it is the producer, it owns the window, and a consumer that could credit
+    // itself could turn the backpressure off from outside.
     let payload = serde_json::to_vec(&CreditFrame::Grant(nysia_proto::CreditGrant {
         bytes: u32::MAX,
         window: CreditWindow::DEFAULT,
@@ -679,24 +699,53 @@ async fn a_client_grant_cannot_talk_the_daemon_out_of_its_own_window() {
     stream.writer.write_all(&encoded).await.expect("writes");
     stream.writer.flush().await.expect("flushes");
 
-    // The connection survives it — an ignored grant is not a fatal frame — and the stream is
-    // still there, which it would not be had the daemon taken the grant for a desync.
+    // Now flood, and read without ever acking. A daemon that honoured that grant has had
+    // `u32::MAX` handed to it and stops at `per_stream_max`; one that ignores it stops at the
+    // opening allowance, which is the only credit it ever issued.
+    let before = stream.total_rendered;
+    control
+        .terminal_send(TerminalSend::line(
+            created.handle.clone(),
+            TestShell::pick().flood,
+        ))
+        .await
+        .expect("starting the flood");
+
+    let quiet = Duration::from_secs(3);
+    let mut last_change = Instant::now();
+    let mut seen = stream.total_rendered;
+    while last_change.elapsed() < quiet {
+        if !stream
+            .pump(Duration::from_millis(250))
+            .await
+            .expect("reading")
+        {
+            break;
+        }
+        if stream.total_rendered != seen {
+            seen = stream.total_rendered;
+            last_change = Instant::now();
+        }
+    }
+
+    let on_credit = stream.total_rendered - before;
+    let allowed = u64::from(TIGHT.per_stream_initial + TIGHT.chunk);
+    assert!(
+        on_credit > 0,
+        "nothing arrived at all, so this measured no window"
+    );
+    assert!(
+        on_credit <= allowed,
+        "{on_credit} bytes arrived against an opening allowance of {} — the daemon took the          consumer's grant, which is the backpressure being switched off from outside",
+        TIGHT.per_stream_initial
+    );
+
+    // And the connection is intact: an ignored grant is not a fatal frame.
     let alive = control
         .terminal_read(TerminalRead::screen(created.handle.clone()))
         .await;
     assert!(alive.is_ok(), "an ignored grant must not cost the session");
-    assert!(
-        stream
-            .pump(Duration::from_millis(250))
-            .await
-            .expect("reading"),
-        "an ignored grant must not cost the stream connection either"
-    );
-    assert_eq!(
-        harness.daemon.streams().len(),
-        1,
-        "and the stream it named is still open, on the allowance the daemon set"
-    );
+    assert_eq!(harness.daemon.streams().len(), 1, "nor the stream it named");
 
     control
         .session_close(created.handle)
