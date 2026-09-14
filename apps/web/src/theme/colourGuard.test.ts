@@ -52,6 +52,12 @@ const OFFENDERS = [
     kind: 'named-colour',
     snippet: "style={{ color: status === 'failed' ? 'red' : undefined }}",
   },
+  // The xterm theme key. Not a painting property, not CSS, and the one place in this app
+  // where a colour string still has to be written out rather than referenced.
+  {
+    kind: 'named-colour',
+    snippet: "new Terminal({ theme: { foreground: 'white' } });",
+  },
 ] as const;
 
 describe('findColourLiterals', () => {
@@ -205,6 +211,43 @@ describe('findColourLiterals', () => {
         (c) => c.kind,
       ),
     ).toEqual(['named-colour']);
+  });
+
+  it('finds a colour under an xterm theme key', () => {
+    // The next place in this app a colour literal will actually be written: the terminal
+    // renders for real, xterm takes concrete strings rather than variables, and none of
+    // its keys is a CSS painting property. Scoping the rule to painting properties — which
+    // is what stopped it crying wolf on `src/transport` — made every one of these
+    // invisible, so the keys are named explicitly.
+    for (const themed of [
+      "new Terminal({ theme: { foreground: 'white' } })",
+      "{ cursor: 'red' }",
+      "{ cursorAccent: 'navy' }",
+      "{ selectionBackground: 'gold' }",
+      `{ selectionForeground: "tan" }`,
+      "{ selectionInactiveBackground: 'silver' }",
+      "{ scrollbarSliderBackground: 'gray' }",
+      "{ scrollbarSliderHoverBackground: 'gray' }",
+      "{ scrollbarSliderActiveBackground: 'gray' }",
+      "{ overviewRulerBorder: 'crimson' }",
+      "{ black: 'gold' }",
+      "{ brightWhite: 'ivory' }",
+      "{ brightMagenta: 'orchid' }",
+      "{ extendedAnsi: ['tan'] }",
+    ]) {
+      expect(findColourLiterals(themed).map((c) => c.kind), themed).toContain('named-colour');
+    }
+  });
+
+  it('leaves the theme keys alone when they are read off the tokens in force', () => {
+    // `transport/surface/xterm.ts` writes exactly this shape, and it is correct: the value
+    // is a token lookup with a follow-the-theme fallback, not a colour.
+    expect(
+      findColourLiterals(`{ foreground: token('--color-fg', 'inherit') }`),
+    ).toEqual([]);
+    expect(
+      findColourLiterals(`{ selectionBackground: token('--color-acc35', 'transparent') }`),
+    ).toEqual([]);
   });
 
   it('finds a colour written to a custom property', () => {
@@ -374,12 +417,14 @@ describe('the documented residue', () => {
     }
   });
 
-  it('misses a colour key that belongs to a library rather than to CSS', () => {
-    // `selectionBackground` is the sharper half: the word *is* in the list, but the
-    // boundary guard that stops `fill` matching inside `autofill` stops `background`
-    // matching here too. The two are the same trade.
-    expect(findColourLiterals("{ cursorAccent: 'red' }")).toEqual([]);
-    expect(findColourLiterals("{ selectionBackground: 'navy' }")).toEqual([]);
+  it('misses a colour key belonging to a library the list does not name', () => {
+    // xterm's keys came off this entry because that terminal is in this app. Nothing else
+    // here has a colour key of its own, so the rest of the entry is the same trade as
+    // before: `pointBackground` carries a listed word, and the boundary guard that stops
+    // `fill` matching inside `autofill` stops `background` matching inside it too.
+    expect(findColourLiterals("{ pointBackground: 'navy' }")).toEqual([]);
+    expect(findColourLiterals("{ gridLine: 'silver' }")).toEqual([]);
+    expect(findColourLiterals("{ series: [{ area: 'gold' }] }")).toEqual([]);
   });
 
   it('misses bare CSS text carried inside a string or a template', () => {
