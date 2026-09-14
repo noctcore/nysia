@@ -193,6 +193,14 @@ expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/wrapped
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/wrapped-specifiers.ts', 5);
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/wrapped-specifiers.ts', 6);
 
+// The other half of the inversion, and the half that was missed: the OPTIONS were inverted
+// and the PATTERN was left hand-modelled. Every pattern was joined onto the importing file's
+// directory, which anchors it; Vite hands a pattern beginning with a double star to the
+// globber untouched and walks it from the filesystem root. A pattern the rule cannot anchor
+// is now a pattern it refuses to judge.
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/glob-unanchored-pattern.ts', 13);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/glob-unanchored-array.ts', 3);
+
 expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
 process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');
 // The clean fixture also reaches StoreContext by call from store/ and from main.tsx. If

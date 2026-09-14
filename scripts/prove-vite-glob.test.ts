@@ -14,9 +14,17 @@
  * the only way to tell is to run the thing.
  *
  * Vite is `apps/web`'s dependency, not the root's, so it is resolved from that package —
- * which also means this drives the exact version the application builds with. If it cannot
- * be resolved the test fails rather than skipping: a proof that did not run must never look
+ * which means this drives the exact version the application ships with. If it cannot be
+ * resolved the test fails rather than skipping: a proof that did not run must never look
  * like one that passed.
+ *
+ * WHAT THIS DOES NOT RUN. Every case goes through the dev pipeline — a middleware-mode
+ * server and its module runner — and not through `vite build`. The glob transform and the
+ * `?raw` load hook are the same plugins in both modes, so the forms executed here almost
+ * certainly behave identically in a build; but "almost certainly" is the honest word and
+ * nothing below is evidence about the build path. Writing that this drove the pipeline the
+ * application builds with would have been one more claim in this rule's history that reads
+ * better than it is true.
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -43,7 +51,7 @@ type Loaded = 'the real module' | 'source text' | 'something else';
  * emitted code: a module namespace carrying the provider's export is the leak this rule
  * exists to prevent, and a string is the source text that cannot leak anything.
  */
-async function whatTheGlobReturns(args: string): Promise<Loaded> {
+async function whatTheGlobReturns(args: string, entry = 'entry.js'): Promise<Loaded> {
   const vite = (await import(pathToFileURL(fromWebApp.resolve('vite')).href)) as {
     createServer: (config: unknown) => Promise<{
       ssrLoadModule: (url: string) => Promise<Record<string, unknown>>;
@@ -54,9 +62,10 @@ async function whatTheGlobReturns(args: string): Promise<Loaded> {
   const root = mkdtempSync(join(tmpdir(), 'nysia-vite-glob-'));
   try {
     mkdirSync(join(root, 'store'), { recursive: true });
+    mkdirSync(join(root, dirname(entry)), { recursive: true });
     writeFileSync(join(root, 'store/StoreContext.js'), `export const ${PROVIDER} = () => 42;\n`);
     writeFileSync(
-      join(root, 'entry.js'),
+      join(root, entry),
       `const m = import.meta.glob(${args});\n` +
         // An eager glob's values are the modules themselves; a lazy one's are loaders. The
         // harness has to take both, or it reads "eager" as "broken".
@@ -72,8 +81,8 @@ async function whatTheGlobReturns(args: string): Promise<Loaded> {
       server: { middlewareMode: true },
     });
     try {
-      const entry = await server.ssrLoadModule('/entry.js');
-      const [first] = (await entry.loaded) as unknown[];
+      const loaded = await server.ssrLoadModule(`/${entry}`);
+      const [first] = (await loaded.loaded) as unknown[];
 
       if (typeof first === 'string') return 'source text';
       if (first !== null && typeof first === 'object') {
@@ -134,6 +143,37 @@ describe('what the pinned Vite does with a glob', () => {
       await expect(whatTheGlobReturns("'./store/*.js', { query: { raw: true } }")).resolves.toBe(
         'the real module',
       );
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "does not resolve a root-relative pattern against the importing file's directory",
+    async () => {
+      // The anchoring premise, which the rule had wrong for every pattern it could not
+      // anchor. `/store/…` resolves against Vite's ROOT while the importer sits two
+      // directories below it, so a rule that joins the pattern onto the importing directory
+      // looks in the wrong place and says nothing.
+      //
+      // The form that actually shipped the hole is a leading `**`, which Vite hands to the
+      // globber untouched and walks from the filesystem root. That one cannot be a gate: run
+      // against a throwaway root on this machine it was still globbing after twenty seconds,
+      // which is the observation, and a test that scans the disk is not a test. This is the
+      // same premise, bounded — and `rules.ts` refuses both forms for the same reason.
+      await expect(whatTheGlobReturns("'/store/*.js'", 'nested/deeper/entry.js')).resolves.toBe(
+        'the real module',
+      );
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'rejects a bare pattern outright, so reporting one costs nothing real',
+    async () => {
+      // The rule reports every pattern it cannot anchor, a bare path included. Vite refuses
+      // this form, so that report can never stand between a developer and working code —
+      // which matters more than it would elsewhere, since lint-meta cannot suppress one.
+      await expect(whatTheGlobReturns("'store/*.js'")).rejects.toThrow(/Invalid glob/);
     },
     TIMEOUT,
   );

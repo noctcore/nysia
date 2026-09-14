@@ -130,6 +130,19 @@ describe('rule (d) and glob imports', () => {
     ['a stylesheet in front of the store', "['../**/*.css', '../store/*.ts']"],
     ['a negation in front of the store', "['!../store/ignored.css', '../store/*.t?x']"],
     ['patterns spread across lines', "[\n  '../**/*.css',\n  '../store/*.ts',\n]"],
+    // Patterns this cannot anchor. Vite hands a leading `**` to the globber untouched and
+    // walks it from the filesystem root; `/x` resolves against Vite's root; an alias or a
+    // subpath import goes through the resolver first. Joining any of them onto the importing
+    // file's directory NARROWS the pattern, which is the one direction that stays silent —
+    // and it is how a double-star glob reaching the store was allowed through.
+    ['a leading double star', "'**/StoreContext.ts'"],
+    ['a bare double star', "'**'"],
+    ['a root-relative pattern', "'/src/store/*.ts'"],
+    ['an alias', "'@/store/*.ts'"],
+    ['a subpath import', "'#store/*.ts'"],
+    ['a bare path with no prefix', "'store/*.ts'"],
+    ['an unanchorable pattern beside an innocent one', "['../**/*.css', '**/StoreContext.ts']"],
+    ['an unanchorable pattern behind a negation', "'!**/StoreContext.ts'"],
   ])('reports %s', (_what, args) => {
     expect(glob(args)).toHaveLength(1);
   });
@@ -182,8 +195,21 @@ describe('rule (d) and glob imports', () => {
       "'../**/*.{ts,tsx}', { query: '?raw', import: 'default', eager: true }",
     ],
     ['the pattern reaches nothing at all', "'../nowhere/*.ts'"],
+    // The narrowing. Vite appends the query to each import path only after the files have
+    // been globbed, so a query cannot change WHICH files are reached — only what comes back.
+    // An unrecognised query therefore falls through to the tree rather than reporting
+    // outright, which takes the asset, worker and url globs out of the over-report set. That
+    // matters because lint-meta has no way to suppress a report in place.
+    ['an asset glob carries a url query', "'../**/*.css', { query: '?url', import: 'default' }"],
+    ['a worker glob reaches no module', "'../nowhere/*.ts', { query: '?worker' }"],
+    ['a query this cannot evaluate sits on an innocent pattern', "'../**/*.css', { query: q }"],
   ])('allows a glob where %s', (_what, args) => {
     expect(glob(args)).toEqual([]);
+  });
+
+  it('still reports an unrecognised query when the pattern reaches a module', () => {
+    // The narrowing moves the decision to the tree; it does not hand the call an exemption.
+    expect(glob("'../store/*.ts', { query: '?url', import: 'default' }")).toHaveLength(1);
   });
 
   it('still asks the tree when the options decide nothing', () => {
