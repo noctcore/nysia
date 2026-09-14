@@ -311,3 +311,45 @@ export function moduleReferences(file: string, source: string): ModuleReference[
   visit(sourceFile);
   return found;
 }
+
+/**
+ * Every line on which `name` is *called* in a source file.
+ *
+ * The same discipline as {@link moduleReferences} and for the same reason: a rule that wants
+ * to know whether a file performs a particular call must not decide it by searching the text.
+ * `muteTerminalReplies` appears in comments in this repository — including in a sentence
+ * explaining why the call must exist — and a scan would count those and pass a module that
+ * never makes the call. A `CallExpression` whose callee is that identifier is unambiguous.
+ *
+ * Matches a bare call and a qualified one, `x.muteTerminalReplies()` included, because what
+ * matters to a caller is that the function ran and not which binding reached it. What it
+ * cannot see is a call through a computed member or an alias — `const m = mute; m()` — and
+ * that is the same boundary the module-reference reader has: a parser can say a name is
+ * computed but not what it computes to. Nothing here decides policy; `rules.ts` does.
+ */
+export function callSites(file: string, source: string, name: string): number[] {
+  const sourceFile = ts.createSourceFile(
+    file,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKindFor(file),
+  );
+
+  const lines: number[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const called =
+        (ts.isIdentifier(callee) && callee.text === name) ||
+        (ts.isPropertyAccessExpression(callee) && callee.name.text === name);
+      if (called) {
+        lines.push(sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return lines;
+}

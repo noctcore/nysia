@@ -201,6 +201,29 @@ expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/wrapped
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/glob-unanchored-pattern.ts', 13);
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/glob-unanchored-array.ts', 3);
 
+// ---------------------------------------------------------------------------------------
+// Rule (e) — a module that builds a terminal without muting the replies it would send.
+//
+// This one exists because the line it guards is the line nothing executes. `surface/xterm.ts`
+// needs a DOM and a canvas to construct, v0.1's tests are node-only (D-18), and so deleting
+// `muteTerminalReplies(terminal.parser)` from it left `pnpm test` green at 613/613 — and
+// deleting the orphaned import with it left every gate green. The table the call applies is
+// covered by unit tests; the call was covered by nothing.
+// ---------------------------------------------------------------------------------------
+expectRule(trips, 'renderer-must-mute-replies');
+
+// The exact line of the import that obliges the module, because the locator is half of what
+// makes a rule usable — and because the fixture names `muteTerminalReplies` in a comment
+// ABOVE it. The real file discusses the mute in prose too, so a rule that searched the text
+// rather than the tree would count that sentence and pass the module that never calls it.
+expectLine(
+  trips,
+  'renderer-must-mute-replies',
+  'apps/web/src/transport/surface/xterm.ts',
+  8,
+);
+expectMessage(trips, 'renderer-must-mute-replies', 'never calls muteTerminalReplies()');
+
 expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
 process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');
 // The clean fixture also reaches StoreContext by call from store/ and from main.tsx. If
@@ -212,6 +235,11 @@ process.stdout.write('  clean: store/** and main.tsx may reach the provider by c
 // read source text or stylesheets rather than modules. Without these the rule could be
 // widened until it reported everything, which is the other way to stop being a gate.
 process.stdout.write('  clean: comments may discuss the ban, raw and css globs may run\n');
+// And rule (e)'s carve-out: the clean tree builds a terminal *and* mutes it, and its
+// stylesheet import — `@xterm/xterm/css/xterm.css` — must not read as a second module that
+// builds one. A rule matching every `@xterm/xterm` subpath would oblige a stylesheet to call
+// a function, and a clean fixture with no stylesheet in it would never have said so.
+process.stdout.write('  clean: a muted terminal passes, and a stylesheet builds nothing\n');
 
 // ---------------------------------------------------------------------------------------
 // Rules (b) and (c) — cargo's own resolution of a real workspace.
