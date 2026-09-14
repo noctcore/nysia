@@ -820,8 +820,18 @@ mod tests {
         let harness = start(output(StreamId::FIRST, 4096), true, &[]);
 
         // It must not be delivered, and it must not have cost the connection.
+        //
+        // **Budgeted well inside [`PENDING_DEADLINE`], and derived from it.** This predicate
+        // never becomes true, so the wait always runs to its limit — and at the plain
+        // `eventually` budget that limit *was* the hold deadline, to the second. The
+        // assertion below then raced the very drop the next test exists to prove happens,
+        // and lost on whichever runner was busier that morning. A tenth of the deadline is
+        // still orders of magnitude more than parsing one frame takes.
         assert!(
-            !eventually(|| harness.delivered.load(Ordering::SeqCst) > 0),
+            !eventually_within(PENDING_DEADLINE / 10, || harness
+                .delivered
+                .load(Ordering::SeqCst)
+                > 0),
             "a frame was delivered for a stream the ledger had not opened"
         );
         assert_eq!(
