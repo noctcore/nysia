@@ -140,7 +140,7 @@ impl Drop for Harness {
 /// Short for the reason `nysia-core`'s own helper is: macOS caps a Unix socket path at 103
 /// bytes and its `TMPDIR` is already about half of that, so anything descriptive here
 /// overruns the cap and every test in the module fails to resolve an endpoint at all.
-fn scratch(tag: &str) -> Endpoint {
+pub(crate) fn scratch(tag: &str) -> Endpoint {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let unique = NEXT.fetch_add(1, Ordering::Relaxed);
     let name = format!("nysd{:x}{unique:x}", std::process::id());
@@ -365,11 +365,18 @@ fn eventually(mut check: impl FnMut() -> bool) -> bool {
 }
 
 #[test]
-fn the_window_finds_the_daemon_and_shakes_hands_with_it() {
-    // The endpoint resolver, end to end. This is the one that had the window dialling a
-    // path family the daemon does not bind, so on the Unix leg no window could ever reach a
-    // daemon — and no unit test on either side could say so, because each was right about
-    // its own half.
+fn the_window_reaches_a_daemon_bound_where_it_dials() {
+    // **What this proves, exactly.** That a client dialling a `Listening` reaches a daemon
+    // bound on it and completes the hello — the socket, the handshake, and the platform's
+    // transport, end to end.
+    //
+    // What it does *not* prove is that the window resolves the right `Listening` in the
+    // first place: the harness pins one through `Client::at`, which is the whole point of
+    // that constructor and which bypasses `dial` and the resolver entirely. A deliberately
+    // wrong resolver leaves every test in this module green. That claim belongs to
+    // `state::tests::the_ordinary_constructor_dials_what_the_resolver_answers` and
+    // `endpoint::tests::the_endpoint_is_the_one_both_halves_resolve`, which together close
+    // the chain `Client::new` -> `dial` -> `endpoint()` -> `nysia-core`.
     let harness = Harness::start("hello");
     let client = harness.window(Webview::new());
 
