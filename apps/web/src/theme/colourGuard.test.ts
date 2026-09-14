@@ -1,6 +1,9 @@
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 import {
+  INITIALIZED_DECLARATIONS,
+  INITIALIZERS_HANDLED_BY_HAND,
   DEPENDENCY_STYLESHEETS,
   TOKEN_DEFINITION_MODULES,
   TOKEN_DEFINITION_STYLESHEETS,
@@ -92,6 +95,76 @@ const OFFENDERS = [
     snippet: `export const D = () => <Dot stroke={active ? 'navy' : undefined} />;`,
   },
 ] as const;
+
+/*
+ * The declaration family, asked of TypeScript rather than listed from memory.
+ *
+ * Three rounds of review each found a declaration kind the rule did not know about, and
+ * every one of them was "a declaration binds a name to an initializer" wearing a different
+ * node kind. The fix was to stop hand-listing the kinds and call TypeScript's own predicate;
+ * this is what stops that fix quietly rotting when the compiler is upgraded.
+ *
+ * It is deliberately a check and not an assertion about shapes. A test that parses one
+ * example per kind proves only the kinds somebody thought to write down, which is the
+ * failure it is meant to prevent.
+ */
+describe('the declaration family', () => {
+  /**
+   * Every `ts.SyntaxKind`, as a name and a number.
+   *
+   * The enum carries reverse mappings and a set of `First…`/`Last…` aliases that share
+   * numbers with real kinds, so the numbers are taken from the numeric half and named back
+   * through the enum — which is exactly how the guard would see them.
+   */
+  const everyKind = Object.values(ts.SyntaxKind).filter(
+    (value): value is ts.SyntaxKind => typeof value === 'number',
+  );
+
+  it('enumerates a whole compiler worth of kinds, so the sweep is not vacuous', () => {
+    expect(everyKind.length).toBeGreaterThan(300);
+  });
+
+  it('reads exactly the declaration kinds TypeScript says have an initializer', () => {
+    // `hasOnlyExpressionInitializer` switches on `node.kind` alone, so a bare kind is enough
+    // to ask it about every member of the enum rather than about the handful of shapes
+    // anybody happened to write a fixture for. The cast says that out loud: this is asking
+    // the predicate a question about a kind, not handing it a real node.
+    const accepted = everyKind
+      .filter((kind) => ts.hasOnlyExpressionInitializer({ kind } as unknown as ts.Node))
+      .map((kind) => ts.SyntaxKind[kind])
+      .sort();
+
+    expect(accepted).toEqual([...INITIALIZED_DECLARATIONS].sort());
+  });
+
+  it('names every node that carries an initializer the predicate does not accept', () => {
+    // The complement, which is what makes the pair a closed claim rather than half of one.
+    // These are the interfaces in TypeScript's public typings with an `initializer` or
+    // `objectAssignmentInitializer` field, minus the ones above. Each is either handled at
+    // its own site or explained in the residue; the guard's comment says which and why.
+    for (const kind of INITIALIZERS_HANDLED_BY_HAND) {
+      expect(INITIALIZED_DECLARATIONS, kind).not.toContain(kind);
+      expect(ts.SyntaxKind[kind as keyof typeof ts.SyntaxKind], kind).toBeTypeOf('number');
+    }
+    expect(INITIALIZERS_HANDLED_BY_HAND).toHaveLength(5);
+  });
+
+  it('reads a declaration kind through the predicate and not through a list', () => {
+    // The behavioural half: one shape per kind the predicate accepts, so the branch that
+    // calls it is exercised for the whole family rather than asserted about.
+    for (const [kind, source] of [
+      ['VariableDeclaration', `const color = 'red';`],
+      ['Parameter', `function paint(fill = 'red') {}`],
+      ['BindingElement', `const { color = 'red' } = props;`],
+      ['PropertyDeclaration', `class A { color = 'red'; }`],
+      ['PropertyAssignment', `const s = { color: 'red' };`],
+      ['EnumMember', `enum Swatch { color = 'red' }`],
+    ] as const) {
+      expect(INITIALIZED_DECLARATIONS, kind).toContain(kind);
+      expect(findColourLiterals(source).map((c) => c.kind), kind).toEqual(['named-colour']);
+    }
+  });
+});
 
 describe('the three rules that read whole files as text', () => {
   it('finds a hex colour in every length CSS accepts', () => {
@@ -598,6 +671,51 @@ describe('the rule that reads a syntax tree', () => {
         'named-colour',
       ]);
     }
+  });
+
+  it('finds a colour written as a default in a destructuring assignment', () => {
+    // Not a declaration: `({ color = 'red' } = props)` is an assignment whose target is
+    // written as an object literal, so the default hangs off a shorthand property and is
+    // spelled `objectAssignmentInitializer`. That one different field name is why it sits
+    // outside TypeScript's predicate and is named by hand at its site.
+    expect(
+      findColourLiterals(`let color; ({ color = 'red' } = props);`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+    // The renamed form is a property assignment whose value is itself an assignment, which
+    // is read because an assignment evaluates to what was assigned.
+    expect(
+      findColourLiterals(`({ color: c = 'red' } = props);`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+    // A shorthand with no default is a read, not a write.
+    expect(findColourLiterals(`const s = { color };`)).toEqual([]);
+  });
+
+  it('finds a colour on a private field, declared or assigned', () => {
+    // A private name carries its hash in the node text and the vocabulary is written without
+    // one, so the hash comes off where the name is read. `#color` paints exactly what
+    // `color` paints — the hash is how the language spells privacy, not part of the name.
+    expect(findColourLiterals(`class A { #color = 'red' }`).map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
+    expect(findColourLiterals(`this.#color = 'red';`).map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
+    // And a private name that does not paint stays quiet, so the hash-stripping is not a
+    // blanket widening.
+    expect(findColourLiterals(`class A { #tier = 'gold' }`)).toEqual([]);
+  });
+
+  it('reads the value of an assignment used as a value', () => {
+    // An assignment evaluates to what was assigned, so a chained write and an argument
+    // written as one are read. The left side is where the value went, not what it is, which
+    // is why only the right side is followed.
+    expect(
+      findColourLiterals(`el.style.color = fallback = 'red';`).map((c) => c.kind),
+    ).toContain('named-colour');
+    expect(
+      findColourLiterals(`const s = { color: (c = 'red') };`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+    expect(findColourLiterals(`const s = { color: (c = shade) };`)).toEqual([]);
   });
 
   it('stays quiet on a default that is not a colour, and on a binding with none', () => {
