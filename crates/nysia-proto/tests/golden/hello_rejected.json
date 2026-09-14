@@ -2,8 +2,8 @@
   "ok": false,
   "reason": {
     "attachable": {
-      "max": 1,
-      "min": 1
+      "max": 2,
+      "min": 2
     },
     "daemon": 1,
     "kind": "unsupported_version"

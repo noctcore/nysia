@@ -470,7 +470,10 @@ fn the_fixture_comparison_catches_a_wire_change() {
 /// it would still catch a swap that `encode` and `decode` agreed on between themselves.
 ///
 /// The frames deliberately use two different stream ids, so the golden covers the
-/// multiplexed case rather than a single-session one.
+/// multiplexed case rather than a single-session one, and the last of them is the replay
+/// boundary — nine bytes and no payload, which is the entire message. A marker whose kind
+/// byte moved would be read as some other kind by a peer and the boundary would land in the
+/// wrong place, so it is pinned here rather than left to the enum's own round trip.
 #[test]
 fn the_framing_still_produces_the_committed_bytes() {
     let frames = [
@@ -481,6 +484,7 @@ fn the_framing_still_produces_the_committed_bytes() {
             StreamId(11),
             br#"{"outcome":"exited","code":0}"#.as_slice(),
         ),
+        Frame::empty(FrameKind::ReplayEnd, StreamId(11)),
     ];
     let mut wire = Vec::new();
     for frame in &frames {

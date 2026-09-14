@@ -10,7 +10,7 @@ import type { RejectReason } from "./RejectReason";
 /**
  * The protocol version this build speaks and sends in its `hello`.
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /**
  * The oldest daemon protocol this build will attach to. A client that finds a daemon
@@ -18,7 +18,7 @@ export const PROTOCOL_VERSION = 1;
  * proceed, because a mismatched frame layout corrupts sessions the daemon is still serving
  * for someone else.
  */
-export const MIN_ATTACHABLE_PROTOCOL_VERSION = 1;
+export const MIN_ATTACHABLE_PROTOCOL_VERSION = 2;
 
 /**
  * The byte that names each kind in a frame header.
@@ -37,6 +37,7 @@ export const FRAME_KIND = {
   "bell": 3,
   "osc133": 4,
   "credit": 5,
+  "replay_end": 6,
 } as const satisfies Record<FrameKind, number>;
 
 /**
@@ -51,6 +52,7 @@ export const FRAME_KIND_BY_BYTE: Readonly<Record<number, FrameKind | undefined>>
   3: "bell",
   4: "osc133",
   5: "credit",
+  6: "replay_end",
 };
 
 /**

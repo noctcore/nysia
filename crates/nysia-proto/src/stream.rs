@@ -37,6 +37,44 @@
 //! - **Never [`StreamId::RESERVED`].** Zero is not assigned, so a zero-filled header is
 //!   refused by the codec itself rather than routed somewhere.
 //!
+//! # The replay boundary, and what a client owes it
+//!
+//! An attach does not begin with live output. The daemon replays the session's scrollback
+//! first — that is the whole point of re-attaching, and D-1's flagship promise — and only
+//! then starts forwarding what the child writes next. The two are indistinguishable in the
+//! frames themselves: both are [`FrameKind::Output`](crate::FrameKind::Output) carrying raw
+//! bytes, because a replay *is* the bytes the child once wrote.
+//!
+//! That indistinguishability is a fault, and a corrupting one. A replay carries every
+//! `ESC[6n` (cursor position) and `ESC[c` (device attributes) the child ever emitted, and a
+//! terminal emulator answers a query when it parses one — it has no way to know it is
+//! reading history. Those answers leave as *input*. On Windows ConPTY reads the `…R` of a
+//! cursor-position report as F3, which `cmd` treats as recall-previous-command, so a
+//! re-attached pane comes back showing a command line nobody typed and the user's next
+//! keystrokes are concatenated onto it.
+//!
+//! So the daemon marks the seam. [`FrameKind::ReplayEnd`](crate::FrameKind::ReplayEnd) is
+//! sent **exactly once per attach**, after the last replayed byte and before any live
+//! output, with an empty payload — the stream id in its header is the whole message.
+//!
+//! A client that renders into a terminal emulator **must** hold its outbound input from the
+//! moment it attaches until it has consumed that frame, and drop what it holds rather than
+//! queue it: the pane is not interactive yet, and a keystroke replayed into the child later
+//! lands at a prompt that has moved on. A client that renders into nothing — the CLI reading
+//! a screen, a hook waiting on an exit — has no emulator to answer a query and owes the
+//! frame nothing but the courtesy of not treating it as an error.
+//!
+//! **Why a marker and not a count.** [`StreamAttached`] could have carried the byte length
+//! of the replay. It must not: this wire has already shipped a defect where the credit window
+//! was specified in payload bytes and one end charged encoded ones, which every unit test on
+//! both sides passed and only a real-daemon interop test caught. A count is a number two
+//! implementations have to keep deriving identically forever. A marker is a byte that either
+//! arrived or did not.
+//!
+//! The boundary is **not** a reason to discard the frame when it names an id with no live
+//! entry, or to treat it as a kind apart in any other respect. It is routed by the same
+//! three rules as everything else below.
+//!
 //! # A frame whose id has no live entry
 //!
 //! Control and stream are separate sockets with no ordering between them, so a detach always
