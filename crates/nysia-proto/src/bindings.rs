@@ -94,12 +94,19 @@ pub const CONSTANTS_FILE_NAME: &str = "wireConstants.ts";
 ///   assigning the narrowed binding to `never` and reading back the full union. So a
 ///   handled arm cannot reach `detail` or `daemon`, and `assertNever` in the `default`
 ///   branch stays an error after all five cases are spelled out. It never clears.
-/// - The cause is upstream of the tail's shape. TypeScript treats a property as a
-///   discriminant only while every constituent types it as a unit type or a pattern
-///   literal, so one constituent typing `kind` as `string` disqualifies the property for
-///   the entire union. A branded tail (`string & { readonly [tag]: true }`, and `string &
-///   { __open: never }`) and a tail carrying absent-field markers (`detail?: never`) were
-///   both measured, and both behave exactly like the plain `string & {}` that ships.
+/// - The cause is the `string & {}` tail specifically. A union collapses string literals
+///   into a plain `string`, so on a `{ kind: string }` tail `reason.kind` is just `string`
+///   and `=== "unauthorized"` leaves exactly `"unauthorized"` — which the other four
+///   constituents cannot be, so they drop. The intersection is the spelling that resists
+///   that collapse, so `reason.kind` stays `"unauthorized" | … | (string & {})`, the same
+///   comparison leaves `"unauthorized" | (string & {})`, and every constituent is still
+///   comparable with that. Nothing is filtered out. A branded tail (`string & { readonly
+///   [tag]: true }`, and `string & { __open: never }`) and a tail carrying absent-field
+///   markers (`detail?: never`) were both measured on top of the intersection, and both
+///   behave exactly like the bare `string & {}` that ships.
+/// - Spelling the tail `string` is not the fix that narrowing makes it look like. The tail
+///   constituent survives every arm, so a handled arm still cannot reach `detail` and
+///   `assertNever` still does not clear — only the four literal constituents go.
 /// - A pattern-literal tail (`` `x-${string}` ``) does narrow, which is what isolates the
 ///   cause — and is also why there is no sixth approach. "Any string except these five"
 ///   needs a negated type, which TypeScript does not have, and no pattern literal denotes
@@ -215,10 +222,15 @@ export const CREDIT_WINDOW_DEFAULT = {{
  * remove nothing from the union — not merely the open tail, the whole union survives into
  * every arm — so a handled arm cannot read `detail` or `daemon`, and an `assertNever`
  * default stays a type error after all five cases are written out rather than clearing
- * once they are. TypeScript stops treating `kind` as a discriminant the moment one
- * constituent types it `string`, and \"any string but these five\" is not a type
- * TypeScript can express. Measured on 5.9.3; `nysia-proto`'s `bindings` module records the
- * branded and pattern-literal tails that were tried on the way to that conclusion.
+ * once they are. The cause is the `string & {{}}` tail: a union collapses string literals
+ * into a plain `string`, and the intersection is the spelling that resists that, so
+ * `reason.kind` stays a union that still carries the tail and every constituent stays
+ * comparable with the literal it is compared to. Spelling the tail `string` is not the fix
+ * that narrowing makes it look like — it drops the other four constituents, but the tail
+ * survives every arm, so `detail` stays unreachable and `assertNever` still does not
+ * clear. \"Any string but these five\" is not a type TypeScript can express. Measured on
+ * 5.9.3; `nysia-proto`'s `bindings` module records the branded and pattern-literal tails
+ * that were tried on the way to that conclusion.
  *
  * So read a reason that arrived from a peer like this:
  *
