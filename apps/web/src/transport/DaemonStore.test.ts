@@ -37,6 +37,14 @@ class FakeDaemon implements DaemonBridge {
   readonly calls: { command: string; args?: Record<string, unknown> }[] = [];
   /** Set to make the next matching command reject. */
   failures = new Map<string, CommandFailure | string>();
+  /**
+   * Set to make the next `times` matching commands reject, and the ones after them work.
+   *
+   * What a daemon that is *coming up* looks like, which {@link failures} cannot express: one
+   * refusal followed by success is indistinguishable from a loop that gave up and got lucky,
+   * and the thing worth asserting is that the window is still asking on the fourth attempt.
+   */
+  readonly refusals = new Map<string, { failure: CommandFailure | string; times: number }>();
   /** Resolved to drop the connection, which is what `daemon_watch` returning means. */
   #dropped: (() => void) | null = null;
   #delivery: ((bytes: Uint8Array) => void) | null = null;
@@ -61,6 +69,12 @@ class FakeDaemon implements DaemonBridge {
     if (failure !== undefined) {
       this.failures.delete(command);
       throw failure;
+    }
+
+    const refusal = this.refusals.get(command);
+    if (refusal !== undefined && refusal.times > 0) {
+      refusal.times -= 1;
+      throw refusal.failure;
     }
 
     switch (command) {
@@ -472,6 +486,61 @@ describe('the connection', () => {
     // would end up ready on a build it had just refused to speak to.
     await until(() => dials() > 1, 20);
     expect(dials()).toBe(1);
+    store.dispose();
+  });
+
+  it('keeps probing while the runtime is still starting, and attaches when it answers', async () => {
+    // Twenty seconds is a bound on one call, not a verdict on the daemon. Defender scanning
+    // a binary it has never seen is exactly a first launch, so a daemon that binds at second
+    // twenty-five used to sit beside a window that had already told the user to reopen the
+    // app — and reopening worked, which made a timeout look like a flake.
+    //
+    // **A pin rather than the proof.** What changed is in Rust: the readiness timeout became
+    // retryable, and the window stopped starting a second runtime beside the one already on
+    // its way. This loop already retried anything retryable, so it would pass either side of
+    // that. What it holds in place is the half that lives here — while the window is still
+    // probing it says `reconnecting`, never `failed`, never stops, and the notice on screen
+    // does not tell the user to do something about a failure nobody has established.
+    const daemon = new FakeDaemon();
+    daemon.refusals.set('daemon_connect', {
+      failure: {
+        message: 'Nysia started its runtime and it has not answered within 20 seconds',
+        nextSteps: ['Nysia is still trying. If it never connects, the runtime wrote why to X.'],
+        retryable: true,
+      },
+      times: 3,
+    });
+    const store = new DaemonStore({
+      bridge: daemon,
+      router: new TerminalRouter({
+        bridge: daemon,
+        createTerminal: stubTerminals(),
+        platform: 'windows',
+      }),
+      retryDelaysMs: [0],
+    });
+
+    const seen: string[] = [];
+    store.subscribe(() => seen.push(store.getSnapshot().status));
+    let ended = false;
+    void store.run().then(() => {
+      ended = true;
+    });
+
+    await until(() => store.getSnapshot().errors.length > 0);
+    expect(store.getSnapshot().status).toBe('reconnecting');
+    const notice = store.getSnapshot().errors[0]?.message ?? '';
+    expect(notice).toContain('has not answered');
+    expect(notice).not.toContain('reopen');
+
+    // And then the daemon answers, with nobody having touched anything.
+    await until(() => store.getSnapshot().status === 'ready');
+    expect(store.getSnapshot().status).toBe('ready');
+    expect(
+      daemon.calls.filter((call) => call.command === 'daemon_connect').length,
+    ).toBeGreaterThan(3);
+    expect(seen).not.toContain('failed');
+    expect(ended, 'the loop gave up on a daemon that was still starting').toBe(false);
     store.dispose();
   });
 

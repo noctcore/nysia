@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::channel::{Dispatcher, FrameSink};
@@ -228,6 +229,25 @@ pub struct Client {
     endpoint: Option<Endpoint>,
     /// Which runtime this client may start when nothing is listening.
     binary: RuntimeBinary,
+    /// Whether a runtime this client started has yet to answer.
+    ///
+    /// Set when a readiness wait runs out, cleared the moment anything answers. While it is
+    /// set [`Self::spawn_policy`] yields [`SpawnPolicy::Never`], so every later attempt is a
+    /// **probe** and not a second spawn.
+    ///
+    /// That is the whole of the slow-first-launch fix, and both halves are load-bearing.
+    /// Twenty seconds is a bound on one call rather than a verdict on the daemon — Defender
+    /// scanning a binary it has never seen is exactly a first launch — so the window has to
+    /// keep looking, which is what makes the timeout retryable. But *keep looking* is not
+    /// *keep starting*: the runtime is already running, and a window that answered the
+    /// timeout by spawning another one every twenty seconds would pile processes onto the
+    /// machine that was too slow to start the first, which is the defect the stop semantics
+    /// were added to close, reappearing under a friendlier status.
+    ///
+    /// Outside the client lock, and an atomic, because [`Self::connect`] reads it before the
+    /// seam runs and writes it after — neither under a lock this module forbids waiting
+    /// under.
+    pending_runtime: Arc<AtomicBool>,
 }
 
 impl Client {
@@ -276,6 +296,7 @@ impl Client {
             edges: Arc::new((Mutex::new(0), Condvar::new())),
             endpoint,
             binary,
+            pending_runtime: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -293,6 +314,10 @@ impl Client {
     /// one thing here that can fail permanently — is safe to do at all. See
     /// [`nysia_core::rpc::ensure_daemon`]'s contract, step 2.
     fn spawn_policy(&self) -> Result<SpawnPolicy, DaemonError> {
+        if self.awaiting_runtime() {
+            // One is already on its way. Everything this client does from here is probing.
+            return Ok(SpawnPolicy::Never);
+        }
         match &self.binary {
             RuntimeBinary::Sidecar => Ok(SpawnPolicy::IfAbsent {
                 program: sidecar()?,
@@ -310,6 +335,21 @@ impl Client {
             #[cfg(test)]
             RuntimeBinary::Never => Ok(SpawnPolicy::Never),
         }
+    }
+
+    /// Whether a runtime this client started has yet to answer.
+    fn awaiting_runtime(&self) -> bool {
+        self.pending_runtime.load(Ordering::Acquire)
+    }
+
+    /// Remember that the runtime was started and the readiness wait ran out before it bound.
+    fn remember_runtime_started(&self) {
+        self.pending_runtime.store(true, Ordering::Release);
+    }
+
+    /// Forget it: something answered, so there is nothing left on its way.
+    fn forget_pending_runtime(&self) {
+        self.pending_runtime.store(false, Ordering::Release);
     }
 
     /// Connect, starting a daemon if none is listening, or return the identity of the one
@@ -351,6 +391,10 @@ impl Client {
         }
 
         let endpoint = self.dial()?;
+        // Read before the seam runs, so a failure describes the attempt that was actually
+        // made: a window already waiting on a runtime it started is not a window refusing
+        // to start one.
+        let waiting = self.awaiting_runtime();
         // Filled in by the policy closure below, if the seam ever gets as far as asking.
         // Kept because [`spawn_failure`] has to name the program that would not run, and
         // once the call returns this cell is the only party that saw it.
@@ -382,15 +426,29 @@ impl Client {
         let ensured = match outcome {
             Ok(ensured) => ensured,
             Err(error) => {
+                // The readiness wait ran out, which means the runtime **was** started and is
+                // still on its way. Every later attempt probes for it rather than starting
+                // a second one; see [`Self::pending_runtime`].
+                if matches!(
+                    error,
+                    EnsureError::Discovery(DiscoveryError::NeverReady { .. })
+                ) {
+                    self.remember_runtime_started();
+                }
                 return Err(spawn_failure(
                     &Attempt {
                         endpoint: &endpoint,
                         policy: resolved.get(),
+                        waiting,
                     },
                     error,
                 ));
             }
         };
+
+        // Something answered, so nothing this client started is still on its way — and if
+        // this daemon dies later, the window is free to start another.
+        self.forget_pending_runtime();
 
         if ensured.spawned {
             tracing::info!(
@@ -892,6 +950,23 @@ fn beside(exe: &std::path::Path) -> Result<PathBuf, DaemonError> {
     Ok(beside)
 }
 
+/// A daemon that was started and has not answered **yet**.
+///
+/// Retryable, and the next step says so in as many words. Everything a window can do about a
+/// runtime that is still starting it is already doing; what a person needs to know is that it
+/// has not given up, and where to look if the wait never ends. Deliberately **not**
+/// [`THEN_REOPEN`] — that sentence tells the reader the window has stopped, and here it has
+/// not.
+fn still_starting(endpoint: &Endpoint, message: String) -> DaemonError {
+    DaemonError::Starting {
+        message,
+        next_step: format!(
+            "Nysia is still trying. If it never connects, the runtime wrote why to {}.",
+            endpoint.log_path().display()
+        ),
+    }
+}
+
 /// The sentence every spawn failure ends with.
 ///
 /// **Not "run `nysia --daemon`".** That was advice for a developer: an installed app puts its
@@ -914,6 +989,11 @@ struct Attempt<'a> {
     /// a probe that failed. A spawn that went wrong always has one, because a spawn cannot
     /// happen without it.
     policy: Option<&'a SpawnPolicy>,
+    /// Whether a runtime this client started was already on its way when it began.
+    ///
+    /// The one thing that separates the two meanings of [`SpawnPolicy::Never`]: a client
+    /// that may not start a daemon at all, and a window waiting for the one it started.
+    waiting: bool,
 }
 
 /// What the user is told when no daemon could be reached or started.
@@ -921,8 +1001,8 @@ struct Attempt<'a> {
 /// Each arm settles the sentence **and** whether the window keeps trying, and the two have to
 /// agree. The store reconnects on a retryable failure and stops on one that is not, so a
 /// permanent fault reported as retryable is a window that says *Reconnecting* for ever
-/// without once saying why — which is the defect this whole path exists to close, reappearing
-/// one layer up.
+/// without once saying why — and a temporary one reported as permanent is the opposite
+/// mistake, a window that has stopped beside a daemon that came up a moment later and works.
 fn spawn_failure(attempt: &Attempt<'_>, error: EnsureError<DaemonError>) -> DaemonError {
     let discovery = match error {
         // The probe is this module's own dial, so its failure already carries the window's
@@ -935,6 +1015,13 @@ fn spawn_failure(attempt: &Attempt<'_>, error: EnsureError<DaemonError>) -> Daem
         EnsureError::Discovery(discovery) => discovery,
     };
     match discovery {
+        // Nothing is listening and this client did not start one — because it already has.
+        // Retryable, and the message says what is being waited for rather than implying a
+        // policy the user could change.
+        DiscoveryError::Absent { endpoint } if attempt.waiting => still_starting(
+            attempt.endpoint,
+            format!("the runtime Nysia started has not answered on {endpoint} yet"),
+        ),
         DiscoveryError::Absent { endpoint } => DaemonError::Unreachable {
             endpoint,
             cause: "nothing is listening, and this client may not start one".to_owned(),
@@ -956,17 +1043,15 @@ fn spawn_failure(attempt: &Attempt<'_>, error: EnsureError<DaemonError>) -> Daem
                 }
             },
         },
-        // It started and died, or started and never bound. The daemon writes why to its log
-        // before it goes, so the next step is the path rather than a shrug.
-        DiscoveryError::NeverReady { seconds, .. } => DaemonError::Spawn {
-            message: format!(
-                "Nysia started its runtime but it did not answer within {seconds} seconds"
-            ),
-            next_step: format!(
-                "The runtime wrote why to {}. {THEN_REOPEN}",
-                attempt.endpoint.log_path().display()
-            ),
-        },
+        // It ran, and twenty seconds was not enough. **Not a verdict**: the process exists,
+        // and a first launch on a machine whose antivirus has never seen this binary is
+        // exactly when a bind arrives late. The window keeps probing for it — without
+        // starting another — so the sentence says what it is waiting for and where to look
+        // if it never arrives.
+        DiscoveryError::NeverReady { seconds, .. } => still_starting(
+            attempt.endpoint,
+            format!("Nysia started its runtime and it has not answered within {seconds} seconds"),
+        ),
         // Somebody else is mid-spawn. Retryable, and the window's reconnect is exactly the
         // right response: the daemon they are starting is the one this window wants.
         DiscoveryError::LockTimeout { seconds } => DaemonError::Io(format!(
@@ -1388,6 +1473,158 @@ mod tests {
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
     }
 
+    /// **#51 as a test.** A readiness timeout is not a verdict, and the window that hit one
+    /// attaches when the daemon appears — having started nothing else in the meantime.
+    ///
+    /// Twenty seconds is a bound on one call. Defender scanning a binary it has never seen is
+    /// exactly a first launch, so a daemon that binds at second twenty-five used to sit beside
+    /// a window that had already told the user to reopen the app. Reopening worked, which made
+    /// a timeout look like a flake.
+    ///
+    /// The clock is not what is under test and is not waited on. What is: the two transitions
+    /// either side of it — a window that has started a runtime **probes** rather than starting
+    /// a second one, and the moment anything answers it is an ordinary client again, free to
+    /// start one if this daemon ever goes.
+    #[test]
+    fn a_window_waiting_on_a_slow_runtime_keeps_probing_and_starts_no_second_one() {
+        let endpoint = crate::interop::scratch("slow-start");
+        let runtime = runtime_binary();
+        assert!(
+            runtime.is_file(),
+            "{} was not built; `cargo test --workspace` builds it before running this",
+            runtime.display()
+        );
+
+        let client = Client::at_with_runtime(endpoint.clone(), runtime.clone());
+        assert!(
+            matches!(client.spawn_policy(), Ok(SpawnPolicy::IfAbsent { .. })),
+            "a fresh window starts the runtime it ships with"
+        );
+
+        // What a readiness wait that ran out leaves behind: the runtime was started, and it
+        // has not answered.
+        client.remember_runtime_started();
+        assert!(
+            matches!(client.spawn_policy(), Ok(SpawnPolicy::Never)),
+            "a window with a runtime already on its way must probe, not start a second one"
+        );
+
+        let waiting = client
+            .connect()
+            .expect_err("the slow runtime has not bound yet");
+        assert!(
+            waiting.retryable(),
+            "a window that gave up here strands the daemon that is about to work: {waiting:?}"
+        );
+        assert!(
+            waiting.to_string().contains("has not answered"),
+            "the notice must say what is being waited for, got {waiting}"
+        );
+        let steps = waiting.next_steps().join(" ");
+        assert!(
+            !steps.contains("reopen Nysia"),
+            "the window is still trying, so it must not say it has stopped: {steps}"
+        );
+        assert!(
+            steps.contains(&endpoint.log_path().display().to_string()),
+            "a wait that never ends has to name the log that would explain it: {steps}"
+        );
+        assert!(
+            !endpoint.pid_record_path().exists(),
+            "a second runtime was started for a daemon that was already on its way"
+        );
+
+        // The daemon appears. Nothing the user does makes that happen — here a second client
+        // stands in for the slow bind — and the window's next probe is all it takes.
+        let starter = Client::at_with_runtime(endpoint.clone(), runtime);
+        let listening = starter.connect().expect("a daemon");
+
+        let attached = client.connect().expect("the daemon that finally answered");
+        assert_eq!(
+            attached.launch_nonce, listening.launch_nonce,
+            "the window found something other than the daemon that came up"
+        );
+        assert!(
+            matches!(client.spawn_policy(), Ok(SpawnPolicy::IfAbsent { .. })),
+            "a window that reached a daemon must be able to start one again if it goes"
+        );
+
+        client.disconnect();
+        starter.disconnect();
+        stop_daemon(&endpoint);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// A readiness timeout says the window is **still trying**, which is the opposite of what
+    /// every other spawn failure says.
+    ///
+    /// Deliberately adjacent to the test below: those two sentences are the only thing telling
+    /// a reader whether to wait or to act, and having them the wrong way round is invisible
+    /// except in a test that asserts both.
+    #[test]
+    fn a_runtime_that_has_not_answered_yet_says_so_rather_than_that_it_failed() {
+        let endpoint = crate::interop::scratch("not-yet");
+        let program = endpoint.runtime_dir().join("slow-nysia-runtime");
+        let policy = SpawnPolicy::IfAbsent { program };
+
+        let waiting = spawn_failure(
+            &Attempt {
+                endpoint: &endpoint,
+                policy: Some(&policy),
+                waiting: false,
+            },
+            EnsureError::Discovery(DiscoveryError::NeverReady {
+                endpoint: endpoint.listening().to_string(),
+                seconds: 20,
+            }),
+        );
+
+        assert!(
+            waiting.retryable(),
+            "a window that stopped here would strand a daemon that binds at second 25"
+        );
+        let steps = waiting.next_steps().join(" ");
+        assert!(
+            !steps.contains("reopen Nysia"),
+            "the window has not stopped, so the notice must not say it has: {steps}"
+        );
+        assert!(
+            steps.contains(&endpoint.log_path().display().to_string()),
+            "{steps} names no log for a wait that never ends"
+        );
+        // A sentence the user reads. The first draft of it ran over two source lines and
+        // rustfmt folded the indentation into the string, so it reached the notice list with
+        // fourteen spaces in the middle of a clause.
+        assert!(
+            !steps.contains("  "),
+            "the next step is not a sentence a person would write: {steps:?}"
+        );
+        assert!(
+            !steps.contains("`nysia --daemon`"),
+            "an installed app has no `nysia` on PATH: {steps}"
+        );
+
+        // And the same again for the attempt *after* one of these, which reaches the seam as
+        // "nothing is listening and this client may not start one". Same meaning to the user,
+        // so it must read the same way — not as a policy they could change.
+        let probing = spawn_failure(
+            &Attempt {
+                endpoint: &endpoint,
+                policy: Some(&SpawnPolicy::Never),
+                waiting: true,
+            },
+            EnsureError::Discovery(DiscoveryError::Absent {
+                endpoint: endpoint.listening().to_string(),
+            }),
+        );
+        assert!(probing.retryable(), "{probing:?}");
+        assert!(
+            probing.to_string().contains("has not answered"),
+            "got {probing}"
+        );
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
     /// The production rule, which the proof above deliberately does not use.
     ///
     /// Asserted rather than driven, because driving it would mean putting a `nysia` beside
@@ -1448,24 +1685,16 @@ mod tests {
         let attempt = Attempt {
             endpoint: &endpoint,
             policy: Some(&policy),
+            waiting: false,
         };
 
-        let failures = [
-            spawn_failure(
-                &attempt,
-                EnsureError::Discovery(DiscoveryError::Spawn(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "refused",
-                ))),
-            ),
-            spawn_failure(
-                &attempt,
-                EnsureError::Discovery(DiscoveryError::NeverReady {
-                    endpoint: endpoint.listening().to_string(),
-                    seconds: 20,
-                }),
-            ),
-        ];
+        let failures = [spawn_failure(
+            &attempt,
+            EnsureError::Discovery(DiscoveryError::Spawn(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "refused",
+            ))),
+        )];
 
         for failure in failures {
             assert!(

@@ -80,6 +80,23 @@ pub enum DaemonError {
         /// What to do about it. Never blank.
         next_step: String,
     },
+    /// The window started its runtime and it has not answered **yet**.
+    ///
+    /// The sibling of [`Self::Spawn`] and its exact opposite on the only question that
+    /// matters: this one is **retryable**. A readiness wait is a bound on one call, not a
+    /// verdict on the daemon — Defender scanning a binary it has never seen pushes a first
+    /// bind past twenty seconds on precisely the machine where a first launch happens — and a
+    /// window that called it permanent told the user to reopen the app beside a daemon that
+    /// came up five seconds later and worked. Its own variant rather than [`Self::Io`] so the
+    /// sentence can say what is being waited for and name the log that would explain a wait
+    /// that never ends.
+    #[error("{message}")]
+    Starting {
+        /// What is happening, as a sentence.
+        message: String,
+        /// What to do about it — including that the window has *not* stopped. Never blank.
+        next_step: String,
+    },
     /// The socket died.
     #[error("the connection to the daemon failed: {0}")]
     Io(String),
@@ -106,7 +123,9 @@ impl DaemonError {
     /// and pretending otherwise would spin forever against a daemon that will never agree.
     pub fn retryable(&self) -> bool {
         match self {
-            Self::Unreachable { .. } | Self::Io(_) | Self::Disconnected => true,
+            Self::Unreachable { .. } | Self::Io(_) | Self::Disconnected | Self::Starting { .. } => {
+                true
+            }
             Self::Refused { retryable, .. } => *retryable,
             Self::Daemon(envelope) => envelope.is_retryable(),
             Self::Endpoint(_) | Self::Protocol(_) | Self::Spawn { .. } => false,
@@ -140,7 +159,9 @@ impl DaemonError {
             }
             // Composed where the failure happened, because only that caller knows which path
             // was tried and which log would say why.
-            Self::Spawn { next_step, .. } => vec![next_step.clone()],
+            Self::Spawn { next_step, .. } | Self::Starting { next_step, .. } => {
+                vec![next_step.clone()]
+            }
         }
     }
 }
@@ -251,6 +272,10 @@ mod tests {
                 message: "the Nysia runtime is not installed beside the app".to_owned(),
                 next_step: "Reinstall Nysia.".to_owned(),
             },
+            DaemonError::Starting {
+                message: "Nysia started its runtime and it has not answered yet".to_owned(),
+                next_step: "Nysia is still trying.".to_owned(),
+            },
             DaemonError::Daemon(Box::new(ErrorEnvelope::new(
                 ErrorCode::SpawnFailed,
                 "pwsh is not on PATH",
@@ -288,6 +313,40 @@ mod tests {
             surfaced.message.contains("not installed beside the app"),
             "the sentence the caller composed must survive, got {:?}",
             surfaced.message
+        );
+    }
+
+    /// The pair that has to disagree: one runtime that cannot be started, one that has not
+    /// finished starting.
+    ///
+    /// Asserted together because the whole risk is that they drift into saying the same
+    /// thing. A readiness wait is a bound on one call — Defender scanning a binary it has
+    /// never seen is exactly a first launch — so a window that reported it as permanent
+    /// stopped beside a daemon that bound five seconds later and worked, and told the user to
+    /// reopen an app that did not need reopening.
+    #[test]
+    fn a_runtime_that_has_not_answered_yet_is_retryable_and_a_missing_one_is_not() {
+        let missing = DaemonError::Spawn {
+            message: "the Nysia runtime is not installed beside the app".to_owned(),
+            next_step: "Reinstall Nysia.".to_owned(),
+        };
+        let starting = DaemonError::Starting {
+            message: "Nysia started its runtime and it has not answered yet".to_owned(),
+            next_step: "Nysia is still trying.".to_owned(),
+        };
+
+        assert!(
+            !missing.retryable(),
+            "reinstalling is the fix; waiting is not"
+        );
+        assert!(
+            starting.retryable(),
+            "waiting is the whole of the fix; giving up strands a daemon that is on its way"
+        );
+        assert_eq!(
+            CommandFailure::from(starting).next_steps,
+            vec!["Nysia is still trying.".to_owned()],
+            "the caller composes this sentence, because only it knows what is being awaited"
         );
     }
 
