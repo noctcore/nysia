@@ -15,7 +15,7 @@
  * reports a manifest.
  *
  * Each ships a fixture proving it trips — `pnpm prove:lint-meta`. A check that passes
- * without exercising anything is worse than no check (traps register #13). Rule (e) is here
+ * without exercising anything is worse than no check (traps register #12). Rule (e) is here
  * for a reason worth naming: the module that builds the real terminal needs a DOM and a
  * canvas, v0.1's tests are node-only (D-18), and so the line that mutes it was the one line
  * in the repository nothing executed — deleting it left every gate green.
@@ -74,7 +74,7 @@ import { runAllRules, runSourceRules } from './rules.ts';
 const argument = process.argv[2];
 const root = argument === undefined ? findRepoRoot() : resolve(argument);
 const includeFixtures = process.argv.includes('--include-fixtures');
-/** The source rules alone — (a) and (d) — for a tree that is not a cargo workspace. */
+/** The source rules alone — (a), (d) and (e) — for a tree that is not a cargo workspace. */
 const sourceOnly = process.argv.includes('--source-only');
 
 let violations;
