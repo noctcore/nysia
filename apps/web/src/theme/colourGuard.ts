@@ -129,17 +129,27 @@ const PALETTE_CLASS = new RegExp(
  *    literal. Needs a CSS parser, not a wider pattern.
  *  - a custom property whose name is computed, which is to say a template-literal key.
  *    There is no name in the source for the pattern to match.
+ *  - a colour carried inside a `url()`, which is set aside as a path before the words are
+ *    counted. A data URI can carry a whole stylesheet, so this is the bare-CSS entry two
+ *    bullets up arriving through a different door. The trade bought the loudest false
+ *    positive the rule had, and a percent-encoded stylesheet is not a shape anything in
+ *    this tree writes.
  *
  * The hex and colour-function rules, which do scan whole files, are the backstop for every
  * one of them, listed or not: only a *named* colour can hide in any of these.
  *
- * In the other direction, the rule has false positives. A value that merely contains a
- * colour word, most obviously a url with one in the path. And a statement that ends without
- * a semicolon followed by an unrelated string on the next line, since the span crosses line
- * ends and only punctuation stops it — this tree is semicolon-terminated throughout and
- * nothing enforces that, so it is a live trap rather than a theoretical one. Both are loud:
- * a false positive fails the sweep and gets looked at, which is why they cost less than the
- * misses above and are tracked separately.
+ * In the other direction, the rule has false positives, and they are tracked separately
+ * because they are loud: one fails the sweep and gets looked at, where a miss ships a pixel
+ * in silence. That is why the trade above usually runs towards catching too much — but not
+ * always, because a guard that cries wolf is one somebody eventually switches off:
+ *
+ *  - a value that merely contains a colour word. The url form is closed, since a path is
+ *    the one place a colour word turns up in a value often enough to be worth knowing about.
+ *    A token whose own name spells one still fires, and that is the shape most likely to.
+ *  - a statement that ends without a semicolon followed by an unrelated string on the next
+ *    line, since the span crosses line ends and only punctuation stops it. This tree is
+ *    semicolon-terminated throughout and nothing enforces that, so it is a live trap rather
+ *    than a theoretical one.
  */
 const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
 
@@ -272,6 +282,30 @@ const NAMED_COLOURS = new Set(
 );
 
 /**
+ * A `url()` argument, which is a path and not a paint.
+ *
+ * Both quoted forms and the bare one, because CSS accepts all three and the value the rule
+ * captured may already have had one quote character spent on its own delimiters. The
+ * argument is dropped before the words are counted; everything around it still counts, so a
+ * shorthand that names an image *and* a colour is caught on the colour.
+ *
+ * Only `url()`. Not `var()`: a custom property takes a fallback, and a colour written into
+ * one is a colour, which is the whole reason the custom-property spelling is in the intro.
+ */
+const URL_ARGUMENT = /url\(\s*(?:'[^']*'|"[^"]*"|[^)'"]*)\)/g;
+
+/** Whether a captured value spells a colour once its image paths are set aside. */
+function namesAColour(value: string): boolean {
+  const painted = value.toLowerCase().replace(URL_ARGUMENT, ' ');
+  for (const word of painted.matchAll(/[a-z]+/g)) {
+    if (NAMED_COLOURS.has(word[0])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Every hardcoded colour in `source`.
  *
  * `currentcolor`, `transparent` and `inherit` are deliberately absent from the named list:
@@ -290,21 +324,14 @@ export function findColourLiterals(source: string): readonly ColourLiteral[] {
     found.push({ kind: 'palette-class', text: match[0] });
   }
   for (const span of source.matchAll(BRACKET_SPAN)) {
-    for (const word of span[0].toLowerCase().matchAll(/[a-z]+/g)) {
-      if (NAMED_COLOURS.has(word[0])) {
-        found.push({ kind: 'named-colour', text: span[0] });
-        break;
-      }
+    if (namesAColour(span[0])) {
+      found.push({ kind: 'named-colour', text: span[0] });
     }
   }
   for (const pattern of STYLE_VALUES) {
     for (const match of source.matchAll(pattern)) {
-      const value = (match[1] ?? '').toLowerCase();
-      for (const word of value.matchAll(/[a-z]+/g)) {
-        if (NAMED_COLOURS.has(word[0])) {
-          found.push({ kind: 'named-colour', text: match[0] });
-          break;
-        }
+      if (namesAColour(match[1] ?? '')) {
+        found.push({ kind: 'named-colour', text: match[0] });
       }
     }
   }
