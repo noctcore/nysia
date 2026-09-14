@@ -22,7 +22,7 @@
  * deliberately fails closed where upstream carries on with a dead rule.
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -36,6 +36,7 @@ import {
   getLabelConfigMapFromObject,
   labelsFor,
 } from './upstream.ts';
+import { components, deadComponents, type Sample } from './liveness.ts';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const read = (relative: string): string => readFileSync(join(repoRoot, relative), 'utf8');
@@ -56,7 +57,7 @@ const labels = (...files: string[]): string[] => labelsFor(labelConfigs, files);
  * The sampled pull requests, hoisted so the dead-rule invariant below can read them.
  * `[what, changed files, the exact labels expected]`.
  */
-const SAMPLES: readonly (readonly [string, readonly string[], readonly string[]])[] = [
+const SAMPLES: readonly Sample[] = [
   ['a pty-only change', ['crates/nysia-core/src/pty/mod.rs'], ['area:pty']],
   ['a vt-only change', ['crates/nysia-core/src/vt/mod.rs'], ['area:vt']],
   ['a git flat-module change', ['crates/nysia-core/src/git.rs'], ['area:git']],
@@ -65,8 +66,8 @@ const SAMPLES: readonly (readonly [string, readonly string[], readonly string[]]
   ['a daemon binary change', ['crates/nysia/src/main.rs'], ['area:daemon']],
   ['a core module no narrower area owns', ['crates/nysia-core/src/store.rs'], ['area:daemon']],
   ['a proto change', ['crates/nysia-proto/src/lib.rs'], ['area:proto']],
-  ['a generated-bindings-only change', ['apps/web/src/generated/SessionId.ts'], ['area:proto']],
-  ['a transport-only change', ['apps/web/src/transport/channel.ts'], ['area:desktop']],
+  ['a generated-bindings-only change', ['apps/web/src/generated/SessionKind.ts'], ['area:proto']],
+  ['a transport-only change', ['apps/web/src/transport/bridge.ts'], ['area:desktop']],
   ['a desktop shell change', ['apps/desktop/src-tauri/src/main.rs'], ['area:desktop']],
   ['a web-only change', ['apps/web/src/App.tsx'], ['area:web']],
   ['a docs-only change', ['docs/plans/v0.1-delivery-plan.md'], []],
@@ -76,6 +77,49 @@ const SAMPLES: readonly (readonly [string, readonly string[], readonly string[]]
   ['a crate manifest change', ['crates/nysia-core/Cargo.toml'], ['area:daemon', 'dependencies']],
   ['a gate change', ['scripts/prove-lint-meta.ts'], ['area:build', 'gate']],
   ['a workflow change', ['.github/workflows/ci.yml'], ['area:build']],
+
+  // The other spelling of every Rust module the config matches twice. A module is either
+  // `foo.rs` or `foo/mod.rs` and changes over its life, so each area names both — and until
+  // both were sampled, half of those globs and every exclusion that mirrors them decided
+  // nothing, which is what `no rule in the config is dead` below now refuses (#24).
+  ['a pty flat-module change', ['crates/nysia-core/src/pty.rs'], ['area:pty']],
+  ['a vt flat-module change', ['crates/nysia-core/src/vt.rs'], ['area:vt']],
+  ['a git directory-module change', ['crates/nysia-core/src/git/mod.rs'], ['area:git']],
+  ['a worktree directory-module change', ['crates/nysia-core/src/worktree/mod.rs'], ['area:git']],
+
+  // Every root file `area:build` enumerates, one pull request each. Enumerated rather than
+  // matched with '*' because README.md and CLAUDE.md sit at the root too, and a list nobody
+  // exercises is a list that can quietly lose an entry.
+  ['a root cargo manifest change', ['Cargo.toml'], ['area:build', 'dependencies']],
+  ['a pnpm lockfile change', ['pnpm-lock.yaml'], ['area:build', 'dependencies']],
+  ['a pnpm workspace change', ['pnpm-workspace.yaml'], ['area:build', 'dependencies']],
+  ['a toolchain pin change', ['rust-toolchain.toml'], ['area:build']],
+  ['an editorconfig change', ['.editorconfig'], ['area:build']],
+  ['a gitattributes change', ['.gitattributes'], ['area:build']],
+  ['a gitignore change', ['.gitignore'], ['area:build']],
+  ['an npmrc change', ['.npmrc'], ['area:build']],
+  ['a clippy config change', ['clippy.toml'], ['area:build']],
+  ['a rustfmt config change', ['rustfmt.toml'], ['area:build']],
+  ['an eslint config change', ['eslint.config.js'], ['area:build']],
+  ['a tsconfig change', ['tsconfig.json'], ['area:build']],
+  ['a base tsconfig change', ['tsconfig.base.json'], ['area:build']],
+  ['a vitest config change', ['vitest.config.ts'], ['area:build']],
+
+  // The manifests `dependencies` matches that no root-file glob reaches, and the tooling
+  // tree, which is `gate`'s other half.
+  ['a lint-meta source change', ['tools/lint-meta/src/rules.ts'], ['area:build', 'gate']],
+  [
+    'a lint-meta manifest change',
+    ['tools/lint-meta/package.json'],
+    ['area:build', 'dependencies', 'gate'],
+  ],
+  ['a web package manifest change', ['apps/web/package.json'], ['area:web', 'dependencies']],
+  [
+    'the tauri crate manifest',
+    ['apps/desktop/src-tauri/Cargo.toml'],
+    ['area:desktop', 'dependencies'],
+  ],
+
   [
     'a multi-area change',
     ['crates/nysia-core/src/pty/mod.rs', 'apps/web/src/App.tsx', 'docs/design/design-spec.md'],
@@ -85,12 +129,12 @@ const SAMPLES: readonly (readonly [string, readonly string[], readonly string[]]
   // component beside a generated binding is still a web change.
   [
     'web code beside a generated binding',
-    ['apps/web/src/App.tsx', 'apps/web/src/generated/SessionId.ts'],
+    ['apps/web/src/App.tsx', 'apps/web/src/generated/SessionKind.ts'],
     ['area:proto', 'area:web'],
   ],
   [
     'web code beside a transport file',
-    ['apps/web/src/App.tsx', 'apps/web/src/transport/channel.ts'],
+    ['apps/web/src/App.tsx', 'apps/web/src/transport/bridge.ts'],
     ['area:desktop', 'area:web'],
   ],
   // The shape that every over-labelling bug has produced. A pull request touching
@@ -281,5 +325,132 @@ describe('the transcription matches what the workflow pins', () => {
     // edit sets it explicitly, this simulation's constant has to be revisited with it.
     expect(workflow).not.toMatch(/^\s*dot:/m);
     expect(DOT).toBe(true);
+  });
+});
+
+/*
+ * No rule in the config is dead — including one sitting beside a live one.
+ *
+ * The invariant above is per *label*, and #24 is what that misses. Three probes stayed
+ * green while a second rule in the same label could never fire: an entry whose `any:` is an
+ * empty mapping, a second glob key holding an empty list, and a second entry with a
+ * misspelled path. In each the label kept firing through its live rule, so every per-label
+ * check passed. `liveness.ts` takes the config apart instead — one rule entry, one glob key,
+ * one glob at a time — removes each and re-runs the whole sample table. A piece nothing
+ * notices the loss of is either dead or unexercised, and from the far side those are the
+ * same defect: a rule nobody samples is one nobody would notice breaking.
+ *
+ * This is satisfied by fixing the rule *or* by sampling the pull request it was written for,
+ * and the second is usually what is missing. The table above grew by twenty rows when this
+ * invariant first ran, which is the honest measure of how much of that config was decorative.
+ */
+describe('no rule in the config is dead', () => {
+  /**
+   * The globs that decide nothing today, each because a catch-all beside them already does.
+   *
+   * `area:daemon` matches `crates/nysia-core/**` minus the four modules that have their own
+   * label, so every rpc path is already a daemon path; naming rpc again cannot change an
+   * outcome. Kept as documentation of which area owns the module rather than deleted, and
+   * listed here so that a reader meets the fact rather than a green check.
+   *
+   * Asserted in BOTH directions below. If the catch-all ever narrows, these globs start
+   * deciding something and this list goes stale in the direction that matters — so the
+   * second test fails and the entry has to come out.
+   */
+  const SUBSUMED_BY_A_CATCH_ALL: readonly string[] = [
+    'area:daemon > any-glob-to-any-file > "crates/nysia-core/src/rpc/**"',
+    'area:daemon > any-glob-to-any-file > "crates/nysia-core/src/rpc.rs"',
+  ];
+
+  const parsed = yaml.load(labelerSource);
+  const dead = deadComponents(parsed, SAMPLES);
+
+  it('has no rule the sample table does not notice the loss of', () => {
+    expect(dead.filter((d) => !SUBSUMED_BY_A_CATCH_ALL.includes(d))).toEqual([]);
+  });
+
+  it('lists nothing as subsumed that is actually load-bearing', () => {
+    expect(SUBSUMED_BY_A_CATCH_ALL.filter((d) => !dead.includes(d))).toEqual([]);
+  });
+
+  it('takes the config apart into more than a handful of pieces', () => {
+    // Guards the guard. If `components` stopped walking into the config, everything above
+    // would pass vacuously — which is the failure this whole file exists to refuse.
+    expect(components(parsed).length).toBeGreaterThan(40);
+  });
+});
+
+/*
+ * The three shapes from #24, each as its own synthetic config.
+ *
+ * The invariant is relative to a sample table, so a probe has to carry its own. Each is a
+ * live rule plus a dead one in the same label — the arrangement every per-label check is
+ * blind to — and each is paired with the same config minus the dead half, which must come
+ * back clean. A probe that reports dead components for both would be measuring nothing.
+ */
+describe('the shapes a per-label invariant cannot see', () => {
+  const WEB: readonly Sample[] = [['a web change', ['apps/web/src/App.tsx'], ['area:web']]];
+  const live = { 'any-glob-to-any-file': ['apps/web/**'] };
+
+  it('finds an entry whose any: is an empty mapping', () => {
+    const config = { 'area:web': [{ 'changed-files': [live] }, { any: {} }] };
+    expect(deadComponents(config, WEB)).toContain('area:web > entry 1');
+    expect(deadComponents({ 'area:web': [{ 'changed-files': [live] }] }, WEB)).toEqual([]);
+  });
+
+  it('finds a second glob key holding an empty list', () => {
+    const config = {
+      'area:web': [{ 'changed-files': [live, { 'any-glob-to-all-files': [] }] }],
+    };
+    expect(deadComponents(config, WEB)).toContain('area:web > changed-files[1]');
+  });
+
+  it('finds a second glob whose path is misspelled', () => {
+    const config = {
+      'area:web': [{ 'changed-files': [{ 'any-glob-to-any-file': ['apps/web/**', 'apps/wbe/**'] }] }],
+    };
+    expect(deadComponents(config, WEB)).toContain(
+      'area:web > any-glob-to-any-file > "apps/wbe/**"',
+    );
+  });
+});
+
+/*
+ * A sampled path is a path this repository has.
+ *
+ * Nothing checked that, so a glob matching no real file passed whenever its sample copied
+ * the same wrong path — and two already did: `apps/web/src/generated/SessionId.ts` and
+ * `apps/web/src/transport/channel.ts` were both fictional, and the suite was green on them
+ * for as long as they had been there. Checking against the tree is what makes the liveness
+ * invariant above mean something: a misspelled glob can only be proven live by a sample that
+ * matches it, and such a sample now has to name a file that exists.
+ */
+describe('the sample table describes real pull requests', () => {
+  /**
+   * A Rust module is either `foo.rs` or `foo/mod.rs`, and the config matches both spellings
+   * on purpose so a module can change shape without the label dying. Sampling only the
+   * spelling on disk today would leave the other glob permanently dead, so the counterpart
+   * of an existing module counts as real. Computed, not a hand-kept exception list: there is
+   * nothing to forget to remove.
+   */
+  const counterpart = (path: string): string | undefined => {
+    if (path.endsWith('/mod.rs')) return `${path.slice(0, -'/mod.rs'.length)}.rs`;
+    if (path.endsWith('.rs')) return `${path.slice(0, -'.rs'.length)}/mod.rs`;
+    return undefined;
+  };
+
+  const sampledFiles = [...new Set(SAMPLES.flatMap(([, files]) => files))];
+
+  it.each(sampledFiles)('%s is a file, or the other spelling of one', (file) => {
+    const other = counterpart(file);
+    const real = existsSync(join(repoRoot, file));
+    expect([file, real || (other !== undefined && existsSync(join(repoRoot, other)))]).toEqual([
+      file,
+      true,
+    ]);
+  });
+
+  it('samples enough paths for that to mean something', () => {
+    expect(sampledFiles.length).toBeGreaterThan(20);
   });
 });
