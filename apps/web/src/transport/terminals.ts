@@ -166,9 +166,12 @@ export class TerminalRouter {
             // The seam between the scrollback the daemon replayed and what the child writes
             // next. It paints nothing; what it does is tell this pane that the bytes ahead of
             // it are the last of the replay, so the surface can stop swallowing what the
-            // terminal reports once it has finished parsing them. Until then everything
-            // `onData` produces is xterm answering a query it found in the history — see
-            // `XtermSurface` for the whole chain and what it costs.
+            // terminal reports once it has finished parsing them. The renderer answers no
+            // query at all any more — `surface/muteReplies.ts` displaces every responder,
+            // because the daemon has already answered by the time these bytes arrive — so
+            // this gate is what covers the keystrokes typed at a pane still painting history,
+            // and whatever a future renderer emits that the mute's table does not name. See
+            // `XtermSurface` for both layers and what each costs.
             //
             // `surface(stream)` rather than a lookup, so a session with *no* scrollback still
             // gets its gate opened: the marker can be the first frame that stream ever

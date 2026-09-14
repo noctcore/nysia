@@ -87,6 +87,13 @@ export interface TerminalSurface {
    * a terminal answers the queries it parses, it cannot tell a replayed one from a live one,
    * and those answers arrive here indistinguishable from keystrokes. A surface holds this
    * channel shut until it knows the bytes being parsed are live.
+   *
+   * That is the second of two layers, not the only one. The first is that the renderer is
+   * built with its responders displaced, so it composes no answer at all — replayed or live
+   * — because the daemon has already answered every query by the time these bytes arrive and
+   * a display cache must not speak for the authority (D-7). See
+   * `./muteReplies.ts`; an implementation of this interface that cannot be muted owes the
+   * same guarantee some other way.
    */
   onInput(handler: (data: string) => void): () => void;
 
@@ -97,8 +104,7 @@ export interface TerminalSurface {
    * the input channel here, but to open it once the renderer has finished *parsing* the
    * bytes that came before — those are different moments. A terminal parses on its own
    * schedule, so the marker reaches this method while the replayed bytes are still queued,
-   * and a surface that opened on arrival would still forward every answer to a replayed
-   * query.
+   * and a surface that opened on arrival would forward whatever parsing them produced.
    */
   replayEnded(): void;
 

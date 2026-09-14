@@ -38,10 +38,10 @@ import type { RendererKind, WebglPool } from './webglPool';
  *
  * An attach begins with the daemon replaying the session's scrollback, and a replay is the
  * bytes the child once wrote — escape sequences intact, which means every `ESC[6n` and
- * `ESC[c` the child ever emitted. xterm answers a query when it parses one and has no way to
- * know it is reading history, so those answers arrive on `onData` looking exactly like
- * keystrokes, and forwarding them puts input into a shell nobody typed. On Windows ConPTY
- * reads the `…R` of a cursor-position report as F3, which `cmd` treats as
+ * `ESC[c` the child ever emitted. A terminal answers a query when it parses one and has no
+ * way to know it is reading history, so those answers arrive on `onData` looking exactly
+ * like keystrokes, and forwarding them puts input into a shell nobody typed. On Windows
+ * ConPTY reads the `…R` of a cursor-position report as F3, which `cmd` treats as
  * recall-previous-command: the pane came back after a relaunch showing a phantom command
  * line, and the user's next command was concatenated onto it.
  *
@@ -54,11 +54,33 @@ import type { RendererKind, WebglPool } from './webglPool';
  * side gets that says "parsed" rather than "queued". A pane with no scrollback has no such
  * chunk and opens immediately, which is correct: there is nothing to have answered.
  *
- * The two things this deliberately does not do are the two workarounds that were considered
- * and rejected. It does not time its way past the replay — that drops real keystrokes on a
- * slow machine and still lets a query through on a fast one — and it does not strip query
- * sequences from what it writes, which would break every full-screen program that
- * legitimately asks. A live query, after the boundary, is answered normally.
+ * **What this gate is for, now that the terminal answers nothing.**
+ * `./muteReplies.ts` takes the mechanism away at the source: the terminal this surface is
+ * handed is built with every responder displaced, so it composes no reply to a query in a
+ * replay or out of one. That is the fix for §12 q7, and the reason it had to be made is that
+ * the premise this comment used to carry — *a live query after the boundary is answered
+ * normally, so full-screen programs are unaffected* — was false in the shipped code.
+ * **Nothing was being protected.** The daemon's virtual terminal answers every query before
+ * the bytes reach this window, so a second answer from here was never a service to a program
+ * and always unsolicited input (#43).
+ *
+ * The gate stays, for two things the mute cannot do.
+ *
+ * - **Real keystrokes during the replay are still dropped**, and that is not a side effect —
+ *   see below. The mute has nothing to say about what a person types.
+ * - **It is the layer that does not need the table to be complete.** The mute is an
+ *   enumerated list of sequences living in the one module the node-only tests cannot exercise
+ *   against a real terminal (`./xterm.ts`, untested by design). The gate takes *everything*
+ *   `onData` produces while a replay is being parsed, whatever produced it — so an xterm bump
+ *   that adds a responder, or changes the dispatch order the mute is read against, lands on a
+ *   closed channel rather than in the shell. Different failure, different layer.
+ *
+ * The two workarounds rejected when the gate was written stayed rejected. It does not time
+ * its way past the replay — that drops real keystrokes on a slow machine and still lets a
+ * query through on a fast one — and it does not recognise replies in what `onData` reports.
+ * #43 rejected that one a second time, in favour of the mute, for a reason that had not
+ * changed: `ESC[5;3R` is a reply and also something a user can type, and a reply that is
+ * never composed needs no recognising.
  *
  * **Keystrokes during the window are dropped, not queued.** The pane is not interactive yet;
  * it is painting history. A keystroke held and delivered later lands at a prompt that has
@@ -251,11 +273,12 @@ export class XtermSurface implements TerminalSurface {
 
     terminal.open(host);
     const subscription = terminal.onData((data) => {
-      // **The one line the defect turns on.** While the gate is shut this is not a keystroke
-      // — it is xterm answering a `ESC[6n` or `ESC[c` it found in the replayed scrollback,
-      // and forwarding it types into the child on the user's behalf. Real keystrokes in the
-      // same window go the same way, which is the accepted cost: the pane is painting history
-      // and is not interactive yet.
+      // While the gate is shut, nothing here reaches the child. A muted terminal composes no
+      // answer to a query it finds in the replayed scrollback (`./muteReplies.ts`), so what
+      // arrives during that window should only ever be a keystroke — and a keystroke is
+      // dropped anyway, because the pane is painting history and is not interactive yet.
+      // Anything else is a responder the mute's table does not cover, which is precisely the
+      // case this layer exists to catch without knowing what it is.
       if (!this.#inputOpen) {
         this.#inputDropped += data.length;
         return;
