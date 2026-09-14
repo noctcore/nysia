@@ -50,7 +50,9 @@ pub const FORCED_COLORTERM: &str = "truecolor";
 /// treated as somebody's child session while two are a credential and an endpoint.
 ///
 /// `SessionSpec::with_env_overriding_the_scrub` is the one deliberate way past this, and it
-/// is named so the call site is greppable.
+/// is named so the call site is greppable. It is also the only one: the list it appends to
+/// is a private field, so there is no struct literal or direct `push` that reaches around
+/// the name.
 pub fn sanitize(command: &mut CommandBuilder) {
     for name in SCRUBBED_VARS {
         command.env_remove(name);
