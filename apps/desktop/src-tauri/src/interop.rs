@@ -38,7 +38,7 @@ use nysia_proto::credit::CreditWindow;
 use nysia_proto::envelope::{RequestPayload, ResponsePayload};
 use nysia_proto::frame::{FrameDecoder, FrameKind};
 use nysia_proto::identity::{SessionHandle, SessionKind};
-use nysia_proto::session::{SessionCreate, ShellProfile};
+use nysia_proto::session::{SessionCreate, SessionList, ShellProfile};
 use nysia_proto::stream::StreamId;
 use nysia_proto::terminal::{TerminalRead, TerminalSend, TerminalWait, WaitFor};
 use nysia_proto::version::PROTOCOL_VERSION;
@@ -178,6 +178,17 @@ struct Webview {
     decoder: Arc<Mutex<FrameDecoder>>,
     /// Payload bytes of output delivered, per stream.
     seen: Arc<Mutex<BTreeMap<StreamId, u64>>>,
+    /// What was delivered, per stream, as text.
+    ///
+    /// A byte count answers "did anything arrive"; the relaunch test has to ask "did *this*
+    /// arrive", because a pane that reattached and was then painted with somebody else's
+    /// scrollback would satisfy every count in this module.
+    ///
+    /// Lossy UTF-8 per chunk, which is right here and would not be in a renderer: a
+    /// coalesced window can split a multi-byte character, so a strict decode would fail on a
+    /// boundary that is not a fault. The token these tests look for is ASCII, so a
+    /// replacement character at a seam cannot hide it.
+    painted: Arc<Mutex<BTreeMap<StreamId, String>>>,
     /// Payload bytes of output delivered, across every stream.
     total: Arc<AtomicU64>,
 }
@@ -188,6 +199,7 @@ impl Webview {
             client: Arc::new(Mutex::new(None)),
             decoder: Arc::new(Mutex::new(FrameDecoder::new())),
             seen: Arc::new(Mutex::new(BTreeMap::new())),
+            painted: Arc::new(Mutex::new(BTreeMap::new())),
             total: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -214,6 +226,15 @@ impl Webview {
     fn delivered_total(&self) -> u64 {
         self.total.load(Ordering::Relaxed)
     }
+
+    /// Everything painted into a pane, as text.
+    fn painted(&self, stream: StreamId) -> String {
+        self.painted
+            .lock()
+            .ok()
+            .and_then(|painted| painted.get(&stream).cloned())
+            .unwrap_or_default()
+    }
 }
 
 impl FrameSink for Webview {
@@ -233,6 +254,12 @@ impl FrameSink for Webview {
             let count = frame.payload.len();
             if let Ok(mut seen) = self.seen.lock() {
                 *seen.entry(frame.stream).or_default() += count as u64;
+            }
+            if let Ok(mut painted) = self.painted.lock() {
+                painted
+                    .entry(frame.stream)
+                    .or_default()
+                    .push_str(&String::from_utf8_lossy(&frame.payload));
             }
             self.total.fetch_add(count as u64, Ordering::Relaxed);
 
@@ -275,6 +302,28 @@ fn shell() -> (Option<ShellProfile>, &'static str) {
         None,
         "yes xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     )
+}
+
+/// The token the relaunch test looks for. It appears in no line that is typed.
+const TOKEN: &str = "NYSIA-42";
+
+/// The lines that make [`open_shell`]'s shell **compute** [`TOKEN`].
+///
+/// Computed, never typed. A test that asserts on a string which also appears in the line as
+/// typed is satisfied by kernel echo, with the shell having run nothing at all — and after a
+/// relaunch it would also be satisfied by a replay of the *echo* rather than of the output,
+/// which is precisely the thing under test.
+///
+/// Branching on [`shell`]'s own answer rather than re-deciding: the profile and the lines
+/// have to agree, and the way that goes wrong is two copies of the decision drifting apart.
+fn token_lines() -> Vec<&'static str> {
+    match shell().0 {
+        Some(ShellProfile::Pwsh) => vec![r#"Write-Output ("NYSIA" + "-" + (6*7))"#],
+        // `cmd` expands `%NYS%` when it parses the line, so the assignment has to be its own
+        // command — which also keeps `42` out of everything that is typed.
+        Some(ShellProfile::Cmd) => vec!["set /a NYS=6*7", "echo NYSIA-%NYS%"],
+        _ => vec![r#"echo "NYSIA-$((6*7))""#],
+    }
 }
 
 /// Create a shell session on the daemon and return its handle.
@@ -509,6 +558,115 @@ fn a_reload_reattaches_over_a_second_stream_connection() {
         eventually(|| second.delivered(after) > 0),
         "nothing reached the pane after the reload; it was attached as {after:?} \
          (it held {before:?} before)"
+    );
+}
+
+/// **The v0.1 acceptance criterion, through the window's own client.**
+///
+/// > Kill the UI and the shell survives; reattach and the scrollback replays.
+///
+/// `crates/nysia/tests/survival.rs` proves the daemon half CLI-only. This is the other half:
+/// the same sentence, but every step taken by [`crate::state::Client`] — the type the Tauri
+/// commands reach through `spawn_blocking`, over the binary frame protocol, into a
+/// [`FrameSink`] where the webview would be. A daemon that survived `nysia terminal read`
+/// but not a window's reattach would leave `survival.rs` green and the product broken.
+///
+/// The steps, and why each is shaped this way:
+///
+/// 1. A window opens a shell and makes it **compute** [`TOKEN`]. Computed rather than typed,
+///    for the reason [`token_lines`] gives.
+/// 2. The window **goes away**: [`Client::disconnect`] drops both sockets and sends nothing —
+///    no `session_close`, no detach — which is what a window that exits leaves behind. That
+///    it is spelt as a call rather than a `drop` is not a softening: a `Client` is cloned
+///    into the sink, so dropping the local one would leave the connection open and the test
+///    would prove nothing.
+/// 3. The daemon is left with **no clients at all**, and is given long enough that one which
+///    tore its sessions down with its last client would have done so.
+/// 4. A **fresh** `Client` and a **fresh** sink — all a relaunched process has is the
+///    endpoint — list the sessions, find the handle, and attach. The assertion is on the
+///    text painted into that pane, not on a byte count: a pane that reattached and was then
+///    painted with somebody else's scrollback satisfies every count in this module.
+/// 5. And the session is still *live*, not merely readable: it takes a second line and
+///    answers it.
+///
+/// **One honest limit.** `daemon::endpoint::client_id` is a process-global `OnceLock`, so the
+/// second client here announces the id the first one did, and the daemon serves it the
+/// supersede path it serves a webview reload rather than the fresh-slot path a new process
+/// gets. That is the *harder* of the two — the daemon has to retire a binding whose socket is
+/// dead — so nothing is flattered by it; but the genuinely-new-id case belongs to a real
+/// relaunch, and is covered by `scripts/e2e/walking-skeleton.ps1` rather than here.
+#[test]
+fn a_relaunched_window_finds_the_session_and_replays_its_scrollback() {
+    let harness = Harness::start("relaunch");
+
+    let first_pane = Webview::new();
+    let first = harness.window(first_pane.clone());
+    first_pane.acks_for(&first);
+
+    let handle = open_shell(&first);
+    let before = first
+        .attach_session(handle.clone())
+        .expect("the daemon routes the session");
+    await_prompt(&first, &handle);
+
+    for line in token_lines() {
+        type_line(&first, &handle, line);
+        // Settle between lines rather than wait for the token: only the *last* line produces
+        // it, so waiting after the first would burn the budget on a condition that cannot be
+        // true yet — and `cmd` needs the assignment to have run before it parses the line
+        // that expands it.
+        settle(&first, &handle);
+    }
+    assert!(
+        eventually(|| screen(&first, &handle).contains(TOKEN)),
+        "the shell should have computed {TOKEN}; the screen was {:?}",
+        screen(&first, &handle)
+    );
+
+    // The window closes. Nothing is asked of the daemon between here and the relaunch.
+    first.disconnect();
+    drop(first);
+    drop(first_pane);
+    std::thread::sleep(Duration::from_secs(1));
+
+    let second_pane = Webview::new();
+    let second = harness.window(second_pane.clone());
+    second_pane.acks_for(&second);
+
+    let sessions = match second.request(RequestPayload::SessionList(SessionList {})) {
+        Ok(ResponsePayload::SessionList { sessions }) => sessions,
+        other => panic!("session_list was answered with {other:?}"),
+    };
+    assert!(
+        sessions.iter().any(|summary| summary.handle == handle),
+        "the session should have outlived the window that opened it; the daemon holds \
+         {sessions:?}"
+    );
+
+    let after = second
+        .attach_session(handle.clone())
+        .expect("the relaunched window attaches to the session it found");
+    assert!(
+        eventually(|| second_pane.painted(after).contains(TOKEN)),
+        "the scrollback never replayed into the new pane; it was attached as {after:?} \
+         (the first window held {before:?}) and was painted {:?}",
+        second_pane.painted(after)
+    );
+
+    // Still live, not merely readable. A session whose replay works and whose input does not
+    // is a recording, and the acceptance sentence is about a shell.
+    //
+    // The same lines again, and the assertion is that the token is painted a *second* time:
+    // the replay already put one there, so "contains" would be satisfied by a session that
+    // takes no input at all.
+    for line in token_lines() {
+        type_line(&second, &handle, line);
+        settle(&second, &handle);
+    }
+    assert!(
+        eventually(|| second_pane.painted(after).matches(TOKEN).count() > 1),
+        "the reattached session did not answer a second line; the pane holds {:?}",
+        second_pane.painted(after)
     );
 }
 
