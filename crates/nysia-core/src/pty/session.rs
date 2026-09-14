@@ -1134,9 +1134,9 @@ mod tests {
         // list, and `trap "" TERM` is SIG_IGN, which survives `exec`, so the child ignores
         // the signal too and only its own timeout ends it. Whether that lands inside the
         // 500ms grace is a race the test does not control: against the jobs-only poll the
-        // loop form failed about half the time on the macOS runner, and on Linux it never
-        // failed at all — 14 runs, 14 passes, a guard for a bug that was present the whole
-        // time. Lengthening the loop's sleep makes that worse rather than better, because
+        // loop form is reported in #21 as failing about half the time on the macOS runner,
+        // and measured on Linux it never failed at all — 14 runs, 14 passes, a guard for a
+        // bug present in every one. Lengthening the loop's sleep makes that worse, because
         // the child then reliably outlives the grace and the SIGKILL phase always runs. One
         // long `exec sleep`, with no child to poll, is the shape that fails every time.
         let (session, output, mut state) = spawn_ready(
