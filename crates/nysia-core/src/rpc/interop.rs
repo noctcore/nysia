@@ -53,6 +53,14 @@ const DEADLINE: Duration = Duration::from_secs(90);
 /// case it has to tell apart.
 const PROMPT_ANSWER: Duration = Duration::from_secs(10);
 
+/// The longest a test may hold a session's terminal state before letting go by itself.
+///
+/// Three times [`PROMPT_ANSWER`], so a daemon that waits on the lock is still unambiguously
+/// late — and finite, because a holder that waits to be released keeps the lock for however
+/// long the test is stuck, and a test that fails by wedging the runtime reports nothing at
+/// all. It burns the CI job's timeout instead, on the platform where that is most expensive.
+const HOLD_AT_MOST: Duration = Duration::from_secs(30);
+
 /// A window small enough that the accounting bug shows up in a test's worth of output.
 ///
 /// The arithmetic, because it is the whole reason these numbers are not the defaults: a
@@ -470,16 +478,25 @@ async fn an_attach_answers_before_a_byte_of_replay_is_enqueued() {
     let holder = std::thread::spawn(move || {
         let _guard = vt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         taken.send(()).ok();
-        release_rx.recv().ok();
+        // Self-releasing, rather than waiting to be told. A holder that waits holds the lock
+        // for as long as the test is stuck, and the daemon blocked behind it holds a runtime
+        // worker — so a failure stops reporting and starts wedging, which on Windows means
+        // burning the whole CI job's timeout and saying nothing about what broke.
+        release_rx.recv_timeout(HOLD_AT_MOST).ok();
     });
-    taken_rx
-        .recv_timeout(DEADLINE)
+    // Both blocking waits go off the runtime. The workers they would occupy are the ones
+    // serving the daemon this test is talking to, and one of them drives the timer below.
+    tokio::task::spawn_blocking(move || taken_rx.recv_timeout(DEADLINE))
+        .await
+        .expect("the holder thread ran")
         .expect("the terminal state lock was taken");
 
+    let asked = Instant::now();
     let answered =
         tokio::time::timeout(PROMPT_ANSWER, control.stream_attach(created.handle.clone())).await;
+    let waited = asked.elapsed();
     release.send(()).ok();
-    holder.join().ok();
+    let _ = tokio::task::spawn_blocking(move || holder.join()).await;
 
     let attached = answered
         .expect(
@@ -487,6 +504,15 @@ async fn an_attach_answers_before_a_byte_of_replay_is_enqueued() {
              stream sockets, so a replay enqueued first can beat the answer that names its id",
         )
         .expect("attaches");
+    // Not merely inside the timeout. An answer that arrives at nine seconds arrived *because*
+    // the lock was released, which is the same false pass by a slower route — the claim is
+    // that the replay is not on the answer's path at all, so the answer owes nothing to a
+    // lock this test still holds.
+    assert!(
+        waited < PROMPT_ANSWER / 4,
+        "the attach took {waited:?}, which is long enough that it was waiting on the replay \
+         rather than on a socket round trip"
+    );
     stream.assign(attached.stream_id);
 
     // And the replay does arrive, once it can — on the id the answer named, which is the
