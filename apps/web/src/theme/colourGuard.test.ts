@@ -250,6 +250,22 @@ describe('findColourLiterals', () => {
     ).toEqual([]);
   });
 
+  it('does not fire on a url whose path names a colour', () => {
+    // A path is not a paint. The word scan used to see straight through the parentheses,
+    // so a background referencing an image file whose name happens to carry a colour word
+    // failed the sweep — and a false positive in a guard is how the next person in a hurry
+    // learns to reach for the suppression rather than the fix.
+    expect(
+      findColourLiterals(`style={{ background: "url('/img/red-banner.png')" }}`),
+    ).toEqual([]);
+    expect(findColourLiterals("style={{ backgroundImage: 'url(/assets/tan.png)' }}")).toEqual(
+      [],
+    );
+    expect(findColourLiterals(`style={{ background: 'url("/i/gold.svg")' }}`)).toEqual([]);
+    // The bracket rule reads an arbitrary value the same way and had the same hole.
+    expect(findColourLiterals('className="bg-[url(/img/red.png)]"')).toEqual([]);
+  });
+
   it('finds a colour written to a custom property', () => {
     // The blind spot that hid `theme/tokens.ts` entirely: every token in this codebase
     // spells the word as a prefix, and the pattern wanted it as a suffix. The module whose
@@ -439,13 +455,28 @@ describe('the documented residue', () => {
     expect(findColourLiterals("{ [`--color-${key}`]: 'red' }")).toEqual([]);
   });
 
+  it('misses a colour carried inside a url', () => {
+    // The price of closing the loudest false positive the rule had: the argument is set
+    // aside as a path before the words are counted, and a data URI can carry a whole
+    // stylesheet through the same door. Percent-encoded, so nothing else in the value is
+    // left for the rule to see.
+    expect(
+      findColourLiterals(
+        `style={{ background: 'url(data:image/svg+xml,%3Csvg%20fill%3Dred/%3E)' }}`,
+      ),
+    ).toEqual([]);
+  });
+
   it('does fire on a value that merely contains a colour word', () => {
     // The other direction, also documented: a false positive, but a loud one. Nothing
     // silent can ship a pixel.
+    //
+    // The url form came off this entry, because a path is the one place a colour word
+    // turns up in a value often enough to be worth knowing. What is left is everything
+    // else that spells one — most plausibly a token whose own name carries it, which is a
+    // token a theme file is free to define.
     expect(
-      findColourLiterals(`style={{ background: "url('/img/red-banner.png')" }}`).map(
-        (c) => c.kind,
-      ),
+      findColourLiterals("style={{ color: 'var(--brand-red-500)' }}").map((c) => c.kind),
     ).toEqual(['named-colour']);
   });
 
