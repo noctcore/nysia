@@ -162,10 +162,14 @@ const PALETTE_CLASS = new RegExp(
  *    the string's contents as CSS, which is a parser and not a wider pattern.
  *  - a custom property whose name is computed, which is to say a template-literal key.
  *    There is no name in the source for the pattern to match.
- *  - a name and a value written as a tuple and handed to one of the DOM setters later,
- *    rather than passed to it at the call site. The comma separator is spelled as part of
- *    that call now; before it was, a tuple table was caught, but by accident — every
- *    unrelated two-argument call with a property name in front of a string was caught too.
+ *  - a setter the list above does not name, and a name and value written as a tuple for one
+ *    of the ones it does to consume later. The comma separator is spelled as part of a
+ *    named call now; before it was, both of those were caught, but by the accident that
+ *    caught every unrelated two-argument call with a property name in front of a string.
+ *    Three setters are named, which is the DOM's three; a project's own wrapper around one
+ *    of them is the shape most likely to land here, and it is indistinguishable from the
+ *    false positive that accident was — same two arguments, different intent, nothing in
+ *    the text to tell them apart.
  *  - a colour carried inside a `url()`, which is set aside as a path before the words are
  *    counted. A data URI can carry a whole stylesheet, so this is the bare-CSS entry above
  *    arriving through a different door. What it paid for was closing the loudest false
@@ -258,14 +262,27 @@ const COLOUR_INTRODUCER = `${PAINTING_PROPERTY}|${TERMINAL_THEME_KEYS.join('|')}
  * The call has to be named. The comma form used to accept any call whose first argument was
  * a quoted property name and whose second was a string — a test helper, an analytics event,
  * a two-element lookup table, none of which paints anything — and that was a false positive
- * inherited from the version before the rule narrowed. Naming the two DOM methods that
- * actually take this shape closes it without giving up the case the comma exists for.
+ * inherited from the version before the rule narrowed. Naming the DOM methods that actually
+ * take this shape closes it without giving up the case the comma exists for.
  *
- * The price is a name and a value written as a tuple somewhere else and handed to one of
- * these later, which is in the residue.
+ * Naming two of them was not enough, and the first version of this did. `setAttributeNS`
+ * puts the namespace first, so the property is its *second* argument, and the typed-OM
+ * `attributeStyleMap` spells the verb on its own — both were caught before the narrowing,
+ * by the accident it removed, and went quiet with it. Losing coverage while closing a false
+ * positive is the trade this rule is least allowed to make silently, so the namespaced form
+ * skips one argument and the map is named alongside the other two. The alternatives are
+ * written apart rather than as one optional group, so there is no argument for the engine
+ * to try both ways round.
+ *
+ * The price is any setter this list does not name — a project's own `applyStyle` wrapper,
+ * most likely, which is the same shape as the false positive above with a different name
+ * on it — and a name and value written as a tuple for one of these to consume later. Both
+ * are in the residue.
  */
-const SET_PROPERTY_CALL =
-  `(?<![\\w-])set(?:Property|Attribute)\\s*\\(\\s*['"\`](?:${COLOUR_INTRODUCER})['"\`]\\s*,`;
+const SETTER_CALL =
+  `(?<![\\w-])(?:set(?:Property|Attribute)|attributeStyleMap\\s*\\.\\s*set)\\s*\\(\\s*` +
+  `|(?<![\\w-])setAttributeNS\\s*\\(\\s*(?:'[^'\\n]*'|"[^"\\n]*"|[^,()\\n]{0,60})\\s*,\\s*`;
+const SET_PROPERTY_CALL = `(?:${SETTER_CALL})['"\`](?:${COLOUR_INTRODUCER})['"\`]\\s*,`;
 
 /**
  * The property and its separator.
