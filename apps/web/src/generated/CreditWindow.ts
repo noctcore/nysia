@@ -25,15 +25,15 @@ totalInitial: number,
  */
 totalMax: number, 
 /**
- * The most unacknowledged data the writer may hold queued for one stream.
+ * The most unacknowledged data the producer may hold queued for one stream.
  */
 pendingCap: number, 
 /**
- * The reader batches acks until it has consumed this much, so a busy stream does not
+ * The consumer batches acks until it has rendered this much, so a busy stream does not
  * spend its bandwidth on acknowledgements.
  */
 ackBatch: number, 
 /**
- * The largest slice of PTY output the writer puts in one frame.
+ * The largest slice of PTY output the producer puts in one frame.
  */
 chunk: number, };

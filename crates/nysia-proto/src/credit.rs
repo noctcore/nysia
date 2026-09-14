@@ -2,11 +2,38 @@
 //!
 //! A PTY can produce output faster than a webview can render it. Without a brake, `yes`
 //! fills the daemon's buffers, then the IPC queue, then memory. The brake is a credit
-//! window: the writer may send only as many bytes as it has been granted, the reader grants
-//! more once it has actually consumed them — after xterm's `write()` callback, not merely
-//! after the message arrives — and at zero credit the daemon stops reading the PTY. The
-//! kernel's PTY buffer then fills and the child blocks. That is the complete answer to a
-//! `yes` flood, and it works without dropping a byte.
+//! window.
+//!
+//! # Which way each frame goes
+//!
+//! **The producer grants; the consumer acks.** Said once, here, because saying it twice is
+//! how the two ends came to disagree:
+//!
+//! - The **producer** is the daemon. It owns the window, and a [`CreditGrant`] travels
+//!   producer → consumer, opening a stream and saying how many bytes may follow.
+//! - The **consumer** is the client. A [`CreditAck`] travels consumer → producer, after
+//!   xterm's `write()` callback rather than on arrival, because the window tracks what has
+//!   been *rendered* and a message sitting in a queue has not been.
+//!
+//! "Reader" and "writer" are the words to avoid: the daemon is the reader of the PTY and the
+//! writer of the socket, so either name picks out whichever end the speaker had in mind.
+//!
+//! A grant arriving from a consumer is not a grant. The party that owns the window is the
+//! only one that may enlarge it — a consumer able to credit itself could turn the
+//! backpressure off from the outside, which is the one thing the window exists to prevent.
+//!
+//! # And what it is counted in
+//!
+//! **Payload bytes**, in both directions. Not the encoded length: the frame header is
+//! transport overhead the consumer never receives as content, and the ack is emitted by the
+//! code that has just written a payload into a terminal, so it can only ever count payloads.
+//! A producer charging the header instead drains its own allowance by the header size on
+//! every frame — tens of thousands of frames into a session, permanently, for a reason
+//! nothing in a log would name.
+//!
+//! At zero credit the daemon stops reading the PTY. The kernel's PTY buffer then fills and
+//! the child blocks. That is the complete answer to a `yes` flood, and it works without
+//! dropping a byte.
 //!
 //! The defaults are Orca's production numbers, lifted rather than guessed:
 //!
@@ -48,12 +75,12 @@ pub struct CreditWindow {
     pub total_initial: u32,
     /// The most credit all streams together may accumulate.
     pub total_max: u32,
-    /// The most unacknowledged data the writer may hold queued for one stream.
+    /// The most unacknowledged data the producer may hold queued for one stream.
     pub pending_cap: u32,
-    /// The reader batches acks until it has consumed this much, so a busy stream does not
+    /// The consumer batches acks until it has rendered this much, so a busy stream does not
     /// spend its bandwidth on acknowledgements.
     pub ack_batch: u32,
-    /// The largest slice of PTY output the writer puts in one frame.
+    /// The largest slice of PTY output the producer puts in one frame.
     pub chunk: u32,
 }
 
@@ -72,8 +99,8 @@ impl CreditWindow {
     /// Whether the window's parameters can all hold at once.
     ///
     /// A window that grants a stream more than it grants every stream together, or that
-    /// batches acks beyond what it will hold pending, deadlocks: the writer stops at the
-    /// pending cap and the reader is still waiting for enough bytes to ack. Cheap to check
+    /// batches acks beyond what it will hold pending, deadlocks: the producer stops at the
+    /// pending cap and the consumer is still short of enough bytes to ack. Cheap to check
     /// and expensive to debug, so it is checkable here rather than discovered in a stall.
     #[must_use]
     pub const fn is_coherent(self) -> bool {
@@ -93,7 +120,9 @@ impl Default for CreditWindow {
     }
 }
 
-/// The reader tells the writer it may send more.
+/// The producer tells the consumer it may send more — daemon to client.
+///
+/// Counted in payload bytes, like the [`CreditAck`] that replenishes it.
 ///
 /// It names no session. A credit frame rides the stream connection, whose header already
 /// carries a [`StreamId`](crate::StreamId) — and two routing keys in one frame is a bug
@@ -103,16 +132,18 @@ impl Default for CreditWindow {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct CreditGrant {
-    /// How many further bytes the writer may send, on top of what it already has.
+    /// How many further payload bytes the producer may send, on top of what it already has.
     pub bytes: u32,
     /// The window in force, so the client never holds its own copy of the constants.
     pub window: CreditWindow,
 }
 
-/// The writer tells the reader how much of its credit it has spent.
+/// The consumer tells the producer how much of its allowance it has rendered — client to
+/// daemon.
 ///
 /// Sent after xterm's `write()` callback, not on arrival: the point of the window is to
-/// track what has been *rendered*, and a message sitting in a queue has not been.
+/// track what has been *rendered*, and a message sitting in a queue has not been. Counted in
+/// payload bytes, which is all a renderer ever sees.
 ///
 /// Like [`CreditGrant`], it names no session: the frame header's stream id is the routing
 /// key on this connection, and a second one could only ever disagree with it.
@@ -120,7 +151,7 @@ pub struct CreditGrant {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct CreditAck {
-    /// Bytes consumed since the last ack. Batched to [`CreditWindow::ack_batch`].
+    /// Payload bytes rendered since the last ack. Batched to [`CreditWindow::ack_batch`].
     pub bytes: u32,
 }
 
@@ -133,9 +164,9 @@ pub struct CreditAck {
 #[serde(tag = "credit", rename_all = "snake_case")]
 #[ts(export)]
 pub enum CreditFrame {
-    /// Reader to writer: you may send more.
+    /// Producer to consumer: you may send more.
     Grant(CreditGrant),
-    /// Writer to reader: I have rendered this much.
+    /// Consumer to producer: I have rendered this much.
     Ack(CreditAck),
 }
 
@@ -163,8 +194,8 @@ mod tests {
 
     #[test]
     fn an_incoherent_window_is_recognised_before_it_deadlocks() {
-        // Batching acks beyond the pending cap stalls: the writer stops at the cap and the
-        // reader is still short of enough bytes to ack.
+        // Batching acks beyond the pending cap stalls: the producer stops at the cap and
+        // the consumer is still short of enough bytes to ack.
         assert!(
             !CreditWindow {
                 ack_batch: CreditWindow::DEFAULT.pending_cap + 1,
