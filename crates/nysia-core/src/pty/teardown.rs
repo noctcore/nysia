@@ -266,9 +266,17 @@ mod unix_impl {
 
     /// Whether none of `pids` is still alive.
     ///
-    /// A process that has exited but not yet been reaped still answers this, so the caller
-    /// should not include a pid whose parent is a thread of its own — see the session
-    /// module, which leaves the leader out for exactly that reason.
+    /// A zombie — exited, not yet reaped — still answers `kill(pid, 0)`, so it reads as
+    /// alive here. That is **not** a reason to leave a pid out, and the session leader in
+    /// particular belongs in every list handed to this. Leaving it out is what the session
+    /// module used to do, and it cost the guarantee the `SIGKILL` phase exists for: with no
+    /// background job the remaining list is empty, `all_gone` is trivially true, and the
+    /// phase never runs — while an interactive `bash` ignores `SIGTERM` and is exactly the
+    /// leader that needed it.
+    ///
+    /// Including the leader costs nothing. Its session's waiter thread is already blocked
+    /// in `wait()`, so it is reaped the instant it dies and stops answering; and the caller
+    /// waits out the same grace on the exit slot either way.
     pub(crate) fn all_gone(pids: &[i32]) -> bool {
         // SAFETY: signal 0 delivers nothing and only performs the existence check.
         !pids.iter().any(|pid| unsafe { libc::kill(*pid, 0) == 0 })
