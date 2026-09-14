@@ -401,6 +401,12 @@ describe('the rule that reads a syntax tree', () => {
       `function* g() { el.style.color = yield (on ? 'red' : 'gray'); }`,
       `function* g() { const s = { color: yield 'red' }; }`,
       `function* g() { const s = { fill: (yield 'red') ?? 'gray' }; }`,
+      // The third site, and the one `yield` has to spell differently from `await`: a
+      // generator's parameter list cannot hold a `yield` — that is an early error, not a
+      // style — so the binding default goes in the body, where it runs. Checked against
+      // node rather than assumed, since a fixture that is only a parse tree would prove
+      // the walk reads something nobody can write.
+      `function* g() { const { color = yield 'red' } = props; }`,
     ]) {
       expect(findColourLiterals(yielded).map((c) => c.kind), yielded).toContain(
         'named-colour',
@@ -1194,7 +1200,11 @@ describe('the corpus', () => {
    * `await` and `yield` are deliberately absent from the matrices above: they are legal in
    * an expression position and not in a class-field initializer, an enum member or a
    * parameter default, so putting them in the cross-product would mean asserting over cells
-   * that do not parse. They have their own case, which covers them at three sites.
+   * that do not parse. Each has its own case, and the two cases cover the same three sites —
+   * an assignment, an object-literal property, and a binding default. `await` takes its
+   * third in a parameter default and `yield` cannot, because `yield` in a generator's
+   * parameter list is an early error rather than merely bad style; `yield`'s third is a
+   * binding default inside the body, which runs.
    */
   function wrap(source: string): string {
     return `function _() { ${source} }`;
@@ -1440,12 +1450,19 @@ describe('the documented residue', () => {
 });
 
 /*
- * The false positives that survived the rewrite, one case per entry.
+ * The false positives that are left, one case per entry.
  *
- * Three of the six the character rule had. The other three — the comment, the missing
- * semicolon and the quoted key — are in "what the parser closed" above, because a syntax
- * tree answers them outright. These three it does not: two are vocabulary and one is the
- * deliberate price of reading a call's arguments.
+ * What survives of the six the character rule had, and what the walk introduced. The three
+ * the tree answers outright — the comment, the missing semicolon and the quoted key — are in
+ * "what the parser closed" above, named so that sentence can be checked against the cases
+ * there.
+ *
+ * **This sentence counts nothing on purpose, and the guard's matching comment counts nothing
+ * either.** Both used to say "three", and both went stale the moment a fourth was added —
+ * by the commit whose whole job was closing the class of stated totals that do not match the
+ * list beneath them. A count written one screen above a list is a fact maintained by hand,
+ * and this file has now got that wrong in four separate rounds. Adding a case here cannot
+ * falsify a number that is not written.
  */
 describe('the false positives that are left', () => {
   it('does fire on a literal in a call the value is computed from', () => {
@@ -1588,6 +1605,59 @@ describe('hardcoded colour guard', () => {
     // the one thing the rewrite relaxed here, and the sweep above is what proves the rest
     // still holds.
     expect(TOKEN_DEFINITION_MODULES).not.toContain('src/theme/colourGuard.ts');
+  });
+
+  it('keeps the residue total in step with the list beneath it', () => {
+    // The one stated total left in either file, and the reason it survives: the residue list
+    // is referred to from the other file and from four rounds of review, so a number is worth
+    // having. It is worth having only if it cannot go stale on its own.
+    //
+    // Every other count in these two files has been removed rather than checked, because this
+    // is the failure that would not stop happening: a sentence and the list it counts sit a
+    // few lines apart, four separate rounds of review caught them disagreeing, and the fourth
+    // was introduced by the commit whose whole job was closing that class. A number maintained
+    // by hand next to a list is not documentation, it is a second copy of the list.
+    //
+    // So this reads both out of the guard's own source and compares them. Adding a bullet
+    // without touching the sentence turns this red, which is the only thing that has ever
+    // worked here.
+    const NUMBER_WORDS: Readonly<Record<string, number>> = {
+      Nine: 9,
+      Ten: 10,
+      Eleven: 11,
+      Twelve: 12,
+      Thirteen: 13,
+      Fourteen: 14,
+      Fifteen: 15,
+    };
+    const guard = scanned.find((file) => file.path === 'src/theme/colourGuard.ts')?.source;
+    expect(guard, 'the guard module was not scanned').toBeDefined();
+
+    const stated = /^ \* (\w+) entries\./m.exec(guard ?? '');
+    expect(stated?.[1], 'the residue comment no longer opens with a spelled-out total').toBeDefined();
+    const total = NUMBER_WORDS[stated?.[1] ?? ''];
+    expect(total, `"${stated?.[1]}" is not a number word this check knows`).toBeTypeOf('number');
+
+    // The list runs from that sentence to the backstop paragraph that closes the section.
+    const from = guard?.indexOf(stated?.[0] ?? '') ?? -1;
+    const to = guard?.indexOf(' * The hex and colour-function rules') ?? -1;
+    expect(from, 'residue section start').toBeGreaterThan(-1);
+    expect(to, 'residue section end').toBeGreaterThan(from);
+
+    const bullets = (guard ?? '').slice(from, to).match(/^ \* {2}- /gm) ?? [];
+    expect(
+      bullets.length,
+      `the residue comment says "${stated?.[1]}" and lists ${bullets.length}`,
+    ).toBe(total);
+
+    // What this does not check, and why: the other half of the arithmetic is that each
+    // bullet has a `misses…` case beneath it, plus one for the backstop sentence. Tying that
+    // down here would mean this file reading its own source, and Vite's `import.meta.glob`
+    // excludes the module that calls it — so the one file the glob cannot hand back is this
+    // one. That half stays a hand count, and it is the smaller risk of the two: a bullet
+    // without a case is a missing test, which the next reviewer reads the list to find,
+    // where a sentence that contradicts the list four lines down is invisible until somebody
+    // counts.
   });
 
   it('keeps the token stylesheet the only stylesheet under src', () => {
