@@ -1139,6 +1139,22 @@ mod tests {
         // bug present in every one. Lengthening the loop's sleep makes that worse, because
         // the child then reliably outlives the grace and the SIGKILL phase always runs. One
         // long `exec sleep`, with no child to poll, is the shape that fails every time.
+        //
+        // #21 proposed exactly that remedy — a longer sleep inside the loop, to make this
+        // guard deterministic — and it is backwards, so nobody should try it again. The
+        // longer sleep does not remove the race, it settles it on the wrong side: with the
+        // loop form the child reliably outlives the grace, the SIGKILL phase reliably runs,
+        // and the false pass becomes permanent rather than occasional. A guard that lies
+        // every time is worse than one that lies half the time.
+        //
+        // Measured in a container, for the record:
+        //
+        // - shipped code, with this guard as it stands: 10 passes in 10;
+        // - the kill phase reverted, with this guard as it stands: 20 failures in 20, each
+        //   taking an identical 15.51s;
+        // - the kill phase reverted, with this guard back in the loop form described
+        //   above: 10 passes in 10. That last row is the bug this guard exists to catch,
+        //   passing ten times out of ten.
         let (session, output, mut state) = spawn_ready(
             SessionSpec::new(ShellProfile::Posix).with_size(TerminalSize::new(120, 30)),
         );
