@@ -1075,10 +1075,7 @@ mod tests {
         let replayed = kinds.iter().filter(|k| **k == FrameKind::Output).count();
         assert!(replayed > 0, "the session had scrollback to replay");
         assert_eq!(
-            kinds
-                .iter()
-                .filter(|k| **k == FrameKind::ReplayEnd)
-                .count(),
+            kinds.iter().filter(|k| **k == FrameKind::ReplayEnd).count(),
             1,
             "a truncated replay still owes exactly one boundary; the attach wrote {kinds:?}"
         );

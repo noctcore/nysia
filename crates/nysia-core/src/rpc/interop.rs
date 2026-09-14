@@ -23,6 +23,7 @@
 //! | [`an_attach_answers_before_a_byte_of_replay_is_enqueued`] | the response cannot lose to the replay it explains |
 //! | [`a_second_stream_connection_does_not_take_the_first_one_s_streams_down`] | a reload does not deafen the window |
 //! | [`a_client_grant_cannot_talk_the_daemon_out_of_its_own_window`] | the producer's window holds against a consumer's grant |
+//! | [`a_replay_is_closed_by_one_boundary_with_live_output_strictly_after_it`] | a client can tell a replayed query from a live one |
 //!
 //! Each fails against the code as it was and passes against the code as it is.
 
@@ -158,6 +159,17 @@ struct StreamPeer {
     rendered: HashMap<u32, Vec<u8>>,
     /// How many payload bytes have been rendered in total, across every stream.
     total_rendered: u64,
+    /// How many replay boundaries each stream has been sent.
+    ///
+    /// A count rather than a flag, because "exactly once per attach" is the claim and a flag
+    /// would be satisfied by a daemon that marked every chunk.
+    boundaries: HashMap<u32, u32>,
+    /// How much had been rendered for a stream when its first boundary arrived.
+    ///
+    /// The seam, kept as an offset so a test can ask what was *replayed* separately from what
+    /// arrived live afterwards. A marker in the wrong place would still satisfy a test that
+    /// only counted them.
+    boundary_at: HashMap<u32, usize>,
     /// Whether rendering sends an ack back.
     ///
     /// A consumer that acks is the normal case and the only one a flood can flow through.
@@ -184,6 +196,8 @@ impl StreamPeer {
             unacked: HashMap::new(),
             rendered: HashMap::new(),
             total_rendered: 0,
+            boundaries: HashMap::new(),
+            boundary_at: HashMap::new(),
             acks: true,
         }
     }
@@ -283,9 +297,43 @@ impl StreamPeer {
                 }
                 None
             }
+            FrameKind::ReplayEnd => {
+                *self.boundaries.entry(id).or_default() += 1;
+                let so_far = self.rendered.get(&id).map_or(0, Vec::len);
+                self.boundary_at.entry(id).or_insert(so_far);
+                None
+            }
             // An exit or a bell is not rendered text and is never acked.
             _ => None,
         }
+    }
+
+    /// How many replay boundaries this stream has been sent.
+    fn boundary_count(&self, stream: StreamId) -> u32 {
+        self.boundaries.get(&stream.get()).copied().unwrap_or(0)
+    }
+
+    /// What arrived before the first boundary — the replay proper.
+    fn replayed(&self, stream: StreamId) -> String {
+        let seam = self.boundary_at.get(&stream.get()).copied().unwrap_or(0);
+        self.rendered
+            .get(&stream.get())
+            .map(|bytes| String::from_utf8_lossy(&bytes[..seam.min(bytes.len())]).into_owned())
+            .unwrap_or_default()
+    }
+
+    /// What arrived after it — everything the child has written since.
+    ///
+    /// Empty while no boundary has arrived, which is the honest reading: with no seam there
+    /// is nothing that is provably live.
+    fn after_boundary(&self, stream: StreamId) -> String {
+        let Some(&seam) = self.boundary_at.get(&stream.get()) else {
+            return String::new();
+        };
+        self.rendered
+            .get(&stream.get())
+            .map(|bytes| String::from_utf8_lossy(&bytes[seam.min(bytes.len())..]).into_owned())
+            .unwrap_or_default()
     }
 
     /// Tell the daemon how many payload bytes have been rendered.
@@ -746,6 +794,96 @@ async fn a_client_grant_cannot_talk_the_daemon_out_of_its_own_window() {
         .await;
     assert!(alive.is_ok(), "an ignored grant must not cost the session");
     assert_eq!(harness.daemon.streams().len(), 1, "nor the stream it named");
+
+    control
+        .session_close(created.handle)
+        .await
+        .expect("closes the session");
+    harness.stop();
+}
+
+/// The daemon half of the re-attach input defect: the replay says where it stops.
+///
+/// **What this can and cannot prove.** It proves the wire contract — one boundary per attach,
+/// after the last replayed byte, before anything live. It cannot prove the fix end to end,
+/// because the input that corrupted the shell was never written by any code in this
+/// repository: it was xterm answering a `ESC[6n` it found in the replayed scrollback, and
+/// there is no xterm in a Rust test. That half is proved in
+/// `apps/web/src/transport/surface/surface.test.ts` against a terminal stub that answers
+/// queries the way a real one does, and end to end by the relaunch script in `scripts/e2e`.
+///
+/// Against the code as it was, the daemon sends no boundary at all and the first assertion
+/// below fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replay_is_closed_by_one_boundary_with_live_output_strictly_after_it() {
+    let harness = Harness::start("ibound", CreditWindow::DEFAULT);
+    let first = client_id("nysia-interop-boundary-a");
+    let mut control = harness.control(&first).await;
+    let stream = harness.stream(&first).await;
+
+    let created = start_shell(&mut control).await;
+    await_prompt(&mut control, &created.handle).await;
+    // Scrollback worth replaying. A fresh pane has nothing to mark the end of, and a test
+    // that attached to one would pass against a daemon that never replays.
+    compute_token(&mut control, &created.handle).await;
+    drop(stream);
+    drop(control);
+
+    // The relaunch, as far as the daemon is concerned: a window it has never seen, attaching
+    // to a session that outlived the last one.
+    let second = client_id("nysia-interop-boundary-b");
+    let mut control = harness.control(&second).await;
+    let mut stream = harness.stream(&second).await;
+    let attached = control
+        .stream_attach(created.handle.clone())
+        .await
+        .expect("the second window attaches to the session it found");
+    let id = attached.stream_id;
+    stream.assign(id);
+
+    let marked = stream.until(|peer| peer.boundary_count(id) > 0).await;
+    assert!(
+        marked,
+        "the attach replayed {:?} and never said where the replay stopped; a client cannot \
+         tell a replayed query from a live one without that frame, and its answers reach the \
+         child as keystrokes",
+        stream.text(id)
+    );
+
+    // The scrollback is on the replay side of the seam. A boundary that arrived first would
+    // be a marker in the wrong place, which is worse than no marker: it opens a client's
+    // input gate while the bytes that provoke the answers are still to come.
+    let replayed = stream.until(|peer| peer.replayed(id).contains(TOKEN)).await;
+    assert!(
+        replayed,
+        "the boundary landed before the scrollback it was supposed to close; the replay side \
+         holds {:?} and the live side {:?}",
+        stream.replayed(id),
+        stream.after_boundary(id)
+    );
+
+    // And what the session writes *next* is on the other side of it. This is the half that
+    // makes the seam meaningful rather than decorative — and it proves the session is still
+    // a shell rather than a recording, which is the rest of D-1's sentence.
+    compute_token(&mut control, &created.handle).await;
+    let answered = stream
+        .until(|peer| peer.after_boundary(id).contains(TOKEN))
+        .await;
+    assert!(
+        answered,
+        "the re-attached session's own output did not arrive after the boundary; the live \
+         side holds {:?}",
+        stream.after_boundary(id)
+    );
+
+    // Exactly once. A daemon that marked every chunk would satisfy every assertion above and
+    // would tell a client the replay had ended while it was still replaying.
+    assert_eq!(
+        stream.boundary_count(id),
+        1,
+        "the attach sent {} boundaries; the contract is one per attach",
+        stream.boundary_count(id)
+    );
 
     control
         .session_close(created.handle)

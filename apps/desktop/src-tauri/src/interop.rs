@@ -191,6 +191,14 @@ struct Webview {
     painted: Arc<Mutex<BTreeMap<StreamId, String>>>,
     /// Payload bytes of output delivered, across every stream.
     total: Arc<AtomicU64>,
+    /// Replay boundaries delivered, per stream, and where each fell.
+    ///
+    /// The seam is kept as an offset into `painted` so a test can ask what was *replayed*
+    /// separately from what the child wrote afterwards. A marker in the wrong place would
+    /// satisfy a test that only counted them, and a marker in the wrong place is worse than
+    /// none: it tells a client the replay is over while the bytes that provoke the answers
+    /// are still on the way.
+    boundaries: Arc<Mutex<BTreeMap<StreamId, (u32, usize)>>>,
 }
 
 impl Webview {
@@ -201,6 +209,7 @@ impl Webview {
             seen: Arc::new(Mutex::new(BTreeMap::new())),
             painted: Arc::new(Mutex::new(BTreeMap::new())),
             total: Arc::new(AtomicU64::new(0)),
+            boundaries: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -227,6 +236,42 @@ impl Webview {
         self.total.load(Ordering::Relaxed)
     }
 
+    /// How many replay boundaries this stream has been sent.
+    fn boundary_count(&self, stream: StreamId) -> u32 {
+        self.boundaries
+            .lock()
+            .ok()
+            .and_then(|seen| seen.get(&stream).map(|(count, _)| *count))
+            .unwrap_or_default()
+    }
+
+    /// What was painted before the first boundary — the replay proper.
+    fn replayed(&self, stream: StreamId) -> String {
+        let seam = self
+            .boundaries
+            .lock()
+            .ok()
+            .and_then(|seen| seen.get(&stream).map(|(_, at)| *at))
+            .unwrap_or(0);
+        let painted = self.painted(stream);
+        painted[..seam.min(painted.len())].to_owned()
+    }
+
+    /// What was painted after it. Empty while no boundary has arrived, which is the honest
+    /// reading: with no seam nothing is provably live.
+    fn after_boundary(&self, stream: StreamId) -> String {
+        let Some(seam) = self
+            .boundaries
+            .lock()
+            .ok()
+            .and_then(|seen| seen.get(&stream).map(|(_, at)| *at))
+        else {
+            return String::new();
+        };
+        let painted = self.painted(stream);
+        painted[seam.min(painted.len())..].to_owned()
+    }
+
     /// Everything painted into a pane, as text.
     fn painted(&self, stream: StreamId) -> String {
         self.painted
@@ -247,6 +292,19 @@ impl FrameSink for Webview {
                 Ok(None) => return Ok(()),
                 Err(error) => return Err(error.to_string()),
             };
+            if frame.kind == FrameKind::ReplayEnd {
+                // Recorded here rather than ignored with the rest, because reaching this arm
+                // at all is half the claim: the desktop reader routes frames by kind, and a
+                // kind it did not recognise would have been dropped before the sink ever saw
+                // it. Only the *first* seam is kept — a second boundary is a fault, and moving
+                // the seam to it would hide the fault behind a plausible-looking split.
+                let so_far = self.painted(frame.stream).len();
+                if let Ok(mut seen) = self.boundaries.lock() {
+                    let entry = seen.entry(frame.stream).or_insert((0, so_far));
+                    entry.0 += 1;
+                }
+                continue;
+            }
             if frame.kind != FrameKind::Output {
                 continue;
             }
@@ -653,6 +711,30 @@ fn a_relaunched_window_finds_the_session_and_replays_its_scrollback() {
         second_pane.painted(after)
     );
 
+    // **And the replay says where it stops.** This is the frame that makes the re-attach
+    // path usable rather than merely working: the replayed bytes carry every terminal query
+    // the child ever wrote, a renderer answers a query when it parses one and cannot tell a
+    // replayed one from a live one, and its answers go back to the child as keystrokes — on
+    // Windows as F3, which `cmd` reads as recall-previous-command.
+    //
+    // Reaching this assertion at all is half of what it proves. `daemon::stream` routes
+    // frames by kind, so a kind it did not recognise would never have reached this sink. The
+    // gate the webview builds on top of it is proved against a terminal stub in
+    // `apps/web/src/transport/surface/surface.test.ts`, because the answers originate inside
+    // xterm and there is no xterm here.
+    assert!(
+        eventually(|| second_pane.boundary_count(after) > 0),
+        "the re-attach never marked the end of its replay; the pane holds {:?}",
+        second_pane.painted(after)
+    );
+    assert!(
+        second_pane.replayed(after).contains(TOKEN),
+        "the boundary landed before the scrollback it closes; the replay side holds {:?} \
+         and the live side {:?}",
+        second_pane.replayed(after),
+        second_pane.after_boundary(after)
+    );
+
     // Still live, not merely readable. A session whose replay works and whose input does not
     // is a recording, and the acceptance sentence is about a shell.
     //
@@ -667,6 +749,21 @@ fn a_relaunched_window_finds_the_session_and_replays_its_scrollback() {
         eventually(|| second_pane.painted(after).matches(TOKEN).count() > 1),
         "the reattached session did not answer a second line; the pane holds {:?}",
         second_pane.painted(after)
+    );
+    // Live output is on the far side of the seam, and there is still exactly one seam. A
+    // daemon that marked every chunk would have satisfied every assertion above while
+    // telling a client the replay had ended in the middle of it.
+    assert!(
+        second_pane.after_boundary(after).contains(TOKEN),
+        "the session's own output did not arrive after the boundary; the live side holds \
+         {:?}",
+        second_pane.after_boundary(after)
+    );
+    assert_eq!(
+        second_pane.boundary_count(after),
+        1,
+        "the attach sent {} boundaries; the contract is one per attach",
+        second_pane.boundary_count(after)
     );
 }
 

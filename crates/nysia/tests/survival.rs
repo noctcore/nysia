@@ -458,7 +458,14 @@ fn a_verb_starts_a_daemon_when_none_is_listening_and_still_returns() {
 
 /// Kill the daemon described by the lease in `runtime_dir`, if one is there.
 fn stop_daemon(runtime_dir: &Path) {
-    let Ok(text) = std::fs::read_to_string(runtime_dir.join("nysiad-v1.pid.json")) else {
+    // Composed from the protocol version rather than written out: §3.1 puts the version in
+    // the name, so a literal here silently stops finding the lease the day the version moves
+    // — and this helper failing to find it is a daemon left running after the test.
+    let lease = format!(
+        "{}.pid.json",
+        nysia_proto::endpoint_stem(nysia_proto::PROTOCOL_VERSION)
+    );
+    let Ok(text) = std::fs::read_to_string(runtime_dir.join(lease)) else {
         return;
     };
     let Ok(record) = serde_json::from_str::<serde_json::Value>(&text) else {

@@ -18,7 +18,13 @@
 
 # The lease the daemon writes beside its endpoint. §12 question 5: its presence is never
 # proof of life, but it is how a tool that did not spawn the daemon finds its pid.
-$script:LeaseFile = 'nysiad-v1.pid.json'
+#
+# The version in the name is §3.1's mechanism, not decoration: it moves when the wire changes
+# shape, and a daemon of the old version goes on serving its own endpoint beside the new one.
+# It is spelled out here because PowerShell cannot read the Rust constant — keep it in step
+# with `PROTOCOL_VERSION` in `crates/nysia-proto/src/version.rs`, which is what names the
+# socket, the lease, the lock and the log.
+$script:LeaseFile = 'nysiad-v2.pid.json'
 
 <#
 .SYNOPSIS

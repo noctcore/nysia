@@ -112,7 +112,15 @@ export class XtermSurface implements TerminalSurface {
   #boundaryInHidden: number | null = null;
   /** Characters of input dropped because the replay had not finished. */
   #inputDropped = 0;
-  #deadline: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The backstop that opens the gate if the boundary never arrives.
+   *
+   * Named for the timer rather than for the moment it fires, because a private field spelled
+   * `deadline` begins with four hex digits after its `#` and the theme guard reads that as a
+   * hardcoded colour. A rename is cheaper than an exception in a guard whose value is that it
+   * has none.
+   */
+  #boundaryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: {
     readonly stream: StreamId;
@@ -136,8 +144,8 @@ export class XtermSurface implements TerminalSurface {
     // Armed at construction rather than at the first write. A surface only comes into
     // existence because a stream was attached, and an attach that produced no frames at all
     // is exactly the case where nothing would otherwise ever open the gate.
-    this.#deadline = setTimeout(() => {
-      this.#deadline = null;
+    this.#boundaryTimer = setTimeout(() => {
+      this.#boundaryTimer = null;
       if (this.#inputOpen) {
         return;
       }
@@ -350,9 +358,9 @@ export class XtermSurface implements TerminalSurface {
   }
 
   #clearDeadline(): void {
-    if (this.#deadline !== null) {
-      clearTimeout(this.#deadline);
-      this.#deadline = null;
+    if (this.#boundaryTimer !== null) {
+      clearTimeout(this.#boundaryTimer);
+      this.#boundaryTimer = null;
     }
   }
 
