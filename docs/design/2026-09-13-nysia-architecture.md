@@ -599,13 +599,15 @@ Each of these cost someone a day already.
    --config` hands the merged config to the build script in `TAURI_CONFIG` (tauri-cli 2.11.4
    `helpers/config.rs:186`); `tauri-build 2.6.3` merges it at `lib.rs:487` and reaches the same
    `copy_binaries` at `:546`, whose `fs::remove_file(target/<profile>/nysia).unwrap()` at `:80`
-   panics `PermissionDenied` when a daemon is running from that exact file. Three things make
-   that tolerable, and it is worth being able to say which: bundling is a deliberate,
-   occasional command rather than the inner loop; it builds `--release` while development runs
-   `debug`, so the daemon a developer has up is not holding the file; and when it does trip —
-   build the app, run it from `target/release`, close the window, bundle again — the remedy is
-   one command, stop the daemon that window left running. CI never meets it, because nothing
-   is running there.
+   panics `PermissionDenied` when a daemon is running from that exact file. What makes that
+   tolerable is that bundling is a deliberate, occasional command rather than the inner loop,
+   and that the remedy is one command: stop the daemon holding `target/<profile>/nysia`, then
+   bundle again. What it takes to trip is a daemon running under **the profile being
+   bundled** — build the app, run it from `target/release`, close the window, bundle again;
+   or `tauri build --debug` against the daemon a `tauri dev` window left behind, which is how
+   it was reproduced. The profiles are not reliably disjoint, so that second one is not
+   exotic: `--debug` puts the bundle build straight onto the file the dev loop is running.
+   CI never meets any of it, because nothing is running there.
 
    **And there is no staging move that fixes it,** which is why this claim is narrowed rather
    than the build changed. The window resolves its runtime beside its own executable and one
