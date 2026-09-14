@@ -256,7 +256,7 @@ const SET_PROPERTY_CALL =
  *
  * Three shapes: bare property then colon or equals, which covers an object literal, a JSX
  * attribute and an assignment; quoted property then colon or equals, which covers a quoted
- * key; and the DOM call below.
+ * key; and the DOM call above.
  *
  * One equals sign, not two. A comparison reads a colour rather than writing one, and the
  * rule used to match the first of the three characters in a strict one — so the positive
@@ -454,26 +454,40 @@ export const TOKEN_DEFINITION_MODULES: readonly string[] = ['src/theme/themes.ts
 export const TOKEN_DEFINITION_STYLESHEETS: readonly string[] = ['src/index.css'];
 
 /**
- * Every stylesheet the package pulls in from a dependency, by the specifier that pulls it.
+ * Every dependency stylesheet a TypeScript module pulls in for its side effect, by the
+ * specifier that pulls it.
  *
- * Not an allowlist of things that are *fine*: the one entry paints pixels this guard cannot
- * check and has no token in it. It is a list of what is known, so the set cannot grow by
- * accident. A dependency stylesheet arrives in one line of somebody else's module, bundles
- * into the built CSS, and is invisible to every rule above — which is the same failure mode
- * as the accent module being invisible to the property prefix, arriving from outside the
- * package instead of from inside it.
+ * Read the qualifier as narrowly as it is written, because the previous sentence in this
+ * file that did not carry one is what this list exists to answer. It covers the one shape
+ * the sweep can see: a bare `import` of a `.css` specifier that is not a path, in a file
+ * the glob already reads. It does not cover a binding import, a dynamic one, or — the live
+ * gap — an `@import` inside `index.css`, which is how Tailwind itself and five font
+ * stylesheets arrive. Those are visible in the built CSS as the generated `--tw-*` colour
+ * fallbacks and nowhere in the source this module reads. Widening the pattern would not
+ * reach them: the stylesheet's *contents* are unreadable here for the reason
+ * {@link TOKEN_DEFINITION_STYLESHEETS} gives, so that half needs the built output and a
+ * person looking at it.
  *
- * Adding an entry is the review: it says a reviewer looked at what that stylesheet paints
- * and at whether the theme can reach it.
+ * Not an allowlist of things that are *fine*, either: the one entry paints pixels this
+ * guard cannot check and has no token in it. It is a list of what is known, so the set
+ * cannot grow by accident down the one road it does watch. A dependency stylesheet arrives
+ * in one line of somebody else's module, bundles into the built CSS, and is invisible to
+ * every rule above — the same failure mode as the accent module being invisible to the
+ * property prefix, arriving from outside the package instead of from inside it.
+ *
+ * Adding an entry is the review: it says somebody looked at what that stylesheet paints and
+ * at whether the theme can reach it.
  */
 export const DEPENDENCY_STYLESHEETS: readonly string[] = ['@xterm/xterm/css/xterm.css'];
 
 /**
  * A stylesheet imported for its side effect by package name rather than by path.
  *
- * Relative specifiers are excluded because the glob already sees those. This module's own
- * source cannot match it: the pattern wants literal whitespace where the source has the two
- * characters that stand for it.
+ * Relative specifiers are excluded because the glob already sees those. A binding import
+ * and a dynamic one are excluded because neither is how a stylesheet is pulled in for its
+ * side effect, and pretending to cover them would be the overclaim again; both are in the
+ * residue. This module's own source cannot match the pattern either: it wants literal
+ * whitespace where the source has the two characters that stand for it.
  */
 const DEPENDENCY_STYLESHEET_IMPORT = /import\s+['"]((?!\.)[^'"]+\.css)['"]/g;
 
