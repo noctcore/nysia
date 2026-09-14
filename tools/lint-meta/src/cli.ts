@@ -41,7 +41,7 @@
  *   beyond it, and ESLint is equally blind to the static equivalents. This used to be
  *   written as "lint-meta owns dynamic `import()`" with no qualification while the rule
  *   matched only a single-line quoted literal, which over-claimed four spellings that
- *   passed every gate (#19); the rule now reads whole files with comments blanked, and
+ *   passed every gate (#19); the rule reads a syntax tree now, and
  *   `import.meta.glob` — which need not name the file at all — is reported unless **every**
  *   pattern in the call reaches no module, asked of a glob matcher over the files that
  *   exist. Both halves of that were learned the hard way: reading one pattern out of an

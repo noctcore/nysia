@@ -56,6 +56,12 @@ describe('rule (d) over parsed source', () => {
     // and this did not, while the doc said the two had the same reach. In a specifier `?`
     // opens Vite's query — the opposite of what it means in a glob pattern.
     ['a query suffix', "await import('../store/StoreContext.ts?raw')"],
+    // Wrappers the literal reader used to drop as computed. Three of these resolve to the
+    // store in dev and in build, and ESLint cannot see a dynamic import at all.
+    ['a parenthesised specifier', "await import(('../store/StoreContext'))"],
+    ['an as-expression', "await import('../store/StoreContext' as string)"],
+    ['a satisfies-expression', "await import('../store/StoreContext' satisfies string)"],
+    ['a non-null assertion', "await import('../store/StoreContext'!)"],
   ])('reports %s', (_what, call) => {
     expect(scan(PROBE, `export const s = ${call};\n`)).toHaveLength(1);
   });
@@ -120,7 +126,6 @@ describe('rule (d) and glob imports', () => {
     ['an unrestricted pattern', "'../store/*'"],
     ['a directory wildcard', "'../**'"],
     ['a plain module pattern', "'../store/*.ts'"],
-    ['the eager spelling', "'../store/*.ts'"],
     // Every array case puts the innocent pattern FIRST, which is the input that got through.
     ['a stylesheet in front of the store', "['../**/*.css', '../store/*.ts']"],
     ['a negation in front of the store', "['!../store/ignored.css', '../store/*.t?x']"],
@@ -129,28 +134,62 @@ describe('rule (d) and glob imports', () => {
     expect(glob(args)).toHaveLength(1);
   });
 
-  it('reports the globEager spelling too', () => {
-    expect(scan(PROBE, "export const m = import.meta.globEager('../store/*.ts');\n")).toHaveLength(
-      1,
-    );
+  it('ignores a call that is not import.meta.glob at all', () => {
+    // `globEager` was removed before Vite 8, so a case asserting it is reported would be a
+    // fourth assertion in this thread about a syntax the toolchain does not have. The eager
+    // glob Vite does have is `{ eager: true }`, covered below.
+    expect(scan(PROBE, "export const m = import.meta.globEager('../store/*.ts');\n")).toEqual([]);
   });
 
   it('reports a pattern built at runtime, which says nothing about what it returns', () => {
     expect(scan(PROBE, 'const p = q;\nexport const m = import.meta.glob(p);\n')).toHaveLength(1);
   });
 
+  /*
+   * The inversion. Everything here is reported because the rule cannot *prove* it harmless,
+   * not because it is known to be dangerous — and several are very likely safe.
+   *
+   * `{ query: 'raw' }` and `{ query: { raw: '' } }` both produced source text when the
+   * pinned Vite was executed over them, and they are still reported: a second spelling of
+   * something already expressible is not worth an exemption that must be re-verified on
+   * every Vite bump. `{ query: { raw: true } }` is the one that showed why it matters — it
+   * becomes `?raw=true`, which is not Vite's raw flag, and the real module comes back.
+   */
   it.each([
-    // The positive controls. Without them, "ask the matcher" could just be "report every
-    // glob" with a proof wrapped round it.
+    ['the query is written without its mark', "'../store/*.ts', { query: 'raw' }"],
+    ['the query is an object', "'../store/*.ts', { query: { raw: '' } }"],
+    ['the query object carries a true value', "'../store/*.ts', { query: { raw: true } }"],
+    ['the deprecated as-raw spelling', "'../store/*.ts', { as: 'raw' }"],
+    ['a base moves where the pattern resolves', "'./*.ts', { base: '../store' }"],
+    ['case sensitivity is turned off', "'../STORE/*.TS', { caseSensitive: false }"],
+    ['the search is made exhaustive', "'../store/*.ts', { exhaustive: true }"],
+    ['an option nobody here has heard of', "'../**/*.css', { somethingNew: 1 }"],
+    ['the options are a variable', "'../**/*.css', options"],
+    ['the options are spread in', "'../**/*.css', { ...options }"],
+    ['an option name is computed', "'../**/*.css', { [key]: 'raw' }"],
+  ])('reports a glob it cannot prove harmless: %s', (_what, args) => {
+    expect(glob(args)).toHaveLength(1);
+  });
+
+  it.each([
+    // The positive controls. Without them, fail-closed would just be "report every glob"
+    // with a proof wrapped round it.
     ['every pattern reaches only stylesheets', "'../**/*.css'"],
     ['an array of them', "['../**/*.css', '../**/*.svg']"],
     ['the options make the whole call raw', "'../**/*.{ts,tsx}', { query: '?raw' }"],
-    ['the query is written without its mark', "'../store/*.ts', { query: 'raw' }"],
-    ['the query is an object', "'../store/*.ts', { query: { raw: '' } }"],
-    ['the older as-raw spelling', "'../store/*.ts', { as: 'raw' }"],
+    [
+      'the raw query sits beside options that decide nothing',
+      "'../**/*.{ts,tsx}', { query: '?raw', import: 'default', eager: true }",
+    ],
     ['the pattern reaches nothing at all', "'../nowhere/*.ts'"],
   ])('allows a glob where %s', (_what, args) => {
     expect(glob(args)).toEqual([]);
+  });
+
+  it('still asks the tree when the options decide nothing', () => {
+    // `eager` and `import` are inert, and inert must not slide into exempt: the patterns
+    // still get the question.
+    expect(glob("'../store/*.ts', { eager: true, import: 'default' }")).toHaveLength(1);
   });
 
   it('is not fooled by a local that merely looks like import.meta', () => {

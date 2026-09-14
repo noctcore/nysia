@@ -177,6 +177,22 @@ expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/template-neste
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/glob-wildcard-question.ts', 7);
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/jsx-sibling-template.tsx', 10);
 
+// The fail-closed inversion, which is what these four are for.
+//
+// The rule used to enumerate the ways a call might be safe and exempt them, so every option
+// and spelling nobody had thought of failed OPEN — and Vite's option surface is Vite's to
+// change. Each of these was a clean report from a rule that had guessed wrong about it:
+// `{ query: { raw: true } }` becomes `?raw=true`, which is not Vite's raw flag; `base` and
+// `caseSensitive` both change which files a pattern reaches; and three ordinary expression
+// wrappers left a specifier looking computed. A glob is reported now unless the call is
+// provably incapable, where "provably" is a list verified by executing the pinned Vite.
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/glob-raw-object-true.ts', 10);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/glob-case-insensitive.ts', 3);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/panes/glob-base-option.tsx', 7);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/wrapped-specifiers.ts', 4);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/wrapped-specifiers.ts', 5);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/wrapped-specifiers.ts', 6);
+
 expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
 process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');
 // The clean fixture also reaches StoreContext by call from store/ and from main.tsx. If

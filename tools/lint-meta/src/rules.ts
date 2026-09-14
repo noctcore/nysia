@@ -109,12 +109,24 @@ function namesStoreContext(specifier: string): boolean {
  * which is the safe direction and the reason no attempt is made to work out which patterns
  * cancel which.
  *
- * Two limits, named rather than implied. A pattern that matches nothing today is not
- * reported, because today it returns nothing; the rule runs on every commit, so it reports
- * the day a module lands under it. And the matcher is `minimatch`, where Vite's is
- * `picomatch`: they agree on `*`, `?`, `{…}` and `[…]`, and differ only in exotic syntax
- * this repository does not use. Using Vite's own would mean declaring it in the root
- * manifest, which is coordinator-owned.
+ * This only ever runs when the options were read as deciding nothing — a call carrying
+ * `base`, `caseSensitive`, `exhaustive` or anything else unrecognised is reported before it
+ * gets here, because all of those change what a pattern reaches and none of them is
+ * modelled. That is the fail-closed default doing the work, and it is what makes this
+ * function's approximations tolerable rather than load-bearing.
+ *
+ * Because they are approximations, and an earlier version claimed otherwise. "Same matcher,
+ * same options" was not true: the matcher here is `minimatch` with `dot: true` and no
+ * ignore list, matching every file in the scan including the importing file itself, where
+ * Vite runs `picomatch` with its own dot and extglob settings, its own ignores, and the
+ * importing file excluded. Every one of those differences makes this side match MORE, so
+ * each is a possible over-report and none is a missed one — which is the only direction
+ * that would matter. Using Vite's own matcher would mean declaring it in the root manifest,
+ * which is coordinator-owned.
+ *
+ * One limit in the other direction, named rather than implied: a pattern that matches
+ * nothing today is not reported, because today it returns nothing. The rule runs on every
+ * commit, so it reports the day a module lands under it.
  */
 function globReachesModule(
   pattern: string,
@@ -457,6 +469,18 @@ export function noTauriOutsideDesktop(root: string, files: readonly string[]): V
  * checker learned when it was replaced by a simulation of the real action, and the daemon
  * when it was only trusted once a test drove both real halves: model nothing you can run.
  *
+ * **THE DEFAULT IS CLOSED, AND THAT IS THE POINT OF THIS RULE.** A glob call is reported
+ * unless it is *provably* incapable of handing back a module, where the proof is a very
+ * short list of forms executed against the pinned Vite — not a list of the ways a call might
+ * be dangerous. The earlier version had it the other way round: it enumerated the safe
+ * spellings and exempted them, so every option nobody had thought of failed OPEN. That is
+ * unbounded, because Vite's option surface is Vite's to change and this rule is guessing at
+ * it from outside; three separate options and three expression wrappers walked through it
+ * before anyone noticed. The worst an unfamiliar option can do now is produce a report, and
+ * a report is a developer writing one line to silence it with a reason. The other direction
+ * is the store provider in the production bundle with every gate green. See
+ * `GlobOptionsVerdict` for the list and what is deliberately left off it.
+ *
  * WHAT REMAINS BEYOND IT, stated rather than implied by silence: a specifier that is not a
  * literal. `import(name)` and `import('../store/' + name)` are reported as computed by the
  * parser but cannot be resolved by it, and ESLint's `no-restricted-imports` is equally blind
@@ -491,14 +515,26 @@ export function noStoreContextOutsideStore(root: string, files: readonly string[
         continue;
       }
 
-      // The options are what make a glob return source text, and there is no per-pattern
-      // spelling of that — a query cannot be written into a pattern, where `?` is the
-      // single-character wildcard.
-      if (reference.raw) continue;
+      // The default is closed. A glob is reported unless the call is *provably* incapable of
+      // handing back a module, and the only proofs accepted are the ones executed against
+      // the pinned Vite — see `GlobOptionsVerdict`.
+      if (reference.options.kind === 'source-text') continue;
+
+      if (reference.options.kind === 'undecidable') {
+        report(
+          reference.line,
+          `glob-imports with ${reference.options.because}, which can change what it ` +
+            'reaches or what it returns; this rule reports what it cannot prove harmless, ' +
+            `because only ${STORE_CONTEXT_ALLOWED_FOR_HUMANS} may touch the store provider. ` +
+            "Read the files as text with query: '?raw', or silence this with a reason",
+        );
+        continue;
+      }
 
       const from = posix.dirname(file);
-      // A pattern that is not a literal says nothing about what it can return, so it is
-      // reported; one that reaches a module is enough to report the call.
+      // Nothing in the options moves the pattern, so the tree can answer. A pattern that is
+      // not a literal says nothing about what it can return and is reported; one that
+      // reaches a module is enough to report the call.
       const reaches = reference.patterns.some(
         (pattern) => pattern === undefined || globReachesModule(pattern, from, files),
       );
