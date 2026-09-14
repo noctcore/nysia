@@ -591,16 +591,22 @@ const DEVICE_QUERY = '[c';
 const DEVICE_REPLY = '[?1;2c';
 
 /**
- * A terminal that answers the queries it parses, the way a real one does.
+ * A terminal that answers the queries it parses — **the failure this gate defends against.**
  *
- * This is the whole reason the defect existed and the only stub that can prove it is fixed.
- * {@link StubTerminal} records writes and never reacts to them, so a test written against it
- * passes whether input is gated or not. Here the parse has the one side effect that matters:
- * reaching a query emits the answer on `onData` — **before** the write's callback fires,
- * because that is the order xterm has, and a stub that answered afterwards would make a
- * broken gate look like a working one.
+ * It is no longer a model of the terminal the app builds. `./muteReplies.ts` displaces every
+ * responder in the real one, so a shipped pane composes no answer to a query at all, replayed
+ * or live. What this stub models is a renderer that *does* answer: the one v0.1 shipped, and
+ * any future one whose responders the mute's enumerated table fails to name. The gate's claim
+ * is that such a renderer still cannot reach the child during a replay, and only a stub that
+ * answers can put that claim under test — {@link StubTerminal} records writes and never reacts
+ * to them, so a test written against it passes whether input is gated or not.
  *
- * It cannot tell a replayed query from a live one. Neither can xterm. That is the point.
+ * The parse has the one side effect that matters, in the one order that matters: reaching a
+ * query emits the answer on `onData` **before** the write's callback fires, because that is
+ * the order xterm has, and a stub that answered afterwards would make a broken gate look like
+ * a working one.
+ *
+ * It cannot tell a replayed query from a live one. Neither can any parser. That is the point.
  */
 class AnsweringTerminal extends StubTerminal {
   #queue: { data: Uint8Array | string; done?: (() => void) | undefined }[] = [];
@@ -698,10 +704,18 @@ describe('the replay boundary holds input back', () => {
     expect(fixture.surface.acceptsInput).toBe(true);
   });
 
-  it('answers a live query normally once the boundary has been parsed', () => {
-    // The property the two rejected workarounds would have broken. Stripping query sequences
-    // from every write would silence this one too, and a full-screen program that asks where
-    // the cursor is and never hears back hangs.
+  it('opens the channel on the boundary rather than filtering what comes through it', () => {
+    // **A gate, not a filter**, and the distinction is the whole of #43. This used to be
+    // written as "a live query is still answered, so full-screen programs are unaffected" —
+    // a property worth protecting. It was not one: the daemon answers every query before the
+    // bytes reach this window, so the renderer's answer was unsolicited on both sides of the
+    // boundary, and the shipped renderer now composes none at all.
+    //
+    // What is still true, and is what this checks, is that the gate makes no judgement about
+    // content. It is shut, and then it is open, and after it opens everything the terminal
+    // reports is forwarded — including, with the stub used here, an answer no muted renderer
+    // would have produced. A gate that inspected what passed through it would be the
+    // recognise-the-reply workaround the issue rejected, wearing a different name.
     const fixture = gateHarness();
     fixture.surface.show(host());
     fixture.surface.write(text.encode(`history ${DEVICE_QUERY}`));
