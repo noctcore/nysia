@@ -153,15 +153,16 @@ const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
  * the unlisted ones are precisely the shapes nobody thought of. Read this as the known blind
  * spots, which is useful, and not as the boundary of them, which it never was.
  *
- * Ten entries. Eight are vocabulary or value questions that survive a change of technique,
+ * Twelve entries. Eight are vocabulary or value questions that survive a change of technique,
  * and they carried over from the pattern this replaced — but read them rather than counting
  * on that sentence, because two of the eight did move. The computed-key entry narrowed: a
  * key computed from a literal reads like any other key now, and only a name assembled at run
  * time is left. The library-key entry kept its shape and changed its reason: `pointBackground`
  * is outside the vocabulary because the vocabulary does not name it, where before it was a
- * word-boundary guard holding it out. The last two are new: the ninth is the price of the
- * walk being narrow, and the tenth was missed by the pattern too and had simply never been
- * written down:
+ * word-boundary guard holding it out. The last four are newer than the vocabulary ones and
+ * each arrived a different way: the ninth is the price of the walk being narrow, the tenth
+ * was missed by the pattern too and had simply never been written down, the eleventh is a
+ * trade taken deliberately, and the twelfth is a shape neither implementation ever read:
  *
  *  - a colour that reaches CSS through a variable rather than a literal: the value is a
  *    name at the point where the rule looks, and what it holds is decided somewhere else,
@@ -216,6 +217,23 @@ const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
  *    implementations have and neither had written down. It is listed rather than closed
  *    because widening the site set is a decision, and a decision belongs in a diff of its
  *    own rather than in the margin of a refactor.
+ *  - a colour the pattern this replaced matched by span coincidence rather than by
+ *    understanding. A span of characters that runs from a painting property to the end of an
+ *    expression contains every literal in between, whatever part each one plays, so the old
+ *    rule reported four shapes it had no reading of: a literal in the collection an index
+ *    selects from, `['red', 'gray'][+on]`; and a literal handed to a call whose *result* is
+ *    then reached into, `palette('red').hex()`, `f('red')(x)`, `new X('red').y`. Following
+ *    them means deciding that an argument reaches the value through a return, a call and a
+ *    property access, which is a claim about what a function does and not about syntax. The
+ *    same coincidence is what reported an operand and a lookup key as violations, and those
+ *    were closed as false positives in the same move — this is that trade seen from the
+ *    other side, and it is a trade rather than an oversight.
+ *  - what a `for…of` iterates. The loop head takes a declaration list, so the name is an
+ *    ordinary `VariableDeclaration` with no initializer and the colours are in the
+ *    statement's `expression` — a different field, holding a collection rather than a value.
+ *    `for (const color of ['red'])` is missed by this walk and was missed by the pattern
+ *    too, so nothing regressed here; it is the one member of the initializer family that is
+ *    listed rather than read, and it is listed because the guard now claims that family.
  *
  * The hex and colour-function rules, which do scan whole files, are the backstop for nearly
  * every one of them, listed or not — whatever shape hides a colour from rule 4, a hash or a
