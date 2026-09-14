@@ -211,11 +211,13 @@ const PALETTE_CLASS = new RegExp(
  *    A `switch` case returning a display string is another, and more likely to be written.
  *    Inside a JSX container the same reading used to land on the right answer for the wrong
  *    reason; the brace fix stopped the rule depending on that, and this is what is left.
- *  - a comparison operand that spells a colour, since every literal in the span is now read
- *    and nothing in the text distinguishes an operand from a branch. Half of this was here
- *    before: when the operand happened to be the last literal in range it was taken as the
- *    value outright. Telling them apart is a question about syntax, which is the argument
- *    at the end of this comment.
+ *  - any literal in the value expression that spells a colour, not only the one the
+ *    property is set to. Every literal in the span is read now, and nothing in the text
+ *    distinguishes the value from a comparison operand, a discarded branch, an argument or
+ *    a lookup key. Half of this was here before: whichever literal the quantifier reached
+ *    last was taken as the value outright, so the same shapes fired or not by accident of
+ *    what came after them. Telling them apart is a question about syntax, which is the
+ *    argument at the end of this comment.
  *  - a statement that ends without a semicolon followed by an unrelated string on the next
  *    line, since the span crosses line ends and only punctuation stops it. This tree is
  *    semicolon-terminated throughout and nothing enforces that, so it is a live trap rather
@@ -226,39 +228,45 @@ const PALETTE_CLASS = new RegExp(
  *    working that out by pattern is how a scanner comes to mistake a regex literal for a
  *    comment — this module has one carrying a backtick — and fall silent over everything
  *    after it. That failure is quiet and this one is not, so this one stays. Marking a
- *    property up in prose is safe; putting a separator after it is what fires. *
- * ## What kind of list that is — read this before adding to it
+ *    property up in prose is safe; putting a separator after it is what fires.
  *
- * Nearly every entry above is *positional*. Not "this colour is hard to recognise" — the
- * words are a fixed list and recognising one is trivial — but "the rule did not know that
- * *this place* in the text was where the value goes". A property flush against its colon,
- * then one behind a ternary, then a quoted key, then a custom property, then a JSX
- * expression container, then whichever branch a greedy quantifier reached last: five rounds
- * of review, five new positions, each closed by spelling that one out. The false positives
- * are the same fact from the other side — an operand, a branch, a key and a comment are
- * four different things that look identical to a pattern over characters.
+ * ## Two different kinds of entry — read this before adding to one
  *
- * So: that list is **a property of this implementation, not of the problem**. Whether a
- * string is the value of a painting property is a question about syntax, and a regular
- * expression cannot answer a question about syntax — it can be made right about a position
- * someone has already thought of, never about position itself, because it has no notion of
- * one. Nothing in the list is there because finding hardcoded colours is inherently hard.
+ * Every round of review has found a *position* this rule reads wrongly: a property flush
+ * against its colon, then one behind a ternary, then a quoted key, then a custom property,
+ * then a JSX expression container, then whichever branch a greedy quantifier reached last,
+ * then a branch written as a template. Seven, over six rounds, each closed by spelling that
+ * one out. That run is not luck. Whether a string is the value of a painting property is a
+ * question about syntax, and a regular expression can be made right about a position
+ * somebody has already thought of, never about position itself, because it has no notion of
+ * one. The false positives say it from the other side: an operand, a branch, a key and a
+ * comment are four different things that look identical to a pattern over characters.
  *
- * Which is why the next change to this rule should not be another entry. Issue #45 rewrites
- * it as a walk over the TypeScript syntax tree — JSX attributes, object-literal properties
- * and assignment targets whose key paints, then look at the value — and the positional
- * entries above do not get better documentation there, they stop existing. No spans, no
- * greedy quantifiers, no ordering accidents, and no sixth position waiting to be found. The
- * two entries that would survive are the genuinely non-syntactic ones: a colour reached
- * through a variable, which needs types, and bare CSS inside a string, which needs a CSS
- * parser rather than a TypeScript one.
+ * That diagnosis explains the *history*. It does not describe the list, and a previous
+ * version of this section said it did — that nearly every entry was positional and a syntax
+ * tree would leave two standing. Count them: of the nine misses above, roughly three turn on
+ * position, and the other six are questions about **vocabulary** or about **what a value
+ * hides**. Which property names paint. Which library's keys paint. Which wrapper calls
+ * paint. What a `url()` or a data URI is carrying. What a percent-encoded hash is. What a
+ * computed custom-property key resolves to. A syntax tree answers none of those by knowing
+ * about syntax — it has to be *told*, exactly as this rule is told, and the lists it is told
+ * with are the ones in this file.
  *
- * The precedent is next door. The architecture rules hand-rolled a lexer for the same class
+ * So, for whoever picks up issue #45, which rewrites this as a walk over the TypeScript
+ * syntax tree — JSX attributes, object-literal properties and assignment targets whose key
+ * paints, then look at the value:
+ *
+ *  - the positional entries stop existing rather than being documented better, and so does
+ *    the class of them, which is the whole point: no spans, no greedy quantifiers, no
+ *    ordering accidents, no eighth position waiting to be found;
+ *  - the vocabulary and value entries **carry over unchanged** and have to be ported with
+ *    the code. They are not artefacts of doing this with regular expressions and deleting
+ *    them as though they were would quietly reopen every hole they describe.
+ *
+ * The precedent is next door: the architecture rules hand-rolled a lexer for the same class
  * of question, hit the same run of positional misses, and deleted it for a syntax-tree walk
- * this round; their rules module lost around six hundred lines in the exchange. If you are
- * reading this list in six months and it has grown again, that is the fix — not another
- * bullet.
-
+ * this round, about six hundred lines lighter. Take the same lesson and not more than it —
+ * a parser fixes where you look, not what you are looking for.
  */
 const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
 
