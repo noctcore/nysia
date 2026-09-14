@@ -120,6 +120,14 @@ expectRule(trips, 'no-store-context-outside-store');
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dynstore.ts', 10); // await import(...)
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dynstore.ts', 11); // require('../store/./StoreContext')
 
+// #20. The two allowlists used to be independent copies, and they already disagreed:
+// lint-meta allowlisted by the prefix `apps/web/src/main.` and ESLint carved out
+// `main.{ts,tsx,…}`, so a file named `main.helper.tsx` was inside one and outside the other
+// and a dynamic import of the provider from it tripped nothing. Both layers now read the
+// same boundary list, where the carve-out is the entry-point file in whichever extension it
+// carries — not everything whose name begins with it.
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/main.helper.tsx', 12);
+
 expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
 process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');
 // The clean fixture also reaches StoreContext by call from store/ and from main.tsx. If

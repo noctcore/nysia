@@ -2,6 +2,16 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, posix, relative, sep } from 'node:path';
 
 import {
+  BUNDLED_EXTENSIONS,
+  STORE_CONTEXT_ALLOWED,
+  TAURI_ALLOWED,
+  WEBVIEW,
+  describe as describeBoundaries,
+  directoryPrefixes,
+  matches,
+  matchesAny,
+} from './boundaries.ts';
+import {
   isTauriEdge,
   isTauriPackage,
   loadCargoWorkspace,
@@ -40,42 +50,21 @@ const SKIP_DIRS = new Set([
 const FIXTURE_ROOT = 'tools/lint-meta/fixtures';
 
 /**
- * Where Tauri may be imported.
+ * Where Tauri may be imported, as the plain path prefixes the cargo rules match manifests
+ * against.
  *
  * `apps/desktop` is the shell itself. `apps/web/src/transport` is the one module in the
  * webview allowed to touch the Tauri `Channel`; every other component reaches the daemon
- * through it. The ESLint `no-restricted-imports` ban set uses exactly this allowlist —
- * if the two disagree, a later wave fails a gate it cannot fix without editing shared
- * config.
+ * through it. Derived from `boundaries.ts`, which `eslint.config.js` reads too — the two
+ * layers no longer hold separate copies that can drift (#20).
  */
-export const TAURI_ALLOWLIST: readonly string[] = [
-  'apps/desktop/',
-  'apps/web/src/transport/',
-];
+export const TAURI_ALLOWLIST: readonly string[] = directoryPrefixes(TAURI_ALLOWED);
 
 /**
- * Every extension that can carry an `import` or a `require` into a bundle, enumerated
- * deliberately rather than grown one at a time.
- *
- * In:  `.ts` `.tsx` `.mts` `.cts` `.js` `.jsx` `.mjs` `.cjs`, plus `.rs` for the Rust scan.
- * Out: `.json`, `.css`, `.html`, `.svg` — none of them can import anything.
- *
- * `.mts` and `.cts` matter specifically because Vite 8's default `resolve.extensions`
- * includes `.mts`, so such a file bundles. The same list is repeated verbatim in
- * `eslint.config.js`, which cannot import from here; if the two drift, a file is covered by
- * neither.
+ * Every extension a rule here reads: the bundled set from `boundaries.ts`, which
+ * `eslint.config.js` renders into its own `files` globs, plus `.rs` for the Rust scan.
  */
-const SOURCE_EXTENSIONS = [
-  '.ts',
-  '.tsx',
-  '.mts',
-  '.cts',
-  '.js',
-  '.jsx',
-  '.mjs',
-  '.cjs',
-  '.rs',
-];
+const SOURCE_EXTENSIONS = [...BUNDLED_EXTENSIONS.map((e) => `.${e}`), '.rs'];
 
 /**
  * The import forms that actually pull Tauri into a module.
@@ -95,22 +84,8 @@ const TS_TAURI_IMPORTS = [
   /(?:^|[^\w.$])require\s*\(\s*['"]@tauri-apps[^'"]*['"]/,
 ];
 
-/**
- * Where the raw store provider may be reached.
- *
- * Mirrors the two carve-outs in `eslint.config.js` (`BAN_STORE_CONTEXT`): the store module
- * itself, and `main.tsx`, which composes the provider. If the two ever disagree, one layer
- * bans what the other allows, so they are written to match and the proof checks both.
- */
-export const STORE_CONTEXT_ALLOWLIST: readonly string[] = [
-  'apps/web/src/store/',
-  // `main.` and not `main.tsx`, so the carve-out survives the file changing extension —
-  // it matches the ESLint block's `main.{ts,tsx,mts,cts,js,jsx,mjs,cjs}`.
-  'apps/web/src/main.',
-];
-
-/** The allowlist as a reader expects to see it, since `main.` alone reads like a typo. */
-const STORE_CONTEXT_ALLOWED_FOR_HUMANS = 'apps/web/src/store/** and apps/web/src/main.*';
+/** The carve-outs as a reader expects to see them in a message. */
+const STORE_CONTEXT_ALLOWED_FOR_HUMANS = describeBoundaries(STORE_CONTEXT_ALLOWED);
 
 /**
  * Reaching `StoreContext` through a call rather than an `import` statement.
@@ -386,8 +361,7 @@ function read(root: string, file: string): string {
  */
 export function noTauriOutsideDesktop(root: string, files: readonly string[]): Violation[] {
   const violations: Violation[] = [];
-  const allowed = (file: string): boolean =>
-    TAURI_ALLOWLIST.some((prefix) => file.startsWith(prefix));
+  const allowed = (file: string): boolean => matchesAny(file, TAURI_ALLOWED);
 
   const report = (file: string, line: number): void => {
     violations.push({
@@ -443,8 +417,8 @@ export function noStoreContextOutsideStore(root: string, files: readonly string[
   const violations: Violation[] = [];
 
   for (const file of files) {
-    if (!file.startsWith('apps/web/')) continue;
-    if (STORE_CONTEXT_ALLOWLIST.some((prefix) => file.startsWith(prefix))) continue;
+    if (!matches(file, WEBVIEW)) continue;
+    if (matchesAny(file, STORE_CONTEXT_ALLOWED)) continue;
 
     const extension = file.slice(file.lastIndexOf('.'));
     if (!SOURCE_EXTENSIONS.includes(extension) || extension === '.rs') continue;

@@ -34,9 +34,11 @@
  * - **A file ESLint's `ignores` excludes is covered only by rule (a)'s line scan**, which is
  *   weaker than ESLint's AST.
  *
- * The allowlist itself is duplicated in `eslint.config.js`, and the two must stay in
- * agreement — if they disagree, a later wave fails a gate it cannot fix without editing
- * coordinator-owned config.
+ * The allowlists themselves live in `tools/lint-meta/src/boundaries.ts`, which
+ * `eslint.config.js` reads too. They used to be two hand-written copies described as
+ * mirrored, and they had already drifted apart (#20): a file was allowlisted by one layer
+ * and banned by the other, and nothing said so. `pnpm prove:eslint-bans` now lints a set of
+ * edge paths through both layers and fails if they disagree.
  *
  * Usage: `node tools/lint-meta/src/cli.ts [root]`
  */
