@@ -13,6 +13,11 @@
  *
  * The four rules below are deliberately separate: each one reports what kind of violation
  * it found, so a failure says what to do rather than just where.
+ *
+ * All four read this package's own source. What a dependency's stylesheet paints is outside
+ * every one of them and inside the built output, so that is tracked separately, at
+ * {@link DEPENDENCY_STYLESHEETS} — which is where reading the built CSS rather than the
+ * source led.
  */
 
 /** What a scan found, with enough context to fix it without opening the file. */
@@ -62,8 +67,8 @@ const PALETTE_CLASS = new RegExp(
  * ordinary English, and "the red build turned green" is not a violation. So it looks at:
  *
  *  - a Tailwind arbitrary value, which is bracketed and never carries a quote;
- *  - a string literal that is the value of a CSS property, which is what an inline style
- *    is.
+ *  - a string literal that a name known to paint has introduced, which is what an inline
+ *    style is, and — since the terminal renders for real — what an xterm theme is too.
  *
  * The property prefix is what makes the second one safe, and it replaced a much blunter
  * rule that flagged *any* single-word quoted string. That rule had three problems, and the
@@ -105,8 +110,14 @@ const PALETTE_CLASS = new RegExp(
  * the unlisted ones are precisely the shapes nobody thought of. Read this as the known
  * blind spots, which is useful, and not as the boundary of them, which it never was:
  *
- *  - a colour that reaches CSS through a variable rather than a literal. Needs types.
- *  - a colour name in a string that no painting property introduces. Needs types.
+ *  - a colour that reaches CSS through a variable rather than a literal: the value is a
+ *    name at the point where the rule looks, and what it holds is decided somewhere else,
+ *    possibly in another module. Nothing short of types can follow that, and the entry is
+ *    a limit rather than a bug — the literal itself is still caught wherever it is written.
+ *  - a colour name in a string that nothing in the introducer list introduces. Same limit,
+ *    the other way round: the word is there but nothing says it paints. Loosening this is
+ *    what the rule was narrowed away from, because it made the guard shout at modules that
+ *    paint nothing.
  *  - a value whose own quote character appears inside it escaped, when the colour word
  *    sits before the escape. After it the colour is caught, but by accident rather than by
  *    understanding — the span treats the escaped quote as a boundary and the tail happens
@@ -124,9 +135,10 @@ const PALETTE_CLASS = new RegExp(
  *    *contains* one of the listed words is outside it too, because the boundary guard that
  *    stops `fill` matching inside `autofill` is the same guard and the same trade.
  *  - bare CSS text carried inside a string or a template — a `cssText` assignment, a
- *    tagged `css` template, a `style` attribute inside a markup string. The rule looks for
- *    a property introducing a literal, and in all three the property is *inside* the
- *    literal. Needs a CSS parser, not a wider pattern.
+ *    tagged `css` template, a `style` attribute inside a markup string. In all three the
+ *    property that introduces the colour is *inside* the literal and the colour after it is
+ *    bare, so there is no quoted value left for the rule to read. Reading one means parsing
+ *    the string's contents as CSS, which is a parser and not a wider pattern.
  *  - a custom property whose name is computed, which is to say a template-literal key.
  *    There is no name in the source for the pattern to match.
  *  - a name and a value written as a tuple and handed to one of the DOM setters later,
