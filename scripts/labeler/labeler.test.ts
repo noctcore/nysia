@@ -71,7 +71,22 @@ const SAMPLES: readonly Sample[] = [
   ['a desktop shell change', ['apps/desktop/src-tauri/src/main.rs'], ['area:desktop']],
   ['a web-only change', ['apps/web/src/App.tsx'], ['area:web']],
   ['a docs-only change', ['docs/plans/v0.1-delivery-plan.md'], []],
-  ['a design-doc change', ['docs/design/design-spec.md'], ['design-system']],
+  ['a design-spec change', ['docs/design/design-spec.md'], ['design-system']],
+
+  // `design-system` means design spec adoption, and it used to match all of
+  // `docs/design/**` — which is also where the architecture document lives. PR #38 was a
+  // daemon-launch change that edited the architecture and came out labelled as adopting a
+  // spec it had never read (#52). The glob now names the spec, and these are the two halves
+  // of that: the architecture document on its own fires nothing, and neither does the rest
+  // of the directory. The row above and the multi-area row below are the other half — the
+  // rule still fires for the file it is about, which is also what keeps it off the dead-rule
+  // list.
+  ['an architecture-document-only change', ['docs/design/2026-09-13-nysia-architecture.md'], []],
+  [
+    'the design sources beside the spec, without the spec',
+    ['docs/design/README.md', 'docs/design/Nysia-ADE.dc.html'],
+    [],
+  ],
   ['a Cargo.lock-only change', ['Cargo.lock'], ['area:build', 'dependencies']],
   ['a root manifest change', ['package.json'], ['area:build', 'dependencies']],
   ['a crate manifest change', ['crates/nysia-core/Cargo.toml'], ['area:daemon', 'dependencies']],
