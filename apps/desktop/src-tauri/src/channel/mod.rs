@@ -7,9 +7,18 @@
 //! happen, rather than one per session with thirty windows to keep in step.
 //!
 //! Frames from all sessions share the channel and are told apart by the stream id in each
-//! header, which `nysia-proto` defines and both ends read from the same generated table
-//! (D-13). They are packed until the window closes ([`coalesce`]), and the daemon is only
-//! allowed to produce them as fast as the webview renders them ([`credit`]).
+//! header, which `nysia-proto` defines and whose size both ends read from the same generated
+//! table (D-13). They are packed until the window closes ([`coalesce`]), and the daemon is
+//! only allowed to produce them as fast as the webview renders them ([`credit`]).
+//!
+//! **The size, and not the offsets.** Proto exports `FRAME_HEADER_BYTES` and nothing finer,
+//! so the two field positions the webview's decoder needs — the stream id at 1, the payload
+//! length at `FRAME_HEADER_BYTES - 4` — are written locally in `apps/web/src/transport/
+//! frames.ts` and derived from that total. They are the only part of the layout that is not
+//! generated, and saying otherwise would be the overstatement worth avoiding: the header
+//! grew from five bytes to nine when stream multiplexing landed, and a restated *total* is
+//! exactly what survives that change quietly. A restated offset does not — both derivations
+//! hang off the generated total, so the one number that moved still has one authority.
 //!
 //! ## The seam
 //!
