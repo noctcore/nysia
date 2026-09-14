@@ -67,7 +67,7 @@ describe('the attached transport', () => {
     }
   });
 
-  it('hands over exactly what the pane component needs, and nothing more', () => {
+  it('carries five store members and the router, and no more', () => {
     setAttachedStore(store());
     const transport = attachedStore();
 

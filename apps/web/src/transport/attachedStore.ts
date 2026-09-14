@@ -4,7 +4,7 @@ import type { StreamId } from './frames';
 import type { TerminalRouter } from './terminals';
 
 /**
- * What the transport's own pane component may reach, and nothing else.
+ * What the transport's own pane component reaches instead of the store.
  *
  * ## Why this is not a React context
  *
@@ -31,16 +31,29 @@ import type { TerminalRouter } from './terminals';
  * `CLAUDE.md` §6: a security default an ordinary caller can undo is not a default, it is a
  * suggestion. So this is a **runtime object**, not a narrower type over the same instance —
  * a type would be undone by one `as DaemonStore` and leave nothing in review to catch it.
- * What is not on this interface cannot be reached from the value at all.
+ * No store command is reachable from this value.
  *
- * ## Why these six are safe to expose
+ * ## What this does and does not confine
  *
- * Four are reads or notices that cannot fail. The two that do reach the daemon —
+ * It confines the **store** surface, and that is the whole of the claim. `terminals` hands
+ * over the entire {@link TerminalRouter}, so `dispose`, `resetStreams`, `close`, `deliver`,
+ * `on`, `setPlatform` and `creditWindow` are all reachable through it — this is five members
+ * plus a router, not six members and nothing else.
+ *
+ * That is not a door left open. `TerminalView` reached `store.terminals` before this facade
+ * existed, so nothing widened; and the router holds a bridge, a decoder, a ledger, surfaces
+ * and a pool, with no reference back to the store — so there is no path from it to a command
+ * that rejects with a `StoreCommandError`, which is the failure the ban exists to stop. The
+ * router is the transport's own, and so is the one component reaching it.
+ *
+ * ## Why the five store members are safe to expose
+ *
+ * Three are reads or notices that cannot fail. The two that do reach the daemon —
  * {@link sendInput} and {@link resize} — **record their own failures and never reject**:
  * each catches internally and deduplicates the notice, precisely because one notice per
  * character typed while the daemon is down would bury every other message in the list. So
  * the promise they return carries no failure a caller could drop. That is a property of
- * those two methods, not a general licence, and it is why adding a seventh member here
+ * those two methods, not a general licence, and it is why adding another store member here
  * means re-reading this paragraph first.
  *
  * There is deliberately **no escape hatch** to the raw store. Nothing needs one, and §6's
