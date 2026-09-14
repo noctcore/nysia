@@ -585,14 +585,36 @@ Each of these cost someone a day already.
    design**, so "run the app, close it, build again" is the ordinary sequence — and the daemon
    still running is holding the file about to be deleted. Windows unlinks a running image only
    while another name for it survives, so the build panicked with `PermissionDenied` as soon as
-   Tauri's own copy had replaced the hardlink cargo leaves from `deps/`. Renaming the sidecar
-   does not help; whatever it is called, something is running from the file being deleted.
+   Tauri's own copy had replaced the hardlink cargo leaves from `deps/`.
 
-   Declared where `cargo` never reads it, none of that happens: `cargo build`, `cargo test`
-   and `cargo clippy` neither need the sidecar nor touch it, a developer's window starts the
-   runtime cargo just compiled rather than a copy of an older one, and the copy happens once —
-   during the bundle build, which is the only time anybody wants it. The flag that merges it
-   lives in `apps/desktop/package.json`, so `pnpm build:app` and CI bundle the same way.
+   **What that bought: every ordinary `cargo` command.** `cargo build`, `cargo test`, `cargo
+   clippy` and `tauri dev` neither need the sidecar nor touch `target/<profile>/nysia`, so a
+   developer's window starts the runtime cargo just compiled rather than a copy of an older
+   one, and the inner loop — the one D-1 made dangerous, because the daemon from the last run
+   is still up — no longer has a delete in it. The flag that merges the declaration lives in
+   `apps/desktop/package.json`, so `pnpm build:app` and CI bundle the same way.
+
+   **What it did not buy: the bundle build itself, which still deletes.** `tauri build
+   --config` hands the merged config to the build script in `TAURI_CONFIG` (tauri-cli 2.11.4
+   `helpers/config.rs:186`); `tauri-build 2.6.3` merges it at `lib.rs:487` and reaches the same
+   `copy_binaries` at `:546`, whose `fs::remove_file(target/<profile>/nysia).unwrap()` at `:80`
+   panics `PermissionDenied` when a daemon is running from that exact file. Three things make
+   that tolerable, and it is worth being able to say which: bundling is a deliberate,
+   occasional command rather than the inner loop; it builds `--release` while development runs
+   `debug`, so the daemon a developer has up is not holding the file; and when it does trip —
+   build the app, run it from `target/release`, close the window, bundle again — the remedy is
+   one command, stop the daemon that window left running. CI never meets it, because nothing
+   is running there.
+
+   **And there is no staging move that fixes it,** which is why this claim is narrowed rather
+   than the build changed. The window resolves its runtime beside its own executable and one
+   rule serves both worlds, so the file has to be called `nysia` and has to land beside the
+   window — which is exactly the file a release daemon runs from. Renaming the sidecar only
+   moves the delete to a path the window would not then look in. Windows will *rename* a
+   running image even though it refuses to unlink a single-linked one, so moving the file
+   aside before the bundle looks tempting; it was measured and not taken, because the profile
+   such a step would have to guess is the one thing a package script cannot see, and guessing
+   wrong deletes the runtime beside a window somebody is running.
 
    **When it cannot spawn, the window says so and stops.** A missing sidecar, a file that will
    not execute, a daemon that starts and never binds — none of them improve by waiting, so
