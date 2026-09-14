@@ -36,45 +36,64 @@ const scanned: readonly ScannedFile[] = Object.entries(modules)
   .map(([path, source]) => ({ path: normalize(path), source: String(source) }))
   .filter(({ path }) => !path.endsWith('.test.ts') && !path.startsWith('src/generated/'));
 
+/** A backtick, so a fixture can carry one without ending the template it is written in. */
+const TICK = '`';
+
 /**
- * The shapes, written only here — the guard module deliberately contains none.
+ * The shapes, written only here — the guard module writes down no colour of its own.
+ *
+ * Every snippet is valid TSX, because the sweep appends it to a real module as *code*. It
+ * used to be appended as a comment, which worked while the rule read characters and stopped
+ * working the moment it read a syntax tree: a comment is trivia, so the whole list would
+ * have gone quiet at once and the sweep would still have passed, having proved nothing. The
+ * comment form is now a case of its own, under "what the parser closed".
  *
  * More entries than kinds on purpose: the assertion below counts the four kinds a scan can
  * report, and the extra snippets are the specific shapes each round of this review found
  * missing, kept so the real sweep exercises them rather than only the fixture tests.
  */
 const OFFENDERS = [
-  { kind: 'hex', snippet: 'style={{ color: "#ff0000" }}' },
-  { kind: 'function', snippet: 'style={{ color: "rgb(255 0 0)" }}' },
-  { kind: 'palette-class', snippet: 'className="text-red-500"' },
-  { kind: 'named-colour', snippet: 'className="[color:red]"' },
-  { kind: 'named-colour', snippet: "style={{ color: 'red' }}" },
+  { kind: 'hex', snippet: `export const H = () => <i style={{ color: '#ff0000' }} />;` },
+  {
+    kind: 'function',
+    snippet: `export const F = () => <i style={{ color: 'rgb(255 0 0)' }} />;`,
+  },
+  { kind: 'palette-class', snippet: `export const P = () => <i className="text-red-500" />;` },
+  { kind: 'named-colour', snippet: `export const A = () => <i className="[color:red]" />;` },
+  { kind: 'named-colour', snippet: `export const I = () => <i style={{ color: 'red' }} />;` },
   // The concrete failure a colon-flush pattern let through: on main this injected line
-  // turned the sweep red, and it would not have here.
-  { kind: 'named-colour', snippet: "style={{ color: failed ? 'red' : undefined }}" },
+  // turned the sweep red, and it would not have before that round.
+  {
+    kind: 'named-colour',
+    snippet: `export const C = () => <i style={{ color: failed ? 'red' : undefined }} />;`,
+  },
   // The custom-property case, which hid the one module whose job is writing token values.
-  { kind: 'named-colour', snippet: `setProperty('--color-acc', 'red');` },
+  {
+    kind: 'named-colour',
+    snippet: `document.body.style.setProperty('--color-acc', 'red');`,
+  },
   // The comparison case. `ProjectsSidebar` already writes a string-equality ternary, so
   // this shape is one edit away from being real rather than hypothetical.
   {
     kind: 'named-colour',
-    snippet: "style={{ color: status === 'failed' ? 'red' : undefined }}",
+    snippet:
+      `export const S = () => <i style={{ color: status === 'failed' ? 'red' : undefined }} />;`,
   },
   // The xterm theme key. Not a painting property, not CSS, and the one place in this app
   // where a colour string still has to be written out rather than referenced.
   {
     kind: 'named-colour',
-    snippet: "new Terminal({ theme: { foreground: 'white' } });",
+    snippet: `export const term = new Terminal({ theme: { foreground: 'white' } });`,
   },
   // The braced JSX prop. The first branch is deliberately not one of the ANSI words, so
   // this proves the container and not the quoted-key accident that used to stand in for it.
   {
     kind: 'named-colour',
-    snippet: `<Dot stroke={active ? 'navy' : undefined} />`,
+    snippet: `export const D = () => <Dot stroke={active ? 'navy' : undefined} />;`,
   },
 ] as const;
 
-describe('findColourLiterals', () => {
+describe('the three rules that read whole files as text', () => {
   it('finds a hex colour in every length CSS accepts', () => {
     expect(findColourLiterals('color:#abc').map((c) => c.text)).toEqual(['#abc']);
     expect(findColourLiterals('background:#f2b35b;border:#2A3140').map((c) => c.text)).toEqual(
@@ -111,46 +130,57 @@ describe('findColourLiterals', () => {
     ]);
   });
 
+  it('reads a hex through a shape the syntax rule cannot see, which is why they are three', () => {
+    // The backstop claim, made concrete: a colour inside bare CSS text is invisible to the
+    // tree — the property that introduces it is *inside* the literal — and the hex rule
+    // reads it anyway, because it reads characters and does not care where they sit.
+    expect(findColourLiterals(`el.style.cssText = 'color: #ff0000';`).map((c) => c.kind)).toEqual(
+      ['hex'],
+    );
+  });
+});
+
+describe('the rule that reads a syntax tree', () => {
   it('finds a named colour in an inline style, the same as hex and a function', () => {
     // The gap this closes: the bracket-only rule let an inline style naming a colour ship
     // with every gate green, while the same style naming a hex was caught.
     for (const style of [
-      "style={{ color: 'red' }}",
-      'style={{ background: "rebeccapurple" }}',
-      "style={{ borderColor: 'DarkSlateGray' }}",
+      `<div style={{ color: 'red' }} />`,
+      `<div style={{ background: "rebeccapurple" }} />`,
+      `<div style={{ borderColor: 'DarkSlateGray' }} />`,
     ]) {
       expect(findColourLiterals(style).map((c) => c.kind), style).toEqual(['named-colour']);
     }
   });
 
   it('finds a colour among the other tokens of a shorthand', () => {
-    // The rule used to see only a whole one-word string, so a shorthand naming a colour
+    // An early rule saw only a whole one-word string, so a shorthand naming a colour
     // alongside a width and a style went straight through.
     expect(
-      findColourLiterals("style={{ border: '1px solid red' }}").map((c) => c.kind),
+      findColourLiterals(`<div style={{ border: '1px solid red' }} />`).map((c) => c.kind),
     ).toEqual(['named-colour']);
     expect(
-      findColourLiterals('style={{ boxShadow: "0 0 8px rgba red" }}').map((c) => c.kind),
+      findColourLiterals(`<div style={{ boxShadow: "0 0 8px rgba red" }} />`).map((c) => c.kind),
     ).toContain('named-colour');
   });
 
-  it('finds a colour in a template literal, now that a property has to introduce it', () => {
+  it('finds a colour in a template literal, the same as in a quoted string', () => {
     // Backticks were excluded while any one-word string counted, because a doc comment
-    // marks up code with them. With a property in front they are no more ambiguous than
-    // the other two quotes.
-    expect(findColourLiterals('style={{ color: `red` }}').map((c) => c.kind)).toEqual([
-      'named-colour',
-    ]);
+    // marks up code with them. A tree does not have that problem: a template is a literal
+    // node and a doc comment is trivia.
+    expect(
+      findColourLiterals(`<div style={{ color: ${TICK}red${TICK} }} />`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
   });
 
   it('finds a colour behind an expression, not only one flush against the colon', () => {
     // The ordinary React conditional style, and the shape that a colon-flush pattern
-    // silently stopped seeing — a component writing one of these on main went red and on
-    // the first version of the property prefix stayed green.
+    // silently stopped seeing — a component writing one of these went red on one round and
+    // stayed green on the next.
     for (const conditional of [
-      "style={{ color: active ? 'red' : 'gray' }}",
-      'style={{ color: failed ? "red" : undefined }}',
-      "style={{ backgroundColor: pick(state) ?? 'navy' }}",
+      `<div style={{ color: active ? 'red' : 'gray' }} />`,
+      `<div style={{ color: failed ? "red" : undefined }} />`,
+      `<div style={{ backgroundColor: pick(state) ?? 'navy' }} />`,
     ]) {
       expect(findColourLiterals(conditional).map((c) => c.kind), conditional).toContain(
         'named-colour',
@@ -158,16 +188,14 @@ describe('findColourLiterals', () => {
     }
   });
 
-  it('finds a colour behind a comparison against a string', () => {
-    // The span crosses a quoted string rather than stopping at it, so a comparison — which
-    // is what a conditional style is usually written around — no longer eats the value. It
-    // used to: the rule read the first literal after the separator, found no colour word in
-    // it, and skipped past the real one. That is a worse failure than a plain boundary,
-    // because it looks like a rule that looked and found nothing.
+  it('reads the branches of a comparison and not the thing being compared', () => {
+    // A comparison is what a conditional style is usually written around, and a span of
+    // characters could not tell its operand from its result. The tree can: the condition is
+    // tested, the branches are painted, and only the branches are read.
     for (const compared of [
-      "style={{ color: status === 'failed' ? 'red' : undefined }}",
-      `style={{ background: kind === "agent" ? "navy" : undefined }}`,
-      "style={{ color: mode === 'dark' ? theme.a : 'gray' }}",
+      `<div style={{ color: status === 'failed' ? 'red' : undefined }} />`,
+      `<div style={{ background: kind === "agent" ? "navy" : undefined }} />`,
+      `<div style={{ color: mode === 'dark' ? theme.a : 'gray' }} />`,
     ]) {
       expect(findColourLiterals(compared).map((c) => c.kind), compared).toContain(
         'named-colour',
@@ -175,29 +203,111 @@ describe('findColourLiterals', () => {
     }
   });
 
-  it('still ignores a comparison whose literals are not colours', () => {
-    expect(findColourLiterals("style={{ color: mode === 'dark' ? a : b }}")).toEqual([]);
+  it('still ignores a comparison whose branches are not colours', () => {
+    expect(findColourLiterals(`<div style={{ color: mode === 'dark' ? a : b }} />`)).toEqual([]);
   });
 
   it('finds a colour inside a template whose interpolation carries quotes', () => {
-    const shorthand = "style={{ border: `1px solid ${on ? 'red' : 'gray'}` }}";
+    const shorthand = `<div style={{ border: ${TICK}1px solid \${on ? 'red' : 'gray'}${TICK} }} />`;
     expect(findColourLiterals(shorthand).map((c) => c.kind)).toContain('named-colour');
   });
 
+  it('reads the fixed text of a template as well as its substitutions', () => {
+    // A template is text with holes in it, and the colour is as likely to be in the text as
+    // in a hole — a shorthand interpolating a width around a fixed colour is the ordinary
+    // way this gets written. Both ends of the split are read: what comes before the first
+    // hole, and what comes after each one.
+    expect(
+      findColourLiterals(
+        `<div style={{ background: ${TICK}red url(\${path})${TICK} }} />`,
+      ).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+    expect(
+      findColourLiterals(
+        `<div style={{ border: ${TICK}\${width}px solid red${TICK} }} />`,
+      ).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+  });
+
   it('finds a colour on a JSX attribute, which separates with an equals sign', () => {
-    for (const attribute of ['fill="red"', 'stroke="navy"', 'color="red"']) {
+    for (const attribute of [
+      `<path fill="red" />`,
+      `<path stroke="navy" />`,
+      `<Dot color="red" />`,
+      // A namespaced attribute is named by its local part, which is the shape SVG's
+      // `xlink:` family takes. Nothing here paints through one today; reading the name
+      // rather than the whole token is one branch, and this is what pins it.
+      `<path xlink:fill="red" />`,
+    ]) {
       expect(findColourLiterals(attribute).map((c) => c.kind), attribute).toEqual([
         'named-colour',
       ]);
     }
   });
 
+  it('reads both sides of the operators that hand back an operand', () => {
+    // A fallback, a guard and a concatenation: each can be the value, so each side of each
+    // is read. A comparison is not on that list, which is what keeps an operand out of the
+    // answer wherever it sits — the case for that is under "what the parser closed".
+    for (const operated of [
+      `<div style={{ color: chosen || 'red' }} />`,
+      `<div style={{ color: on && 'red' }} />`,
+      `<div style={{ border: width + 'px solid red' }} />`,
+    ]) {
+      expect(findColourLiterals(operated).map((c) => c.kind), operated).toEqual([
+        'named-colour',
+      ]);
+    }
+  });
+
+  it('reads a value through the wrappers that do not change it', () => {
+    // Five spellings of the same string at run time. A walk that did not know them would
+    // read each as "not a literal" and go quiet — silently, which is the failure mode this
+    // guard is least allowed to have.
+    for (const wrapped of [
+      `<div style={{ color: ('red') }} />`,
+      `<div style={{ color: 'red' as string }} />`,
+      `<div style={{ color: 'red' satisfies string }} />`,
+      `<div style={{ color: (fallback ?? 'red')! }} />`,
+    ]) {
+      expect(findColourLiterals(wrapped).map((c) => c.kind), wrapped).toEqual([
+        'named-colour',
+      ]);
+    }
+    // The fifth is TypeScript's older assertion syntax, which only exists in a `.ts` file.
+    expect(
+      findColourLiterals(`const color = <string>'red';`, 'src/a.ts').map((c) => c.kind),
+    ).toEqual(['named-colour']);
+  });
+
+  it('reports a nested paint once, not once per value that encloses it', () => {
+    // The walk over the file already visits every property, so the walk over a *value*
+    // stops at an object literal rather than descending into it. Descending would report
+    // the inner paint twice — once as itself and once as part of the outer value.
+    expect(
+      findColourLiterals(`const sx = { background: { color: 'red' } };`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+  });
+
+  it('reports the site on one line, short enough to read in a failure message', () => {
+    const wrapped = `<div style={{
+  color: active
+    ? 'red'
+    : 'gray',
+}} />`;
+    expect(findColourLiterals(wrapped)[0]?.text).toBe(`color: active ? 'red' : 'gray'`);
+    const long = `<div style={{ color: on ? 'red' : ${TICK}${'var(--color-acc) '.repeat(12)}${TICK} }} />`;
+    const reported = findColourLiterals(long)[0]?.text ?? '';
+    expect(reported.length).toBeLessThanOrEqual(120);
+    expect(reported.endsWith('…')).toBe(true);
+  });
+
   it('finds a colour on a JSX attribute written as an expression container', () => {
-    // The braces are the ordinary way to write this. Only the plain string attribute was
-    // caught, and only the plain string attribute was tested — which is how a claim that
-    // JSX attributes were covered survived: the case that would have contradicted it was
-    // the one nobody wrote. A status dot whose colour prop is a conditional is the default
-    // React idiom, and it shipped a painted pixel with every gate green.
+    // The braces are the ordinary way to write this, and for a long time only the plain
+    // string attribute was caught — and only the plain string attribute was tested, which
+    // is how a claim that JSX attributes were covered survived. A status dot whose colour
+    // prop is a conditional is the default React idiom, and it shipped a painted pixel with
+    // every gate green.
     for (const attribute of [
       `<Dot color={'red'} />`,
       `<Dot color={"red"} />`,
@@ -217,13 +327,14 @@ describe('findColourLiterals', () => {
   });
 
   it('reads a colour branch whose sibling is a non-paint keyword', () => {
-    // The greedy quantifier hands back the *last* quoted literal in range, and in a ternary
+    // A greedy quantifier hands back the *last* quoted literal in range, and in a ternary
     // that is the wrong one half the time. Every keyword below is one the named set leaves
     // out on purpose, because each follows the theme rather than fixing a colour — and each
     // is what a component naturally writes as the other branch. `none` is SVG's own default
     // non-paint value, so a fill that paints on one condition and does not on the other is
     // the ordinary spelling, and it was the silent one. Reversing the branches made it loud,
-    // which is the tell.
+    // which is the tell. Both branches are value positions to a tree, so neither order can
+    // be the quiet one.
     for (const branch of ["'none'", "'inherit'", "'transparent'", "'currentColor'", "''"]) {
       const first = `<path fill={on ? 'red' : ${branch}} />`;
       const second = `<path fill={on ? ${branch} : 'red'} />`;
@@ -233,46 +344,42 @@ describe('findColourLiterals', () => {
   });
 
   it('reads a colour branch whose sibling is a template literal', () => {
-    // The third quote character. The span could cross the other two and not this one, so a
-    // branch written as a template blocked it and the colour on the far side went unread -
+    // The third quote character. A span could cross the other two and not this one, so a
+    // branch written as a template blocked it and the colour on the far side went unread —
     // and the same code with the branches swapped fired. This is the shape this codebase
     // will actually write it in: the colour vocabulary here is custom properties, so an
     // interpolated token on one branch against a hardcoded fallback on the other is the
     // ordinary way to reach for one.
-    const t = '`';
     for (const styled of [
-      `<path fill={on ? ${t}var(--color-acc)${t} : 'red'} />`,
-      `<path fill={on ? 'red' : ${t}var(--color-acc)${t}} />`,
-      `style={{ background: on ? ${t}var(--color-acc)${t} : 'navy' }}`,
-      `style={{ background: on ? 'navy' : ${t}var(--color-acc)${t} }}`,
-      `el.style.color = on ? ${t}var(--color-acc)${t} : 'red';`,
-      `el.style.setProperty('color', on ? ${t}var(--c)${t} : 'red');`,
+      `<path fill={on ? ${TICK}var(--color-acc)${TICK} : 'red'} />`,
+      `<path fill={on ? 'red' : ${TICK}var(--color-acc)${TICK}} />`,
+      `<div style={{ background: on ? ${TICK}var(--color-acc)${TICK} : 'navy' }} />`,
+      `<div style={{ background: on ? 'navy' : ${TICK}var(--color-acc)${TICK} }} />`,
+      `el.style.color = on ? ${TICK}var(--color-acc)${TICK} : 'red';`,
+      `el.style.setProperty('color', on ? ${TICK}var(--c)${TICK} : 'red');`,
     ]) {
       expect(findColourLiterals(styled).map((c) => c.kind), styled).toContain('named-colour');
     }
   });
 
-  it('reports one violation per property, whichever quotes the branches use', () => {
-    // Three patterns read the same property, one per quote character, so a value with a
-    // branch in each used to be reported once per pattern that could see a colour - two
-    // findings for one literal. They start at the same place because they start at the same
-    // property, which is what makes them the same violation.
-    const t = '`';
+  it('reports one violation per painted site, whichever quotes the branches use', () => {
+    // Three patterns used to read the same property, one per quote character, so a value
+    // with a branch in each was reported once per pattern that could see a colour — two
+    // findings for one literal, deduplicated by hand afterwards. A site is one node, so
+    // there is nothing left to deduplicate.
     for (const mixed of [
-      `style={{ color: on ? 'red' : "navy" }}`,
-      `style={{ color: on ? 'red' : "steel" }}`,
-      `style={{ color: on ? 'red' : ${t}var(--x)${t} }}`,
+      `<div style={{ color: on ? 'red' : "navy" }} />`,
+      `<div style={{ color: on ? 'red' : "steel" }} />`,
+      `<div style={{ color: on ? 'red' : ${TICK}var(--x)${TICK} }} />`,
     ]) {
       expect(findColourLiterals(mixed).map((c) => c.kind), mixed).toEqual(['named-colour']);
     }
   });
 
   it('reads a colour branch in an object literal the same way', () => {
-    // The same miss, in the form that has been here since before the container was
-    // admitted, and that no bullet ever named.
     for (const style of [
-      `style={{ fill: on ? 'red' : 'none' }}`,
-      `style={{ color: failed ? 'navy' : 'inherit' }}`,
+      `<div style={{ fill: on ? 'red' : 'none' }} />`,
+      `<div style={{ color: failed ? 'navy' : 'inherit' }} />`,
       `el.style.color = on ? 'red' : 'transparent';`,
     ]) {
       expect(findColourLiterals(style).map((c) => c.kind), style).toContain('named-colour');
@@ -283,43 +390,45 @@ describe('findColourLiterals', () => {
     // Naming the ANSI colour words as introducers had a side effect nothing tested: in a
     // braced ternary the quoted first branch read as a key introducing the second, so the
     // rule fired when the first branch was one of eight words and stayed quiet otherwise.
-    // That is the same which-way-was-it-written asymmetry the equality separator had, in
-    // the shape the tests did not reach. All four of these fire through the brace now.
+    // All four of these are one attribute with two branches to a tree.
     for (const conditional of [
       `<Dot color={on ? 'red' : 'gray'} />`,
       `<Dot color={on ? 'red' : undefined} />`,
       `<Dot color={on ? 'crimson' : 'gray'} />`,
       `<Dot color={on ? 'crimson' : undefined} />`,
     ]) {
-      expect(findColourLiterals(conditional).map((c) => c.kind), conditional).toContain(
+      expect(findColourLiterals(conditional).map((c) => c.kind), conditional).toEqual([
         'named-colour',
-      );
+      ]);
     }
   });
 
-  it('does not let a braced attribute reach the attribute after it', () => {
-    // The brace is admitted where it opens the container, not as a bound inside the
-    // expression: the closing one still stops the span, so a prop cannot read a literal
-    // belonging to the next prop along.
+  it('does not let one attribute read the value of the attribute after it', () => {
+    // Two attributes are two nodes, so there is no span to bound and nothing to bound it
+    // with. The character rule needed the closing brace for this.
     expect(findColourLiterals(`<Dot color={pick()} label={'gold'} />`)).toEqual([]);
     expect(findColourLiterals(`<Dot fill={shade} /> <Tag kind={'silver'} />`)).toEqual([]);
   });
 
-  it('finds a colour assigned through the style object', () => {
-    expect(findColourLiterals("el.style.color = 'red';").map((c) => c.kind)).toEqual([
+  it('finds a colour assigned through the style object, by name or by index', () => {
+    expect(findColourLiterals(`el.style.color = 'red';`).map((c) => c.kind)).toEqual([
       'named-colour',
     ]);
     expect(
-      findColourLiterals("el.style.setProperty('color', 'red');").map((c) => c.kind),
+      findColourLiterals(`el.style.setProperty('color', 'red');`).map((c) => c.kind),
     ).toEqual(['named-colour']);
+    // The index form, which the character rule never saw: the bracket sat between the name
+    // and the equals sign the same way the quote sat between a key and its colon.
+    expect(findColourLiterals(`el.style['color'] = 'red';`).map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
   });
 
   it('finds a colour through the other two setters that take a property name', () => {
-    // Coverage the narrowing lost. Before the comma form was tied to a named call these
-    // were caught, by the same accident that caught every unrelated two-argument call; the
-    // fix for the accident took them with it. The namespaced setter puts its namespace
-    // first, so the name is the second argument rather than the first, and the typed-OM
-    // map spells the verb on its own.
+    // The namespaced setter puts its namespace first, so the name is the second argument
+    // rather than the first, and the typed-OM map spells the verb on its own. Both were
+    // lost the first time the comma form was narrowed to a named call, because only two
+    // names were written down.
     for (const written of [
       `el.setAttributeNS(null, 'fill', 'red');`,
       `el.setAttributeNS('http://www.w3.org/2000/svg', 'stroke', 'navy');`,
@@ -331,27 +440,30 @@ describe('findColourLiterals', () => {
     }
   });
 
-  it('finds a colour under a quoted key', () => {
-    // The quote between the property and the colon used to break the match.
-    expect(findColourLiterals("{ 'color': 'red' }").map((c) => c.kind)).toEqual([
-      'named-colour',
-    ]);
-    expect(findColourLiterals('{ "background-color": "red" }').map((c) => c.kind)).toEqual([
-      'named-colour',
-    ]);
+  it('finds a colour under a key however the key is spelled', () => {
+    // Bare, quoted and computed-from-a-literal are one node kind with three spellings of
+    // `name`. The quote used to break the match and the bracket was never handled at all.
+    for (const keyed of [
+      `const s = { color: 'red' };`,
+      `const s = { 'color': 'red' };`,
+      `const s = { "background-color": "red" };`,
+      `const s = { ['color']: 'red' };`,
+      `const s = { [${TICK}--color-acc${TICK}]: 'red' };`,
+    ]) {
+      expect(findColourLiterals(keyed).map((c) => c.kind), keyed).toEqual(['named-colour']);
+    }
   });
 
   it('finds a colour either side of a quote the value escapes', () => {
-    // This was a residue entry for three rounds, in both its directions: the scanned text
-    // carries real backslashes, the span reads the escaped quote as a delimiter it is not,
-    // and whichever chunk the greedy quantifier happened to hand back decided the answer.
-    // Checking every chunk closes it — the split is still wrong, but no colour falls in the
-    // half nobody looked at. Both orders, both quote characters.
+    // This was a residue entry for three rounds, in both its directions: a character rule
+    // reads an escaped quote as a delimiter it is not, and whichever half the quantifier
+    // handed back decided the answer. Unescaping a literal is the parser's job, so the
+    // question stops existing rather than being answered. Both orders, both quotes.
     for (const escaped of [
-      String.raw`style={{ background: 'red url('a.png')' }}`,
-      String.raw`style={{ background: "red url(\"a.png\")" }}`,
-      String.raw`style={{ background: 'url('a.png') red' }}`,
-      String.raw`style={{ background: "url(\"a.png\") red" }}`,
+      `const s = { background: 'red url(\\'a.png\\')' };`,
+      `const s = { background: "red url(\\"a.png\\")" };`,
+      `const s = { background: 'url(\\'a.png\\') red' };`,
+      `const s = { background: "url(\\"a.png\\") red" };`,
     ]) {
       expect(findColourLiterals(escaped).map((c) => c.kind), escaped).toContain(
         'named-colour',
@@ -360,16 +472,13 @@ describe('findColourLiterals', () => {
   });
 
   it('finds a colour beside a url quoted inside the same value', () => {
-    // Missed by every earlier version of the rule, because the inner quote closed the
-    // value early. One pattern per quote character is what lets the value carry the others,
-    // whichever way round they are nested.
     expect(
-      findColourLiterals(`style={{ background: "url('a.png') no-repeat red" }}`).map(
+      findColourLiterals(`<div style={{ background: "url('a.png') no-repeat red" }} />`).map(
         (c) => c.kind,
       ),
     ).toEqual(['named-colour']);
     expect(
-      findColourLiterals(`style={{ background: 'url("a.png") no-repeat red' }}`).map(
+      findColourLiterals(`<div style={{ background: 'url("a.png") no-repeat red' }} />`).map(
         (c) => c.kind,
       ),
     ).toEqual(['named-colour']);
@@ -382,20 +491,20 @@ describe('findColourLiterals', () => {
     // is what stopped it crying wolf on `src/transport` — made every one of these
     // invisible, so the keys are named explicitly.
     for (const themed of [
-      "new Terminal({ theme: { foreground: 'white' } })",
-      "{ cursor: 'red' }",
-      "{ cursorAccent: 'navy' }",
-      "{ selectionBackground: 'gold' }",
-      `{ selectionForeground: "tan" }`,
-      "{ selectionInactiveBackground: 'silver' }",
-      "{ scrollbarSliderBackground: 'gray' }",
-      "{ scrollbarSliderHoverBackground: 'gray' }",
-      "{ scrollbarSliderActiveBackground: 'gray' }",
-      "{ overviewRulerBorder: 'crimson' }",
-      "{ black: 'gold' }",
-      "{ brightWhite: 'ivory' }",
-      "{ brightMagenta: 'orchid' }",
-      "{ extendedAnsi: ['tan'] }",
+      `new Terminal({ theme: { foreground: 'white' } });`,
+      `const t = { cursor: 'red' };`,
+      `const t = { cursorAccent: 'navy' };`,
+      `const t = { selectionBackground: 'gold' };`,
+      `const t = { selectionForeground: "tan" };`,
+      `const t = { selectionInactiveBackground: 'silver' };`,
+      `const t = { scrollbarSliderBackground: 'gray' };`,
+      `const t = { scrollbarSliderHoverBackground: 'gray' };`,
+      `const t = { scrollbarSliderActiveBackground: 'gray' };`,
+      `const t = { overviewRulerBorder: 'crimson' };`,
+      `const t = { black: 'gold' };`,
+      `const t = { brightWhite: 'ivory' };`,
+      `const t = { brightMagenta: 'orchid' };`,
+      `const t = { extendedAnsi: ['tan'] };`,
     ]) {
       expect(findColourLiterals(themed).map((c) => c.kind), themed).toContain('named-colour');
     }
@@ -405,11 +514,44 @@ describe('findColourLiterals', () => {
     // `transport/surface/xterm.ts` writes exactly this shape, and it is correct: the value
     // is a token lookup with a follow-the-theme fallback, not a colour.
     expect(
-      findColourLiterals(`{ foreground: token('--color-fg', 'inherit') }`),
+      findColourLiterals(`const t = { foreground: token('--color-fg', 'inherit') };`),
     ).toEqual([]);
     expect(
-      findColourLiterals(`{ selectionBackground: token('--color-acc35', 'transparent') }`),
+      findColourLiterals(
+        `const t = { selectionBackground: token('--color-acc35', 'transparent') };`,
+      ),
     ).toEqual([]);
+  });
+
+  it('reads the arguments of a call the value is computed from', () => {
+    // The other half of the case above, and the reason arguments are walked at all: the
+    // fallback behind a token lookup is a real place to write a colour by hand, and the
+    // character rule could not reach past the comma to see it.
+    expect(
+      findColourLiterals(`const t = { foreground: token('--color-fg', 'red') };`).map(
+        (c) => c.kind,
+      ),
+    ).toEqual(['named-colour']);
+    expect(
+      findColourLiterals(`<div style={{ color: mix(a, b) ?? 'red' }} />`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+    expect(
+      findColourLiterals(`<div style={{ color: run({ x: 1 }) ?? 'red' }} />`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+    expect(
+      findColourLiterals(`const s = { color: new Shade('red') };`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+  });
+
+  it('finds a colour in a declaration and in a class field', () => {
+    // Neither is a property of anything, and both are how a component keeps a colour to
+    // hand before it paints with it.
+    expect(findColourLiterals(`const color = 'red';`).map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
+    expect(findColourLiterals(`class Swatch { borderColor = 'navy'; }`).map((c) => c.kind)).toEqual(
+      ['named-colour'],
+    );
   });
 
   it('does not fire on a url whose path names a colour', () => {
@@ -418,42 +560,52 @@ describe('findColourLiterals', () => {
     // failed the sweep — and a false positive in a guard is how the next person in a hurry
     // learns to reach for the suppression rather than the fix.
     expect(
-      findColourLiterals(`style={{ background: "url('/img/red-banner.png')" }}`),
+      findColourLiterals(`<div style={{ background: "url('/img/red-banner.png')" }} />`),
     ).toEqual([]);
-    expect(findColourLiterals("style={{ backgroundImage: 'url(/assets/tan.png)' }}")).toEqual(
-      [],
-    );
-    expect(findColourLiterals(`style={{ background: 'url("/i/gold.svg")' }}`)).toEqual([]);
+    expect(
+      findColourLiterals(`<div style={{ backgroundImage: 'url(/assets/tan.png)' }} />`),
+    ).toEqual([]);
+    expect(
+      findColourLiterals(`<div style={{ background: 'url("/i/gold.svg")' }} />`),
+    ).toEqual([]);
     // The bracket rule reads an arbitrary value the same way and had the same hole.
     expect(findColourLiterals('className="bg-[url(/img/red.png)]"')).toEqual([]);
   });
 
   it('does not fire on a comparison against a colour, either way round', () => {
-    // Reading a colour is not writing one. The positive form fired and the negated one did
-    // not, which is the tell: the rule was matching the first of the three equals signs as
-    // its separator, so what it caught depended on which way the condition happened to be
-    // written. Both are quiet now, and an assignment - one equals sign - still fires.
+    // Reading a colour is not writing one, and one equals sign is not three. The character
+    // rule matched the first of the three in a strict comparison, so the positive form
+    // fired and the negated form did not — which way a condition happens to be written is
+    // not a property of the code's correctness.
     for (const compared of [
-      "if (color === 'red') return;",
-      "if (borderColor == 'red') return;",
-      "if (color !== 'red') return;",
+      `if (color === 'red') return;`,
+      `if (borderColor == 'red') return;`,
+      `if (color !== 'red') return;`,
       `if (background === "navy") return;`,
-      "const dark = foreground === 'white';",
+      `const dark = foreground === 'white';`,
+      // And a comparison is still a comparison in value position: the four operators that
+      // pass an operand through are an allowlist, so this hands back a boolean rather than
+      // a colour however it is written down.
+      `el.style.color = mode === 'red';`,
     ]) {
       expect(findColourLiterals(compared), compared).toEqual([]);
     }
   });
 
   it('does not fire on a call whose arguments are a property name and a colour', () => {
-    // The comma separator exists for `setProperty`, and it used to accept any call at all
-    // — or no call, since a two-element array is the same three characters. Neither writes
-    // a pixel, and both are shapes a test helper or a lookup table writes without thinking
-    // about colour at all.
+    // The name-as-argument form exists for `setProperty`, and an early version accepted any
+    // call at all — or no call, since a two-element array is the same three characters.
+    // Neither writes a pixel, and both are shapes a test helper or a lookup table writes
+    // without thinking about colour at all.
     for (const innocent of [
-      "track('color', 'gold');",
-      `t('background', 'tan')`,
-      "const pair = ['color', 'gold'];",
-      "expect(rule('fill', 'navy')).toBe(1);",
+      `track('color', 'gold');`,
+      `t('background', 'tan');`,
+      `const pair = ['color', 'gold'];`,
+      `expect(rule('fill', 'navy')).toBe(1);`,
+      // `set` is far too common a verb to take on its own, so the typed-OM map has to be
+      // named in front of it. An ordinary cache writing a two-argument entry is the shape
+      // that would otherwise be caught.
+      `cache.set('color', 'gold');`,
     ]) {
       expect(findColourLiterals(innocent), innocent).toEqual([]);
     }
@@ -465,8 +617,8 @@ describe('findColourLiterals', () => {
     // whole job is writing those values was the one the rule could not see into, so
     // hard-coding the accent there turned the picker into a no-op with every gate green.
     for (const written of [
-      `{ '--color-acc': 'red' }`,
-      `{ "--color-status-failed": "red" }`,
+      `const s = { '--color-acc': 'red' };`,
+      `const s = { "--color-status-failed": "red" };`,
       `target.setProperty('--color-acc', 'red');`,
       `root.style.setProperty('--accent-color', 'navy');`,
     ]) {
@@ -479,66 +631,66 @@ describe('findColourLiterals', () => {
   it('leaves the token names themselves alone', () => {
     // The same module is full of custom-property names next to each other. A name is not
     // a value, and none of these words is a colour.
-    expect(findColourLiterals(`['--color-bg0', '--color-fg3', '--color-acc35']`)).toEqual([]);
-    expect(findColourLiterals(`{ '--color-bg0': surface.bg0, '--color-fg': surface.fg }`)).toEqual(
-      [],
-    );
+    expect(
+      findColourLiterals(`const names = ['--color-bg0', '--color-fg3', '--color-acc35'];`),
+    ).toEqual([]);
+    expect(
+      findColourLiterals(`const s = { '--color-bg0': surface.bg0, '--color-fg': surface.fg };`),
+    ).toEqual([]);
   });
 
   it('finds a colour in a hand-wrapped conditional', () => {
     // There is no formatter in this repo, so a ternary split over three lines is the
     // ordinary way to write the shape this rule most needs to catch — stopping at a line
     // end meant catching it only when it happened to fit on one.
-    const wrapped = `style={{
+    const wrapped = `<div style={{
   color: active
     ? 'red'
     : 'gray',
-}}`;
-    expect(findColourLiterals(wrapped).map((c) => c.kind)).toContain('named-colour');
+}} />`;
+    expect(findColourLiterals(wrapped).map((c) => c.kind)).toEqual(['named-colour']);
   });
 
-  it('does not let a multi-line span reach a sibling property', () => {
-    // A comma separates one object property from the next, so the span stops there rather
-    // than running on into a value that has nothing to do with the painting one.
-    const siblings = `{
+  it('does not read a sibling property, however the two are laid out', () => {
+    // One property is one node. A comma had to stand in for that, and a comma is also what
+    // separates the arguments of a call, which is what put the token fallback out of reach.
+    const siblings = `const s = {
   color: computeColour(),
   tier: 'gold',
-}`;
+};`;
     expect(findColourLiterals(siblings)).toEqual([]);
   });
 
   it('does not match a painting property inside a longer word', () => {
-    // `fill` in `autofill`, `stroke` in `keystroke`. Fixing the bare-string false
-    // positives must not introduce an identifier-shaped set of them instead.
+    // `fill` in `autofill`, `stroke` in `keystroke`. A character rule needed a word-boundary
+    // guard for this, and the guard was what kept `pointBackground` out of the vocabulary
+    // too; a tree compares whole names, so only the vocabulary decides now.
     for (const innocent of [
-      "{ autofill: 'gold' }",
-      "{ keystroke: 'tan' }",
-      "{ refill: 'tan' }",
-      "{ unfilled: 'navy' }",
+      `const s = { autofill: 'gold' };`,
+      `const s = { keystroke: 'tan' };`,
+      `const s = { refill: 'tan' };`,
+      `const s = { unfilled: 'navy' };`,
     ]) {
       expect(findColourLiterals(innocent), innocent).toEqual([]);
     }
   });
 
-  it('does not let the expression wander into the next statement', () => {
-    // The span between the separator and the literal stops at a semicolon, a quote or a
-    // line end, so a painting property cannot reach a literal that has nothing to do
-    // with it.
-    expect(findColourLiterals(['const color = pick();', "const tier = 'gold';"].join('\n'))).toEqual(
-      [],
-    );
-    expect(findColourLiterals("const color = pick(); const tier = 'gold';")).toEqual([]);
+  it('does not let a value reach into the next statement', () => {
+    expect(
+      findColourLiterals([`const color = pick();`, `const tier = 'gold';`].join('\n')),
+    ).toEqual([]);
+    expect(findColourLiterals(`const color = pick(); const tier = 'gold';`)).toEqual([]);
   });
 
-  it('stays quiet on a string that no style property introduces', () => {
-    // The rule this replaced flagged any single-word quoted string, which would have
-    // fired on protocol literals in `src/transport` — a colour guard shouting at a module
-    // that paints nothing is a guard someone switches off.
+  it('stays quiet on a string that no painting name introduces', () => {
+    // An early rule flagged any single-word quoted string, which would have fired on
+    // protocol literals in `src/transport` — a colour guard shouting at a module that
+    // paints nothing is a guard someone switches off.
     for (const innocent of [
-      "const tier = 'gold';",
-      "if (kind === 'silver') return;",
-      "shell === 'tan'",
-      "{ label: 'navy' }",
+      `const tier = 'gold';`,
+      `if (kind === 'silver') return;`,
+      `const same = shell === 'tan';`,
+      `const s = { label: 'navy' };`,
     ]) {
       expect(findColourLiterals(innocent), innocent).toEqual([]);
     }
@@ -546,9 +698,9 @@ describe('findColourLiterals', () => {
 
   it('does not mistake prose or an ordinary short string for a colour', () => {
     expect(findColourLiterals('// the red build turned green again')).toEqual([]);
-    expect(findColourLiterals('/** paints it `red` when it fails */')).toEqual([]);
-    expect(findColourLiterals("const label = 'red alert';")).toEqual([]);
-    expect(findColourLiterals("t('Tasks')")).toEqual([]);
+    expect(findColourLiterals(`/** paints it ${TICK}red${TICK} when it fails */`)).toEqual([]);
+    expect(findColourLiterals(`const label = 'red alert';`)).toEqual([]);
+    expect(findColourLiterals(`t('Tasks');`)).toEqual([]);
   });
 
   it('does not fire on tokens, on the colours that follow the theme, or on prose', () => {
@@ -566,6 +718,108 @@ describe('findColourLiterals', () => {
     expect(findColourLiterals('the red build turned green again')).toEqual([]);
     expect(findColourLiterals('issue #12345')).toEqual([]);
   });
+
+  it('parses a .ts file as TypeScript and a .tsx file as JSX', () => {
+    // `<T>value` is a type assertion in one and an element in the other, and getting it
+    // backwards is a parse error that takes the rest of the file's sites down with it —
+    // silently, because a file the guard cannot read looks exactly like a clean one. The
+    // sweep passes the real path for this reason; the default is `.tsx` because the shapes
+    // this guard exists to catch are written in components.
+    const assertion = `const swatch = <Record<string, string>>{ color: 'red' };`;
+    expect(findColourLiterals(assertion, 'src/a.ts').map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
+    expect(findColourLiterals(assertion, 'src/a.tsx')).toEqual([]);
+  });
+});
+
+/*
+ * What the parser closed, one case per entry, each paired with the real thing it sits next
+ * to.
+ *
+ * These are the shapes the character rule reported as violations and the tree does not.
+ * Every one of them is a *loud* failure that has now stopped happening, so each pair is
+ * written the same way: the quiet half proves the false positive is gone, and the loud half
+ * proves the same spelling still fires where it means something. Without the second half a
+ * rule that had simply stopped working would pass this file.
+ */
+describe('what the parser closed', () => {
+  it('no longer reads a quoted colour name followed by a colon as a key', () => {
+    // The loudest false positive the rule had, and it had two spellings: a conditional
+    // between two colour names, where the first branch read as a key introducing the
+    // second, and a label table mapping colour names to display strings, where the `case`
+    // label did. Both are quiet; a key that really is a key still fires.
+    expect(findColourLiterals(`const c = on ? 'red' : 'gray';`)).toEqual([]);
+    expect(
+      findColourLiterals(
+        `function label(k) { switch (k) { case 'red': return 'Red alert'; } }`,
+      ),
+    ).toEqual([]);
+    expect(findColourLiterals(`<Dot color={on ? 'red' : 'gray'} />`).map((c) => c.kind)).toEqual(
+      ['named-colour'],
+    );
+    expect(findColourLiterals(`const s = { color: 'red' };`).map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
+  });
+
+  it('no longer reads a comment that describes painting as painting', () => {
+    // A character rule cannot tell a line that talks about painting from one that paints,
+    // and telling them apart by pattern is how a scanner comes to mistake a regex literal
+    // for a comment and fall silent over everything after it. A parser knows where the
+    // comments are because it has to.
+    expect(
+      findColourLiterals(`// background: the swatch stays 'red' until the run lands`),
+    ).toEqual([]);
+    expect(
+      findColourLiterals(`/** Paints ${TICK}background${TICK} as 'red' when the probe fails. */`),
+    ).toEqual([]);
+    expect(
+      findColourLiterals(
+        `// background: the swatch stays 'red' until the run lands\nel.style.background = 'red';`,
+      ).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+  });
+
+  it('no longer runs a value across a statement that forgot its semicolon', () => {
+    // The price of letting a span cross line ends, in a tree that is semicolon-terminated
+    // by convention and nothing more. The parser does the insertion itself.
+    const unterminated = `const color = pick()
+const tier = 'gold'`;
+    expect(findColourLiterals(unterminated)).toEqual([]);
+    expect(findColourLiterals(`const color = 'gold'`).map((c) => c.kind)).toEqual([
+      'named-colour',
+    ]);
+  });
+
+  it('no longer reads a comparison operand or a lookup key as the value', () => {
+    // Two of the four spellings the old false-positive entry named. A condition is tested
+    // and an index selects; neither is painted, and neither is walked. The other two — an
+    // argument and a conditional's other branch — are still read, on purpose, and have
+    // their own cases above.
+    //
+    // The first two are each held shut twice over, so the third case is the one that pins
+    // the condition on its own: a predicate's argument is a literal the walk *would* read
+    // anywhere else, and the only reason it is quiet here is that a condition is not a
+    // value. Take that away and this goes red while the comparisons stay green.
+    expect(findColourLiterals(`<div style={{ color: isShade('red') ? a : b }} />`)).toEqual([]);
+    expect(findColourLiterals(`<div style={{ color: tier === 'gold' ? a : 'inherit' }} />`)).toEqual(
+      [],
+    );
+    expect(findColourLiterals(`<div style={{ color: palette['gold'] ?? shade }} />`)).toEqual([]);
+    expect(
+      findColourLiterals(`<div style={{ color: labelFor(kind) === 'navy' ? a : b }} />`),
+    ).toEqual([]);
+    // The same three shapes with a colour actually in the value still fire.
+    expect(
+      findColourLiterals(`<div style={{ color: tier === 'gold' ? a : 'crimson' }} />`).map(
+        (c) => c.kind,
+      ),
+    ).toEqual(['named-colour']);
+    expect(
+      findColourLiterals(`<div style={{ color: palette[k] ?? 'gold' }} />`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+  });
 });
 
 /*
@@ -580,30 +834,29 @@ describe('findColourLiterals', () => {
  * red, so closing a gap costs one bullet and one case, and forgetting to is not an option.
  * Both directions have already happened here — a gap closing, and an example quietly
  * ceasing to demonstrate its own entry.
+ *
+ * Eight of the nine are the vocabulary and value questions that came through the rewrite
+ * untouched, because a syntax tree fixes where you look and not what you are looking for.
+ * The ninth is the walk's own narrowness and is new.
  */
 describe('the documented residue', () => {
   it('misses a colour that arrives through a variable', () => {
-    expect(findColourLiterals('style={{ color: chosen }}')).toEqual([]);
+    expect(findColourLiterals(`<div style={{ color: chosen }} />`)).toEqual([]);
   });
 
   it('misses a colour name that no painting property introduces', () => {
-    expect(findColourLiterals("const tier = 'gold';")).toEqual([]);
-  });
-
-  it('misses an expression carrying a comma, a semicolon or a brace', () => {
-    expect(findColourLiterals("style={{ color: mix(a, b) ?? 'red' }}")).toEqual([]);
-    expect(findColourLiterals("style={{ color: run({ x: 1 }) ?? 'red' }}")).toEqual([]);
+    expect(findColourLiterals(`const tier = 'gold';`)).toEqual([]);
   });
 
   it('misses a painting property the list does not name', () => {
     // A useful subset of CSS, not CSS. The comment used to claim it covered CSS, and these
     // five are what made that false.
     for (const css of [
-      "{ textDecoration: 'underline red' }",
-      "{ columnRule: '1px solid red' }",
-      "{ textEmphasis: 'dot red' }",
-      "{ borderInlineStart: '1px solid red' }",
-      "{ filter: 'drop-shadow(0 0 2px red)' }",
+      `const s = { textDecoration: 'underline red' };`,
+      `const s = { columnRule: '1px solid red' };`,
+      `const s = { textEmphasis: 'dot red' };`,
+      `const s = { borderInlineStart: '1px solid red' };`,
+      `const s = { filter: 'drop-shadow(0 0 2px red)' };`,
     ]) {
       expect(findColourLiterals(css), css).toEqual([]);
     }
@@ -611,32 +864,34 @@ describe('the documented residue', () => {
 
   it('misses a colour key belonging to a library the list does not name', () => {
     // xterm's keys came off this entry because that terminal is in this app. Nothing else
-    // here has a colour key of its own, so the rest of the entry is the same trade as
-    // before: `pointBackground` carries a listed word, and the boundary guard that stops
-    // `fill` matching inside `autofill` stops `background` matching inside it too.
-    expect(findColourLiterals("{ pointBackground: 'navy' }")).toEqual([]);
-    expect(findColourLiterals("{ gridLine: 'silver' }")).toEqual([]);
-    expect(findColourLiterals("{ series: [{ area: 'gold' }] }")).toEqual([]);
+    // here has a colour key of its own, and `pointBackground` is not `background`: the tree
+    // compares whole names, so naming it is the only way in.
+    expect(findColourLiterals(`const s = { pointBackground: 'navy' };`)).toEqual([]);
+    expect(findColourLiterals(`const s = { gridLine: 'silver' };`)).toEqual([]);
+    expect(findColourLiterals(`const s = { series: [{ area: 'gold' }] };`)).toEqual([]);
   });
 
   it('misses bare CSS text carried inside a string or a template', () => {
-    // In all three the property is *inside* the literal, and the rule looks for a property
-    // introducing one. Needs a CSS parser, not a wider pattern.
-    expect(findColourLiterals("el.style.cssText = 'color: red';")).toEqual([]);
-    expect(findColourLiterals('const s = css`color: red;`;')).toEqual([]);
+    // In all three the property is *inside* the literal, and the walk looks for a property
+    // introducing one. This is the entry a TypeScript parser cannot help with even in
+    // principle: reading it means parsing the string's contents as CSS.
+    expect(findColourLiterals(`el.style.cssText = 'color: red';`)).toEqual([]);
+    expect(findColourLiterals(`const s = css${TICK}color: red;${TICK};`)).toEqual([]);
     expect(findColourLiterals(`html += '<div style="color: red"></div>';`)).toEqual([]);
   });
 
-  it('misses a custom property whose name is computed', () => {
-    expect(findColourLiterals("{ [`--color-${key}`]: 'red' }")).toEqual([]);
+  it('misses a custom property whose name is only known at run time', () => {
+    // A computed key holding a literal reads like any other key now; one assembled from a
+    // variable has no name to compare, and that is all that is left of this entry.
+    expect(findColourLiterals(`const s = { [${TICK}--color-\${key}${TICK}]: 'red' };`)).toEqual(
+      [],
+    );
   });
 
   it('misses a setter it does not name, and a tuple written for one it does', () => {
-    // The comma separator is spelled as part of a named call now. Before it was, both of
-    // these were caught — but so was every unrelated two-argument call with a property name
-    // in front of a string, which is the false positive that outweighed them. A project's
-    // own wrapper is indistinguishable from that false positive: same two arguments,
-    // different intent, nothing in the text to tell them apart.
+    // Four call shapes are named. A project's own wrapper is indistinguishable from the
+    // false positive naming them closed — same two arguments, different intent, nothing but
+    // the name to go on.
     expect(findColourLiterals(`applyStyle(el, 'color', 'red');`)).toEqual([]);
     expect(findColourLiterals(`paint('background', 'navy');`)).toEqual([]);
     expect(findColourLiterals(`const pairs = [['--color-acc', 'red']];`)).toEqual([]);
@@ -652,43 +907,59 @@ describe('the documented residue', () => {
     // left for the rule to see.
     expect(
       findColourLiterals(
-        `style={{ background: 'url(data:image/svg+xml,%3Csvg%20fill%3Dred/%3E)' }}`,
+        `<div style={{ background: 'url(data:image/svg+xml,%3Csvg%20fill%3Dred/%3E)' }} />`,
       ),
     ).toEqual([]);
+  });
+
+  it('misses a colour the value only produces by running something', () => {
+    // New with the walk, and the price of it being narrow. The walk follows the shapes a
+    // value is made of — literals, both branches of a conditional, the sides of `??`, `||`,
+    // `&&` and `+`, an array's elements, a call's arguments, a template's substitutions —
+    // and stops everywhere else. Stopping is what keeps a condition's operand and a
+    // lookup's key out of the answer, which is the entry directly above this one in the
+    // other direction.
+    expect(findColourLiterals(`<div style={{ color: (() => 'red')() }} />`)).toEqual([]);
+    expect(findColourLiterals(`const s = { color: css${TICK}red${TICK} };`)).toEqual([]);
   });
 
   it('misses a hex the source does not spell as one', () => {
     // The one miss with no backstop under it. The hex rule reads whole files and would
-    // catch this anywhere else; percent-encoding hides the hash from it, and the url bullet
-    // puts the same value out of the named rule's reach, so both halves of the backstop
-    // miss the same literal for different reasons.
+    // catch this anywhere else; percent-encoding hides the hash from it, and the url entry
+    // puts the same value out of rule 4's reach, so both halves of the backstop miss the
+    // same literal for different reasons.
     expect(
       findColourLiterals(
-        `style={{ background: 'url(data:image/svg+xml,%3Csvg fill=%23ff0000/%3E)' }}`,
+        `<div style={{ background: 'url(data:image/svg+xml,%3Csvg fill=%23ff0000/%3E)' }} />`,
       ),
     ).toEqual([]);
   });
+});
 
-  it('does fire on any literal in the value expression, not only the value', () => {
-    // The price of reading every chunk rather than the last one, and it is wider than a
-    // comparison: an operand, a discarded branch and a lookup key are all quoted literals
-    // in the same span, and nothing in the text says which of them the property is set to.
-    // Half of it was already here — whichever literal the quantifier reached last was taken
-    // as the value outright, so these fired or stayed quiet by accident of what came after.
-    for (const expression of [
-      `style={{ color: tier === 'gold' ? a : 'inherit' }}`,
-      `style={{ color: palette['gold'] ?? shade }}`,
-      `style={{ color: labelFor(kind) === 'navy' ? a : b }}`,
-    ]) {
-      expect(findColourLiterals(expression).map((c) => c.kind), expression).toEqual([
-        'named-colour',
-      ]);
-    }
+/*
+ * The false positives that survived the rewrite, one case per entry.
+ *
+ * Three of the six the character rule had. The other three — the comment, the missing
+ * semicolon and the quoted key — are in "what the parser closed" above, because a syntax
+ * tree answers them outright. These three it does not: two are vocabulary and one is the
+ * deliberate price of reading a call's arguments.
+ */
+describe('the false positives that are left', () => {
+  it('does fire on a literal in a call the value is computed from', () => {
+    // The same walk that catches a hardcoded fallback behind a token lookup catches a
+    // display string behind a formatter. Nothing in the tree separates them: both are an
+    // argument to a call whose result is the value.
+    expect(
+      findColourLiterals(`<div style={{ color: label('Red alert') }} />`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
   });
 
-  it('does fire on a table keyed by colour name whose values are prose', () => {
-    // The price of the ANSI words being introducers: a key called `red` set to a sentence
-    // that contains the word is indistinguishable from one set to a colour. Once per entry.
+  it('does fire on a table keyed by an ANSI theme name whose values are prose', () => {
+    // The price of the eight ANSI words being in the vocabulary: a key called `red` set to
+    // a sentence that contains the word is the same tree as one set to a colour. Once per
+    // entry. This is the half of the old quoted-key entry the parser does not answer — a
+    // ternary between two colour names stopped firing, but a key really is a key here, and
+    // which keys paint is vocabulary.
     expect(
       findColourLiterals(`const LABELS = { red: 'Red alert', green: 'Green light' };`).map(
         (c) => c.kind,
@@ -696,54 +967,16 @@ describe('the documented residue', () => {
     ).toEqual(['named-colour', 'named-colour']);
   });
 
-  it('does fire on a bare ternary between two colour names', () => {
-    // No property in front of it at all: the quoted first branch reads as a key introducing
-    // the second. Inside a JSX container that reading lands on the right answer for the
-    // wrong reason, and the brace fix is what stopped the rule depending on it; on its own
-    // it is what is left of the accident.
-    expect(findColourLiterals(`const c = on ? 'red' : 'gray';`).map((c) => c.kind)).toEqual([
-      'named-colour',
-    ]);
-  });
-
-  it('does fire on a comment that writes a property, a colon and a quoted colour', () => {
-    // The rule reads text, not syntax, so a line that only talks about painting is
-    // indistinguishable from one that paints. Telling them apart means knowing where the
-    // comments are, and finding that out by pattern is how a scanner ends up mistaking a
-    // regex literal for a comment and going quiet over the rest of a file. A loud false
-    // positive is the cheaper of those two, so this one stays.
-    expect(
-      findColourLiterals("// background: the swatch stays 'red' until the run lands").map(
-        (c) => c.kind,
-      ),
-    ).toEqual(['named-colour']);
-    expect(
-      findColourLiterals('/** Paints `background` as `red` when the probe fails. */').map(
-        (c) => c.kind,
-      ),
-    ).toEqual([]);
-  });
-
   it('does fire on a value that merely contains a colour word', () => {
-    // The other direction, also documented: a false positive, but a loud one. Nothing
-    // silent can ship a pixel.
+    // A false positive, but a loud one. Nothing silent can ship a pixel.
     //
     // The url form came off this entry, because a path is the one place a colour word
     // turns up in a value often enough to be worth knowing. What is left is everything
     // else that spells one — most plausibly a token whose own name carries it, which is a
     // token a theme file is free to define.
     expect(
-      findColourLiterals("style={{ color: 'var(--brand-red-500)' }}").map((c) => c.kind),
+      findColourLiterals(`<div style={{ color: 'var(--brand-red-500)' }} />`).map((c) => c.kind),
     ).toEqual(['named-colour']);
-  });
-
-  it('does fire across a statement that forgot its semicolon', () => {
-    // The price of letting the span cross line ends. This tree is semicolon-terminated
-    // throughout and nothing enforces that, so it is a live trap rather than a theoretical
-    // one — and, like the other false positive, a loud one.
-    const unterminated = `const color = pick()
-const tier = 'gold'`;
-    expect(findColourLiterals(unterminated).map((c) => c.kind)).toEqual(['named-colour']);
   });
 });
 
@@ -760,14 +993,14 @@ describe('hardcoded colour guard', () => {
 
   it('trips on each of the four kinds, injected into a real file', () => {
     // Trap 12, done properly: this runs the *real* sweep over the *real* tree with one
-    // line added, rather than handing a string to the regex. A guard that is quietly
+    // declaration added, rather than handing a string to the rules. A guard that is quietly
     // unwired — scanning an empty file list, or filtering away everything — passes a
     // fixture test and fails this one.
     expect(new Set(OFFENDERS.map((o) => o.kind)).size).toBe(4);
     for (const { kind, snippet } of OFFENDERS) {
       const poisoned = scanned.map((file) =>
         file.path === 'src/App.tsx'
-          ? { ...file, source: `${file.source}\n// injected: ${snippet}\n` }
+          ? { ...file, source: `${file.source}\n${snippet}\n` }
           : file,
       );
       const violations = scanForColourLiterals(poisoned);
@@ -777,20 +1010,42 @@ describe('hardcoded colour guard', () => {
     }
   });
 
+  it('does not trip when the same offender is injected as a comment', () => {
+    // The injection above used to be written as a comment, and that is exactly what the
+    // syntax rule stopped reading. Keeping it here as its own case is what stops the list
+    // above quietly reverting to a form that proves nothing about rule 4 — and the hex
+    // half shows the other three rules are unaffected, because they read characters and a
+    // hash in a comment is still a hash.
+    const commented = (snippet: string): readonly unknown[] =>
+      scanForColourLiterals(
+        scanned.map((file) =>
+          file.path === 'src/App.tsx'
+            ? { ...file, source: `${file.source}\n// injected: ${snippet}\n` }
+            : file,
+        ),
+      );
+    expect(commented(`<i style={{ color: 'red' }} />`)).toEqual([]);
+    expect(commented(`<i style={{ color: '#ff0000' }} />`)).toHaveLength(1);
+  });
+
   it('still finds a colour literal in every allowlisted token module', () => {
     // Without this, an allowlist entry left behind after a refactor would keep quietly
     // exempting a file that no longer defines tokens.
     for (const allowed of TOKEN_DEFINITION_MODULES) {
       const file = scanned.find((candidate) => candidate.path === allowed);
       expect(file, `${allowed} is allowlisted but was not scanned`).toBeDefined();
-      expect(findColourLiterals(file?.source ?? '').length, allowed).toBeGreaterThan(0);
+      expect(
+        findColourLiterals(file?.source ?? '', allowed).length,
+        allowed,
+      ).toBeGreaterThan(0);
     }
   });
 
   it('does not exempt the guard module itself', () => {
-    // It describes the shapes it hunts for without writing any of them down. If that ever
-    // stops being true the sweep above fails, which is the point: a guard that has to
-    // allowlist itself has stopped being checkable.
+    // It writes down none of the shapes the three text rules hunt for. Rule 4 reads a tree,
+    // so the shapes *it* hunts for can be written in a comment and several are — which is
+    // the one thing the rewrite relaxed here, and the sweep above is what proves the rest
+    // still holds.
     expect(TOKEN_DEFINITION_MODULES).not.toContain('src/theme/colourGuard.ts');
   });
 
