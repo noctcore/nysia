@@ -331,6 +331,36 @@ mod tests {
     }
 
     #[test]
+    fn the_generated_doc_says_the_open_form_does_not_narrow() {
+        // #18: the alias was correct and its doc comment was not. It promised the `default`
+        // branch stayed a type error "until the case is handled", which reads as "write the
+        // cases and this clears" — and it never clears, because no arm narrows at all. This
+        // test is the gate on the honest version, so an edit that restores the flattering
+        // reading goes red instead of shipping.
+        let generated = typescript_constants();
+        assert!(
+            generated.contains("**It does not narrow.**"),
+            "the doc must lead with the limit, not bury it"
+        );
+        assert!(
+            !generated.contains("type error until it is handled"),
+            "the retired promise is back: handling the cases never clears that error"
+        );
+        // A limit is only useful next to what to do instead. `retryable` is the field the
+        // daemon puts on the wire so the taxonomy need not be understood, and `in` is the
+        // guard that does narrow where `switch` does not.
+        assert!(generated.contains("`HelloRejected.retryable`"));
+        assert!(generated.contains("`\"detail\" in reason`"));
+        // The distinction that lived only in a merged pull request body until #18: the
+        // closed type is already accurate for the webview, because the shell has normalised
+        // an unknown kind before TypeScript ever sees it.
+        assert!(
+            generated.contains("deserializes into the Rust enum and re-serializes"),
+            "the webview boundary is why this type is not needed everywhere"
+        );
+    }
+
+    #[test]
     fn the_generated_module_carries_the_numbers_a_client_cannot_derive() {
         let generated = typescript_constants();
         assert!(generated.contains("export const PROTOCOL_VERSION = 2;"));
