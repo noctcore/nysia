@@ -434,9 +434,90 @@ Each of these cost someone a day already.
 
 ## 12. Open questions
 
+> **Wave 3 (2026-09-14).** The v0.1 acceptance criterion — *kill the UI and the shell survives;
+> reattach and the scrollback replays* — was driven against the real app on Windows 11 and
+> **passed**: the window was closed with the × in its title bar, the daemon and the same
+> `cmd.exe` pid kept running with the same session handle and pane key, and the relaunched app
+> brought the tab back with its scrollback and took input again. §4's upgrade claim — *updating
+> Nysia is: replace the app bundle; nothing reconnects, nothing rebinds, nothing is fenced* —
+> **held**, verified against a genuinely different binary: same daemon pid, same launch nonce,
+> same handle, same shell process, scrollback intact. One honest footnote on that: Windows
+> refuses to overwrite a running image (`os error 5`), so the upgrade flow *is*
+> close → replace → relaunch, and what §4 claims spans all three is the daemon, not the app.
+>
+> The proofs, in the order of how much they can prove on their own:
+> `crates/nysia/tests/survival.rs` (CLI-only, in CI),
+> `interop::a_relaunched_window_finds_the_session_and_replays_its_scrollback` (the window's own
+> client against a real daemon, in CI), and `scripts/e2e/walking-skeleton.ps1` (the real app,
+> by hand, because opening a tab and closing a window are things a person does). Questions 2
+> and 3 below are answered with measurements from `scripts/e2e/measure-memory.ps1`; questions 6
+> and 7 are what driving the real GUI turned up, and both are open.
+
 1. **Windows confinement.** Lexical gates only in v1 (§7.5). Is there an acceptable OS-level story later — AppContainer, a restricted token, or WSL-only agent sessions?
-2. **Scrollback persistence budget.** Orca: 5k rows default, 512 KiB replay, 5 MiB store, up to 200 MB history checkpoints. What is Nysia's ceiling, and does it survive a daemon crash or only a clean restart?
-3. **Memory expectations.** Orca on this machine: app 1.1 GB, 356–817 MB *per worktree*, PTY daemon 88 MB for 5 terminals. The agent processes are the entire cost. Tauri saves the Electron renderer, not the expensive part — so what is the honest performance claim?
+2. **Scrollback persistence budget.** ~~Orca: 5k rows default, 512 KiB replay, 5 MiB store, up
+   to 200 MB history checkpoints. What is Nysia's ceiling…~~
+   **Answered for v0.1 (wave 3).** The ceiling is chosen and enforced; the persistence half of
+   the question is answered and the answer is *none*.
+
+   Per session, from `VtConfig::default` in `nysia_core::vt::state`:
+
+   | | Nysia v0.1 | Orca |
+   |---|---|---|
+   | raw replay ring | **256 KiB** | 512 KiB |
+   | logical line log | **10 000 lines, capped at 4 MiB of text** | 5 000 rows, 5 MiB store |
+   | grid history | **4 096 rows**, and it is a *staging area*, not the scrollback | — |
+   | on-disk history | **none** | up to 200 MB of checkpoints |
+
+   The grid row count is deliberately not the scrollback: §7.2's split means the viewport is
+   the grid, the scrollback text is the line log, and a reattaching client replays raw bytes.
+   Three ceilings rather than one because each bounds a different unbounded thing — a stream
+   with no newline at all grows the line log forever unless the byte budget stops it.
+
+   **It survives neither a crash nor a clean restart.** All three live in the daemon's memory
+   and `nysia_core::store` is still a module-level doc comment: nothing is written to SQLite in
+   v0.1, so a daemon that stops for any reason takes every session's scrollback with it — which
+   is the same answer question 4 gives for the sessions themselves, for the same reason. This
+   is a real regression against Orca's 200 MB of history checkpoints, and it is the honest
+   state of v0.1 rather than a design position. **Still open:** whether the line log should be
+   the thing that persists (it is text, it is already bounded, and it is what an agent reads)
+   while the replay ring stays transient, which is the shape the split in §7.2 suggests.
+
+3. **Memory expectations.** ~~Orca on this machine: app 1.1 GB, 356–817 MB *per worktree*, PTY
+   daemon 88 MB for 5 terminals…~~
+   **Measured in wave 3**, on the same machine as the Orca figures, with
+   `scripts/e2e/measure-memory.ps1` — a fresh daemon per row, every shell settled before the
+   reading, and the children counted rather than quietly left out. `cmd` sessions, because this
+   machine has no PowerShell 7; a `pwsh` child is larger, so the per-session column is a floor.
+
+   | sessions | daemon WS | daemon private | children | children WS | total WS |
+   |---|---|---|---|---|---|
+   | 1 | 11.5 MB | 4.6 MB | 3 | 26.7 MB | 38.2 MB |
+   | 5 | 12.9 MB | 14.4 MB | 11 | 92.3 MB | 105.2 MB |
+   | 10 | 14.7 MB | 26.8 MB | 21 | 174.3 MB | 189.0 MB |
+
+   Working set and private bytes both, because they answer different questions and the Orca
+   comparison figures were read off Task Manager, which shows the former.
+
+   **The honest claim, in three parts.**
+
+   - **The runtime is genuinely small.** Orca's PTY daemon is 88 MB for five terminals; Nysia's
+     is **12.9 MB** for five, roughly one seventh, and it grows about **2.2 MB per session** —
+     which is the VT state and the ring above, not a leak. That is the part D-1 moved, and it
+     is the part that got cheaper.
+   - **The window is not.** Measured with one shell tab open: `nysia-desktop.exe` itself is
+     28.2 MB, but it spawns **six WebView2 processes** that bring it to **409.6 MB working set
+     / 205.7 MB private**. Against Orca's 1.1 GB app that is about 2.7× better and it is not a
+     rounding error — but "Tauri is tens of megabytes" is false, and the doc's own warning that
+     Tauri saves the Electron renderer rather than the expensive part is the right one. Counting
+     only the Tauri exe would have produced a flattering 28 MB and would have been dishonest.
+   - **The expensive part is not measured here at all.** Orca's 356–817 MB *per worktree* is
+     agent processes, and v0.1 ships no agent sessions (D-3/D-4 land in v0.2), so there is no
+     Nysia number to compare and claiming a win would be claiming credit for a feature that does
+     not exist. On the shells themselves Nysia has no advantage and expects none: a `cmd` plus
+     its `conhost` costs about **16.4 MB** whoever spawns it.
+
+   **Still open:** what an agent session costs once v0.2 lands, which is the only number that
+   decides whether the per-worktree figure improves.
 4. **Daemon crash blast radius.** ~~Under D-2 the daemon owns more than Orca's does.~~
    **Answered in wave 2 (W4).** A crash takes the sessions with it, and nothing pretends
    otherwise.
@@ -505,6 +586,64 @@ Each of these cost someone a day already.
    output it already had. The parent's standard handles are detached before the spawn, and
    `crates/nysia/tests/survival.rs` has a regression test that reports the hang rather than
    hanging on it.
+
+6. **The window cannot start a daemon, and no build of the app ships one.** Found in wave 3 by
+   launching the app on a machine with no `nysiad` running, which is what every first launch is.
+   The window comes up, the status bar says *Reconnecting*, and the `+` menu fails with the
+   daemon's own sentence: *no daemon is listening on `\.\pipe\nysiad-v1-…` — Start the Nysia
+   daemon, then try again.* For a product whose premise is "launch the app", that is an
+   instruction to go and open a terminal first.
+
+   Question 5 above says the opposite — *"it is the same code path for the GUI and for `nysia
+   <verb>` — `nysia_core::rpc::discovery`, which the window links like everyone else"* — and
+   that claim is **not true of the shipped code**. It is left standing above rather than
+   quietly edited, because the answer is right about the *design* and what is wrong is the
+   build:
+
+   - `Client::connect` in `apps/desktop/src-tauri/src/state.rs` calls `Control::connect` on the
+     resolved endpoint and stops there. It never reaches `discovery::discover`, which is where
+     the spawn lock, the re-probe and the readiness wait live. `discover` is `async` and hands
+     back a `nysia_core` client, and the window's transport is synchronous by construction
+     (every command is `spawn_blocking`, traps register #2), so it cannot call it as it stands.
+   - Even with the code, there would be nothing to spawn: `tauri.conf.json` declares no
+     `externalBin` and no `resources`, so a bundled `Nysia.exe` / `Nysia.app` contains no
+     `nysia` binary. Today it works on a developer machine only because `cargo build` leaves
+     both binaries in the same `target/` directory.
+
+   **Open**, and deliberately not patched in wave 3: the fix wants a synchronous spawn seam in
+   `nysia_core::rpc::discovery` — which must stay *one* implementation, or the race the lock
+   exists to settle gets a second, differently-shaped answer — plus a sidecar entry in
+   `tauri.conf.json` and the bundle step that goes with it. That is W1/W4 code and
+   coordinator-owned shared config, not a small diff.
+
+7. **Re-attaching replays queries as well as output, and the shell reads the answers as
+   input.** Deterministic, and it is in D-1's flagship path. On every `stream_attach` the window
+   issues two `terminal_send` calls that nobody typed — visible in a daemon debug log at first
+   attach and again at every re-attach, with no keystrokes in between.
+
+   The chain: the daemon replays the raw scrollback on attach (which is the whole point, §7.3),
+   `apps/web/src/transport/terminals.ts` writes those bytes into xterm, and xterm answers the
+   terminal queries that are *in* them — a replay contains every `ESC[6n` and `ESC[c` the child
+   ever wrote, and a parser cannot tell a replayed query from a live one. `XtermSurface`
+   forwards every `onData` straight to `terminal_send`, so the answers go to the child as
+   keystrokes, and ConPTY translates the `…R` of a cursor-position report into F3 — which is
+   `cmd`'s recall-previous-command.
+
+   Harmless on a first attach, because there is nothing to recall. On a re-attach the pane comes
+   back showing a phantom command line the user never typed, sitting unsubmitted in the line
+   editor, so the next thing they type is concatenated onto it. Measured: after a relaunch,
+   typing `echo STILL-ALIVE` ran `echo NYSIA-%NYS%echo STILL-ALIVE` and printed
+   `NYSIA-42echo STILL-ALIVE`. One `Esc` clears it and the session is fine, which is why the
+   acceptance criterion still passes — *the shell survives and the scrollback replays* — but a
+   person who does not know to press it loses their next command.
+
+   **Open**, and deliberately not patched in wave 3. The correct fix is a replay boundary on the
+   wire so a client can hold `onData` until the replayed bytes are written; `StreamAttached`
+   carries only `handle` and `streamId`, so that is a `nysia-proto` change (D-13 makes proto the
+   sole authority, so it cannot be worked around client-side) plus the client half. The two
+   workarounds available without it are both worse than the bug: a time-based suppression window
+   drops real keystrokes on a slow machine, and stripping query sequences from every write
+   breaks any full-screen program that legitimately asks.
 
 ---
 
