@@ -555,10 +555,13 @@ impl StreamRegistry {
 
     /// How many stream connections this registry has bound, ever.
     ///
-    /// Monotonic, and the only unambiguous answer to "has that socket finished binding?".
-    /// A client's connect returns when the handshake is answered, which is strictly before
-    /// the bind that makes the connection attachable — so anything waiting on the bind has to
-    /// wait on this rather than on a count, which a supersede moves in the opposite direction.
+    /// Monotonic, and the only unambiguous answer to "has that socket finished binding?" — a
+    /// count cannot answer it, because a supersede moves that in the opposite direction.
+    ///
+    /// A connection is bound *before* its hello is answered, so by the time a client's connect
+    /// returns this has already counted it. That ordering is the contract the client relies
+    /// on: it may attach the instant it is told the connection exists, and the attach must
+    /// find this connection rather than the one it replaced.
     #[must_use]
     pub fn bound(&self) -> u64 {
         self.lock().next_connection.saturating_sub(1)

@@ -383,23 +383,6 @@ async fn compute_token(client: &mut Client, handle: &SessionHandle) {
     }
 }
 
-/// Wait until the daemon has bound `want` stream connections.
-///
-/// A client's connect returns once the handshake is answered, which is strictly before the
-/// daemon binds the connection and makes it attachable. Attaching in that gap lands on the
-/// *previous* connection, which would be a race in the test rather than in the daemon — and
-/// a test that races is a test that eventually passes for the wrong reason.
-async fn until_bound(daemon: &Daemon, want: u64) {
-    let deadline = Instant::now() + DEADLINE;
-    while Instant::now() < deadline && daemon.streams().bound() < want {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(
-        daemon.streams().bound() >= want,
-        "the daemon never bound the stream connection"
-    );
-}
-
 fn client_id(name: &str) -> ClientId {
     name.parse().expect("a well-formed client id")
 }
@@ -538,7 +521,11 @@ async fn a_second_stream_connection_does_not_take_the_first_one_s_streams_down()
     let mut control = harness.control(&me).await;
 
     let first = harness.stream(&me).await;
-    until_bound(&harness.daemon, 1).await;
+    // Not a wait: an invariant. A connection is bound before its hello is answered, so by the
+    // time `stream` has returned the daemon has already counted it — which is the contract the
+    // real client relies on when it attaches the instant its connect returns, and a contract
+    // a test that merely waited would hide rather than check.
+    assert_eq!(harness.daemon.streams().bound(), 1);
     let created = start_shell(&mut control).await;
     await_prompt(&mut control, &created.handle).await;
     let before = control
@@ -553,7 +540,7 @@ async fn a_second_stream_connection_does_not_take_the_first_one_s_streams_down()
 
     // The reload.
     let mut second = harness.stream(&me).await;
-    until_bound(&harness.daemon, 2).await;
+    assert_eq!(harness.daemon.streams().bound(), 2);
     let after = control
         .stream_attach(created.handle.clone())
         .await

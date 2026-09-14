@@ -303,29 +303,90 @@ impl Daemon {
     async fn serve_connection(self: Arc<Self>, connection: Connection) {
         let peer = connection.peer().cloned();
         let (reader, writer) = connection.split();
-        let mut reader = ControlReader::new(reader);
-        let mut writer = ControlWriter::new(writer);
+        self.serve_io(ControlReader::new(reader), ControlWriter::new(writer), peer)
+            .await;
+    }
 
-        let hello = match self
-            .handshake(&mut reader, &mut writer, peer.as_ref())
-            .await
-        {
-            Some(hello) => hello,
-            None => return,
+    /// A connection's whole life, over any pair of streams.
+    ///
+    /// Split out from [`Self::serve_connection`] so a test can drive it over an in-memory pipe
+    /// narrower than one line — which is the only way to hold the daemon *inside* the write
+    /// of its own hello answer and look at what a client racing that answer would find.
+    async fn serve_io<R, W>(
+        self: &Arc<Self>,
+        mut reader: ControlReader<R>,
+        mut writer: ControlWriter<W>,
+        peer: Option<PeerCredentials>,
+    ) where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let Some(hello) = self.vet(&mut reader, &mut writer, peer.as_ref()).await else {
+            return;
         };
+
+        // **A stream connection is bound before its hello is answered, and after it is
+        // vetted.** Both halves of that sentence are load-bearing.
+        //
+        // Before the answer, because a client may attach the instant its connect returns, and
+        // its connect returns when this answer arrives. Bound afterwards, there is a window in
+        // which the client believes it has a stream connection and the daemon still routes its
+        // name to the previous one — which on a webview reload is the connection this one is
+        // about to supersede. The attach is not refused, so nothing tells the client to retry;
+        // it succeeds against a sink the supersede then closes, and the pane is silent forever
+        // while the window says ready.
+        //
+        // After the vet, because binding supersedes whatever held that client id. A peer that
+        // failed the account check must not be able to take down somebody else's live stream
+        // by naming their id in a hello that is about to be refused.
+        let bound = match hello.role {
+            ClientRole::Stream => Some(self.streams.bind(&hello.client_id)),
+            ClientRole::Control => None,
+        };
+
+        if writer
+            .write_frame(&HelloResponse::Accepted(HelloAccepted::new(
+                self.identity.clone(),
+            )))
+            .await
+            .is_err()
+        {
+            // The client never learned it was accepted, so it will not ack anything on this
+            // connection. Leaving it bound would leave the client id pointing at a socket
+            // nobody is reading.
+            if let Some(bound) = bound {
+                self.streams.unbind(bound.key);
+            }
+            return;
+        }
+
         self.served_anyone.store(true, Ordering::Release);
         self.clients.fetch_add(1, Ordering::AcqRel);
-        let caller = Caller::new(peer, &hello.client_id, &self.sessions);
-
-        match hello.role {
-            ClientRole::Control => self.serve_control(reader, writer, &caller).await,
-            ClientRole::Stream => self.serve_stream(reader, writer, &hello.client_id).await,
+        // `bound` is `Some` exactly for a stream connection, so it is the role from here on.
+        // One discriminator rather than two, because two could disagree — and the way they
+        // would disagree is by serving a stream connection that was never bound.
+        match bound {
+            Some(bound) => {
+                self.serve_stream(reader, writer, &hello.client_id, bound)
+                    .await;
+            }
+            None => {
+                // The ancestry walk is here rather than above the bind: it reads the process
+                // table, and nothing that slow belongs between a bind and the answer that
+                // tells the client the bind has happened.
+                let caller = Caller::new(peer, &hello.client_id, &self.sessions);
+                self.serve_control(reader, writer, &caller).await;
+            }
         }
         self.clients.fetch_sub(1, Ordering::AcqRel);
     }
 
-    /// Read the first frame, decide, and answer. `None` means the connection is finished.
-    async fn handshake<R, W>(
+    /// Read the first frame and decide. `None` means the connection is finished.
+    ///
+    /// Refusals are written here, because there is nothing to do after one. An *acceptance* is
+    /// not: the caller writes it, so that whatever the accepted connection owes the client can
+    /// be in place before the client is told the connection exists.
+    async fn vet<R, W>(
         &self,
         reader: &mut ControlReader<R>,
         writer: &mut ControlWriter<W>,
@@ -370,13 +431,7 @@ impl Daemon {
                 .await;
             return None;
         }
-        let hello = hello?;
-        let accepted = HelloAccepted::new(self.identity.clone());
-        writer
-            .write_frame(&HelloResponse::Accepted(accepted))
-            .await
-            .ok()?;
-        Some(hello)
+        hello
     }
 
     /// Why this `hello` should be refused, or `None` to accept it.
@@ -642,11 +697,15 @@ impl Daemon {
     }
 
     /// Carry binary output one way and credit acks the other.
+    ///
+    /// Takes the connection already bound rather than binding here, because the bind has to
+    /// happen before the hello is answered — see [`Self::serve_io`] for the race that closes.
     async fn serve_stream<R, W>(
         self: &Arc<Self>,
         reader: ControlReader<R>,
         writer: ControlWriter<W>,
         client_id: &ClientId,
+        bound: BoundStream,
     ) where
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -655,7 +714,7 @@ impl Daemon {
             key,
             mut outbox,
             superseded,
-        } = self.streams.bind(client_id);
+        } = bound;
         // The two halves run concurrently on purpose: a client that has stopped acking must
         // not also stop the daemon from *reading* its acks, which is the one thing that would
         // turn a temporary stall into a permanent one.
@@ -1006,6 +1065,81 @@ mod tests {
         for _ in 0..4 {
             assert!(!daemon.should_retire());
         }
+        daemon.shutdown();
+        drop(listener);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stream_connection_is_attachable_before_its_hello_is_answered() {
+        // The reload race, from the side that can close it. A client may attach the instant
+        // its connect returns, and its connect returns when the hello answer arrives — so if
+        // the bind came after that answer there is a window where the client believes it has
+        // a stream connection and the daemon still routes its id to the one being replaced.
+        // The attach is not refused, so nothing tells the client to retry; it lands on a sink
+        // the supersede then closes, and the pane is silent while the window says ready.
+        //
+        // A pipe narrower than one line is what makes this an assertion rather than a wager:
+        // the daemon is held *inside* the write of its own answer, which is exactly the state
+        // a racing client observes, and it is held there for as long as this test looks.
+        let endpoint = crate::rpc::endpoint::scratch("prebind");
+        let (daemon, listener) = Daemon::bind(DaemonConfig {
+            idle_retire_after: None,
+            ..DaemonConfig::new(endpoint.clone())
+        })
+        .expect("binds");
+        let client_id: ClientId = "nysia-test".parse().expect("a well-formed client id");
+        let mine = PeerCredentials {
+            pid: Some(std::process::id()),
+            user: "me".to_owned(),
+            daemon_user: "me".to_owned(),
+        };
+
+        let (theirs, ours) = tokio::io::duplex(8);
+        let (ours_reader, ours_writer) = tokio::io::split(ours);
+        let (_their_reader, their_writer) = tokio::io::split(theirs);
+        let serving = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move {
+                daemon
+                    .serve_io(
+                        ControlReader::new(ours_reader),
+                        ControlWriter::new(ours_writer),
+                        Some(mine),
+                    )
+                    .await;
+            }
+        });
+
+        // Say hello in the stream role and then read nothing at all, which is the worst a
+        // real client's scheduler can do to it.
+        ControlWriter::new(their_writer)
+            .write_frame(&HelloRequest::new(
+                PROTOCOL_VERSION,
+                ClientRole::Stream,
+                client_id.clone(),
+            ))
+            .await
+            .expect("the hello goes out");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && daemon.streams().bound() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            daemon.streams().bound(),
+            1,
+            "a stream connection must be bound before its hello is answered; bound after, a \
+             client that attaches the moment its connect returns lands on the connection this \
+             one supersedes"
+        );
+        assert!(
+            daemon.streams().attach(&client_id).is_some(),
+            "which is to say: an attach arriving while the answer is still being written must \
+             find this connection, not the one it replaced"
+        );
+
+        serving.abort();
         daemon.shutdown();
         drop(listener);
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
