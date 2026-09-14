@@ -197,7 +197,50 @@ jobs:
           node scripts/sidecar.ts verify $prefix
           if ($LASTEXITCODE -ne 0) { throw 'the installed app does not carry its runtime' }
           # The installer may launch what it installed; nothing after this needs it running.
-          Get-Process Nysia, nysiad -ErrorAction SilentlyContinue | Stop-Process -Force
+          #
+          # **The names are the ones on disk**, which the payload above lists: the window is
+          # `nysia-desktop.exe` and the runtime beside it is `nysia.exe`. `Nysia, nysiad`
+          # reached one of the two — `Get-Process` matches case-insensitively, so `Nysia`
+          # does find the daemon — but nothing is ever called `nysiad` (D-11: `nysia
+          # --daemon` *is* nysiad, there is no second binary) and the window the installer
+          # actually launches was never named at all.
+          #
+          # **And it exercises itself first** (traps register #12). Two stand-ins carrying
+          # exactly those image names are started, and the same call that reaps them has to
+          # have seen both: a reap nobody has watched catch anything is how a half-right
+          # list of names stayed green for as long as it did. Copies of `node`, because
+          # the subject is the *name*: a window wants a desktop and a daemon wants to bind,
+          # and neither is being asked about here.
+          $proofDir = Join-Path $env:RUNNER_TEMP 'nysia-leftover-proof'
+          New-Item -ItemType Directory -Force $proofDir | Out-Null
+          $standIns = @(foreach ($name in 'nysia-desktop.exe', 'nysia.exe') {
+            $copy = Join-Path $proofDir $name
+            Copy-Item (Get-Command node).Source $copy -Force
+            # No spaces in the argument: Start-Process joins ArgumentList unquoted, and a
+            # script that arrives split lands node in the REPL and it exits at once.
+            Start-Process -FilePath $copy -ArgumentList '-e', 'setTimeout(()=>{},300000)' -PassThru -WindowStyle Hidden
+          })
+          Start-Sleep -Milliseconds 700
+          foreach ($standIn in $standIns) {
+            if (-not (Get-Process -Id $standIn.Id -ErrorAction SilentlyContinue)) {
+              throw "the stand-in at pid $($standIn.Id) exited, so it proves nothing about the check below"
+            }
+          }
+
+          $leftovers = @(Get-Process nysia-desktop, nysia -ErrorAction SilentlyContinue)
+          foreach ($standIn in $standIns) {
+            if ($leftovers.Id -notcontains $standIn.Id) {
+              throw "the leftover check did not see pid $($standIn.Id): it would reap nothing"
+            }
+          }
+          $leftovers | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Milliseconds 300
+          foreach ($standIn in $standIns) {
+            if (Get-Process -Id $standIn.Id -ErrorAction SilentlyContinue) {
+              throw "pid $($standIn.Id) survived the reap"
+            }
+          }
+          Remove-Item -Recurse -Force $proofDir -ErrorAction SilentlyContinue
 
       - name: prove the sidecar check trips
         run: pnpm prove:sidecar
