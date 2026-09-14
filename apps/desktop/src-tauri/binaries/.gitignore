@@ -1,4 +1,6 @@
 # The sidecar is built, never committed: it is the `nysia` binary for one target triple,
-# staged by `pnpm sidecar` (scripts/sidecar.ts) before any build of the desktop crate.
+# staged here by `pnpm sidecar` (scripts/sidecar.ts) before the app is bundled. An ordinary
+# `cargo build` neither needs nor reads it — the sidecar is declared in
+# tauri.bundle.conf.json, which only the bundler merges.
 *
 !.gitignore

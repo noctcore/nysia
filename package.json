@@ -17,6 +17,7 @@
     "test": "vitest run",
     "ts-drift": "node scripts/ts-drift.ts",
     "sidecar": "node scripts/sidecar.ts stage",
+    "sidecar:verify": "node scripts/sidecar.ts verify",
     "prove:ts-drift": "node scripts/prove-ts-drift.ts",
     "prove:lint-meta": "node scripts/prove-lint-meta.ts",
     "prove:eslint-bans": "node scripts/prove-eslint-bans.ts",

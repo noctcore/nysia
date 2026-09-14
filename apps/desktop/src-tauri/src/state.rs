@@ -42,12 +42,17 @@ const ATTACH_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis
 
 /// The file name of the runtime this window starts when nothing is listening.
 ///
-/// One binary is both the daemon and the CLI, selected by argv (D-11), and Tauri ships it
-/// beside the window as a sidecar: `nysia.exe` next to `Nysia.exe` on Windows, and inside
-/// `Nysia.app/Contents/MacOS/` on macOS. `cargo build` leaves the two in the same `target/`
-/// directory, so one rule — *beside this executable* — covers a developer's build and an
-/// installed bundle alike, with nothing path-shaped baked in at compile time (traps
-/// register #9).
+/// One binary is both the daemon and the CLI, selected by argv (D-11), and one rule finds it
+/// in both worlds a window runs in: **beside this executable**. In an installed bundle that
+/// is the sidecar Tauri laid down — `nysia.exe` next to `Nysia.exe`, `Contents/MacOS/nysia`
+/// in the app; in a developer's tree it is the binary cargo just built in `target/<profile>`.
+/// Nothing path-shaped is baked in at compile time (traps register #9), and in development it
+/// is always the freshly compiled runtime rather than a copy of one.
+///
+/// That second half is only true because the sidecar is declared in
+/// `tauri.bundle.conf.json`, which the bundler merges and an ordinary `cargo build` never
+/// sees — see `scripts/sidecar.ts` for what goes wrong when it is declared in
+/// `tauri.conf.json` instead.
 const RUNTIME_BINARY: &str = if cfg!(windows) { "nysia.exe" } else { "nysia" };
 
 /// Which stream id belongs to which session, in both directions.

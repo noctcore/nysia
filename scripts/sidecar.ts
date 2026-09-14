@@ -12,15 +12,33 @@
  * platform being built; Tauri strips the triple again when it lays the bundle out, so the
  * file the window looks for is plain `nysia` beside it.
  *
+ * ## Why the declaration is in `tauri.bundle.conf.json` and not `tauri.conf.json`
+ *
+ * Because `tauri_build` acts on `externalBin` at **compile** time, not bundle time: for every
+ * `cargo build` of the desktop crate it deletes `target/<profile>/nysia` and copies the
+ * staged file over it — and the delete is an `unwrap`.
+ *
+ * Read that against D-1. The daemon **outlives the window by design**, so "run the app, close
+ * it, build again" is the ordinary sequence rather than an unusual one — and the daemon still
+ * running is holding `target/<profile>/nysia`, which is the file about to be deleted.
+ * Windows unlinks a running image only while another name for it survives, so the build
+ * panicked with `PermissionDenied` as soon as Tauri's own copy had replaced the hardlink
+ * cargo leaves from `deps/`. Renaming the sidecar does not help: whatever it is called,
+ * something is running from the file being deleted.
+ *
+ * Declared in a config the bundler merges with `--config` and `cargo` never reads, none of it
+ * happens: `cargo build`, `cargo test` and `cargo clippy` neither need the sidecar nor touch
+ * it, a developer's window starts the runtime cargo just built rather than a copy of an older
+ * one, and the copy happens exactly once — during the bundle build, which is the only time
+ * anybody wants it.
+ *
  * Two commands:
  *
  * - `stage [--profile debug|release]` copies the freshly built `nysia` into `binaries/`.
- *   **Every** `cargo build` of the desktop crate needs this to have happened, not only a
- *   bundle: `tauri_build::build()` resolves `externalBin` at compile time and fails with
- *   *resource path ... doesn't exist* when it is missing.
- * Re-stage whenever the runtime itself changes: `tauri_build` copies what is in
- * `binaries/` over `target/<profile>/nysia`, so a `cargo build -p nysia` that is not
- * followed by a stage is undone by the next build of the window.
+ *   Needed **before bundling** — `pnpm build:app`, or the bundle job in CI — and never
+ *   before an ordinary cargo command.
+ * Re-stage whenever the runtime changes and you are about to bundle. In development there is
+ * nothing to re-stage for: the window starts what cargo built.
  *
  * - `verify <directory>` asserts the runtime is beside a window that has been built or
  *   bundled — `target/release` on Windows, `Nysia.app/Contents/MacOS` on macOS. That is the

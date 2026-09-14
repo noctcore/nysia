@@ -59,17 +59,6 @@ jobs:
       - name: Build the web frontend
         run: pnpm build
 
-      # `externalBin` in tauri.conf.json is resolved by `tauri_build::build()` at *compile*
-      # time, so the sidecar has to be staged before any cargo command that touches the
-      # desktop crate — not only before a bundle. Without it every cargo step below fails
-      # with `resource path binaries/nysia-<triple> doesn't exist`.
-      - name: Build the nysia runtime
-        working-directory: crates/nysia
-        run: cargo build -p nysia
-
-      - name: Stage the nysia sidecar
-        run: node scripts/sidecar.ts stage
-
       - name: cargo fmt
         run: cargo fmt --all --check
 
@@ -169,11 +158,15 @@ jobs:
       - name: Stage the nysia sidecar
         run: node scripts/sidecar.ts stage --profile release
 
-      # `tauri build` runs the web build itself through `beforeBuildCommand`.
+      # Through the package script, so the `--config` that merges the sidecar declaration
+      # lives in exactly one place and a bundle built by hand carries it too. `tauri build`
+      # runs the web build itself through `beforeBuildCommand`.
       - name: Build the app bundle
-        run: pnpm --filter @nysia/desktop exec tauri build --bundles ${{ matrix.bundles }}
+        run: pnpm --filter @nysia/desktop run build --bundles ${{ matrix.bundles }}
 
-      # Beside the window cargo built, which is where `tauri_build` copies the sidecar.
+      # Beside the window cargo built, which is where `tauri_build` copies the sidecar during
+      # a bundle build. A first check, and the weaker one: it says the copy happened, not that
+      # the bundle carries it.
       - name: The runtime ships beside the window
         run: node scripts/sidecar.ts verify target/release
 
