@@ -235,6 +235,12 @@ expectLine(
 );
 expectMessage(trips, 'renderer-must-mute-replies', 're-exports Terminal');
 
+// And the renderer that never writes the name down: a dynamic import hands over the whole
+// module, so scoping the obligation to a bound `Terminal` would have gone quiet on the
+// ordinary way to split a heavy renderer out of the main bundle. Obliged on the reach alone.
+expectLine(trips, 'renderer-must-mute-replies', 'apps/web/src/transport/surface/lazy.ts', 6);
+expectMessage(trips, 'renderer-must-mute-replies', 'loads @xterm/xterm at runtime');
+
 expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
 process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');
 // The clean fixture also reaches StoreContext by call from store/ and from main.tsx. If

@@ -618,8 +618,10 @@ function isTheTerminalClass(imported: string): boolean {
  * module that binds the `Terminal` class from the terminal library must call the mute.** That
  * survives a second such module, which is the case a pin would have missed.
  *
- * `Terminal`, and as a **value**, because the first spelling of this rule asked only whether a
- * module reached the library at all and obliged two kinds of module that build nothing:
+ * `Terminal`, and as a **value**, and that scoping is about **static imports**, where the name
+ * a module binds is written down. It is there because the first spelling of this rule asked
+ * only whether a module reached the library at all, and obliged two kinds of module that build
+ * nothing:
  *
  * - `import type { Terminal } from '@xterm/xterm'` and `import { type Terminal }`. Both erase;
  *   neither can construct anything. Type-ness lives at the clause and at each specifier, and
@@ -630,6 +632,13 @@ function isTheTerminalClass(imported: string): boolean {
  *   considered for this PR and dropped for unrelated reasons. Had it shipped, a rule with no
  *   suppression mechanism would have reported a script that builds no terminal, and there
  *   would have been no honest way out.
+ *
+ * A dynamic `import()` and a `require()` are obliged on the reach alone, because what they
+ * hand over is the whole module and which name comes out of it is a data-flow question rather
+ * than a syntactic one. That fails closed: a lazily loaded renderer is an ordinary way to split
+ * a bundle, and a terminal that arrives late answers queries exactly like one that does not.
+ * Reaching for the parser alone *through* a dynamic import would be reported, but the form that
+ * was actually written is the static one, and the static one is exact.
  *
  * What it cannot see, said rather than implied.
  *
@@ -656,7 +665,8 @@ function isTheTerminalClass(imported: string): boolean {
  * being wrong the other way was a report with no way out, and widening this back to every
  * exported name whose spelling ends in `Terminal` is a one-line change if a second facade ever
  * appears. Nothing else the first spelling closed is open — an alias, an indirection through a
- * variable, a wrapper that passes the class on and a bare re-export all still report.
+ * variable, a wrapper that passes the class on, a bare re-export, a dynamic import and a
+ * `require` all still report.
  *
  * **A renderer that is not `@xterm/xterm`** is real and deliberate: §7.3 keeps `ghostty-web`
  * swappable, and when it arrives this rule needs its package name added rather than being
@@ -691,17 +701,36 @@ export function noUnmutedRenderer(root: string, files: readonly string[]): Viola
     const bound = importedValues(file, source).filter(
       (value) => buildsATerminal(value.specifier) && isTheTerminalClass(value.imported),
     );
-    if (bound.length === 0) continue;
+    const lazily = moduleReferences(file, source).filter(
+      (reference) =>
+        (reference.kind === 'dynamic-import' || reference.kind === 'require') &&
+        reference.specifier !== undefined &&
+        buildsATerminal(reference.specifier),
+    );
+    if (bound.length === 0 && lazily.length === 0) continue;
     if (callSites(file, source, MUTE_CALL).length > 0) continue;
+
+    if (bound.length > 0) {
+      violations.push({
+        rule: 'renderer-must-mute-replies',
+        file,
+        line: bound[0]?.line ?? 0,
+        message:
+          `binds ${TERMINAL_CLASS} from ${XTERM_PACKAGE} but never calls ${MUTE_CALL}(); a ` +
+          'terminal answers the queries it parses and the daemon has already answered them, ' +
+          'so an unmuted one types into the child as though somebody had (D-7, §12 q7)',
+      });
+      continue;
+    }
 
     violations.push({
       rule: 'renderer-must-mute-replies',
       file,
-      line: bound[0]?.line ?? 0,
+      line: lazily[0]?.line ?? 0,
       message:
-        `binds ${TERMINAL_CLASS} from ${XTERM_PACKAGE} but never calls ${MUTE_CALL}(); a ` +
-        'terminal answers the queries it parses and the daemon has already answered them, ' +
-        'so an unmuted one types into the child as though somebody had (D-7, §12 q7)',
+        `loads ${XTERM_PACKAGE} at runtime and never calls ${MUTE_CALL}(); a dynamic import ` +
+        'hands over the whole module, so this is obliged on the reach alone — a terminal that ' +
+        'arrives lazily answers the queries it parses like any other (D-7, §12 q7)',
     });
   }
 
