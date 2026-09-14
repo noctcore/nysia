@@ -452,7 +452,9 @@ Each of these cost someone a day already.
 > client against a real daemon, in CI), and `scripts/e2e/walking-skeleton.ps1` (the real app,
 > by hand, because opening a tab and closing a window are things a person does). Questions 2
 > and 3 below are answered with measurements from `scripts/e2e/measure-memory.ps1`; questions 6
-> and 7 are what driving the real GUI turned up, and both are open.
+> and 7 are what driving the real GUI turned up. Both were open when this was written and
+> neither is now: 6 was fixed in wave 4, and 7 took two changes — the replay boundary it asked
+> for, and then a second one after that fix's rationale turned out to rest on something untrue.
 
 1. **Windows confinement.** Lexical gates only in v1 (§7.5). Is there an acceptable OS-level story later — AppContainer, a restricted token, or WSL-only agent sessions?
 2. **Scrollback persistence budget.** ~~Orca: 5k rows default, 512 KiB replay, 5 MiB store, up
@@ -584,9 +586,13 @@ Each of these cost someone a day already.
    every `cargo build` of the desktop crate it deletes `target/<profile>/nysia` and copies the
    staged file over it, and the delete is an `unwrap`. But the daemon **outlives the window by
    design**, so "run the app, close it, build again" is the ordinary sequence — and the daemon
-   still running is holding the file about to be deleted. Windows unlinks a running image only
-   while another name for it survives, so the build panicked with `PermissionDenied` as soon as
-   Tauri's own copy had replaced the hardlink cargo leaves from `deps/`.
+   still running is holding the file about to be deleted. **Holding it stops the delete only
+   once that file is Tauri's own single-linked copy.** Windows unlinks a running image
+   while another name for it survives, so a daemon started from the two-name hardlink cargo
+   leaves from `deps/` does not trip it: measured, the unlink succeeds through the other name,
+   the link count goes from two to one, and the build finishes. It is the copy Tauri writes over
+   it — one name, and a daemon running from that name — where the delete fails, so the build
+   panicked with `PermissionDenied` as soon as that copy had replaced the hardlink.
 
    **What that bought: every ordinary `cargo` command.** `cargo build`, `cargo test`, `cargo
    clippy` and `tauri dev` neither need the sidecar nor touch `target/<profile>/nysia`, so a
@@ -726,7 +732,8 @@ Each of these cost someone a day already.
    keystrokes, and ConPTY translates the `…R` of a cursor-position report into F3 — which is
    `cmd`'s recall-previous-command.
 
-   Harmless on a first attach, because there is nothing to recall. On a re-attach the pane comes
+   Harmless on a first attach, because there is nothing to recall — which is the reading that
+   turned out to be wrong, and the correction is further down. On a re-attach the pane comes
    back showing a phantom command line the user never typed, sitting unsubmitted in the line
    editor, so the next thing they type is concatenated onto it. Measured: after a relaunch,
    typing `echo STILL-ALIVE` ran `echo NYSIA-%NYS%echo STILL-ALIVE` and printed
@@ -734,7 +741,7 @@ Each of these cost someone a day already.
    acceptance criterion still passes — *the shell survives and the scrollback replays* — but a
    person who does not know to press it loses their next command.
 
-   **Resolved.** The fix is the replay boundary this entry asked for, as a frame rather than as
+   **The first change: the replay boundary this entry asked for**, as a frame rather than as
    a field: `FrameKind::ReplayEnd`, empty payload, sent exactly once per attach after the last
    replayed byte and before anything live. A byte count on `StreamAttached` was the smaller diff
    and was rejected — this wire has already shipped a defect where the credit window was
@@ -759,17 +766,109 @@ Each of these cost someone a day already.
    second deadline opens the gate anyway and raises a notice, because a pane that silently
    ignored the first seconds of typing is indistinguishable from a broken keyboard.
 
-   Both workarounds this entry rejected stayed rejected, and the tests say so: a live `ESC[c`
-   after the boundary is still answered, which stripping query sequences would have broken, and
-   the deadline is a backstop rather than the mechanism, which is what separates it from the
-   time-based window.
-
    Proved at the three layers that can each see one part, because no single layer can see them
    all — the input that corrupted the shell was never written by any code in this repository, so
    no Rust test can reproduce it. `crates/nysia-core/src/rpc/interop.rs` and
    `apps/desktop/src-tauri/src/interop.rs` pin the wire contract against a real daemon on a real
    socket; `apps/web/src/transport/surface/surface.test.ts` pins the gate against a terminal
    stub that answers queries in the order a real one does.
+
+   **And then the rationale for it turned out to be half wrong, which is the part worth
+   keeping.** This entry used to close by saying both rejected workarounds stayed rejected, and
+   to give as the reason that *a live query after the boundary is still answered, so full-screen
+   programs are unaffected* — a property stripping query sequences would have broken. Nothing
+   was being protected. **The daemon answers every query itself**: its virtual terminal is built
+   with a reply sink and `nysia_core::rpc::session::spawn_pump` calls `take_replies` on every
+   chunk it feeds and writes the result to the pty, precisely so that `pwsh`, which will not
+   draw its prompt until `CSI 6 n` comes back, draws one. So by the time the bytes reach the
+   window the authority has already answered, and the renderer's answer was a duplicate —
+   unsolicited, every single time, on both sides of the boundary.
+
+   It also explains what the original report noticed and could not account for: that the
+   corruption was "harmless on a first attach". ConPTY's own startup probe gets the authority's
+   reply and then the renderer's, and the second arrives as F3 with no history to recall. It was
+   never harmless. It was invisible.
+
+   **Closed properly by a second change (#43): the display cache answers nothing.**
+   `apps/web/src/transport/surface/muteReplies.ts` registers a handler for every sequence xterm
+   would answer, ahead of the built-in responder, so no reply is ever composed. D-7 is the frame
+   — terminal state lives in Rust, the webview is a display cache, and a display cache does not
+   answer on the authority's behalf. Recognising replies on the way *out* was rejected again and
+   for the same reason it was rejected the first time, now with the better version available:
+   `ESC[5;3R` is a reply and also something a person can type, and a reply that is never composed
+   needs no recognising.
+
+   The muted set is every path by which parsing output reaches xterm's `triggerDataEvent`: DA1,
+   DA2, DSR, DECDSR, XTVERSION, DECRQM in both forms, the kitty keyboard query, DECRQSS, the
+   three `CSI t` options that report, and an `OSC 4/10/11/12` whose value is `?`. Sequences that
+   also *act* are read by parameter, so a title push and a palette set still run. No ESC handler
+   is registered: xterm has no ESC-level responder to displace, and claiming a guarantee about a
+   handler that does not exist would be worse than the gap.
+
+   **The ordering it rests on was read out of xterm's source, not its documentation** — the same
+   standard the boundary itself was held to, and the reason that one held up. In
+   `@xterm/xterm` 6.1.0-beta.304: registration *pushes* onto the per-identifier list, both CSI
+   dispatch sites walk it backwards and break on the first `true`, `OscParser.end` and
+   `DcsParser.unhook` do the same, `OscHandler.end(false)` and `DcsHandler.unhook(false)` do not
+   call their callback, and `EscapeSequenceParser.reset()` clears parser *state* rather than the
+   handler lists — which matters, because this repository writes `ESC c` itself after a hidden
+   pane's buffer overflows, and a mute that died there would come back only on the panes that
+   had already lost output.
+
+   **The replay boundary stays, as defence in depth, and the reasons are not sentiment.** Two
+   things the mute cannot do. Real keystrokes typed at a pane that is still painting history are
+   still dropped, which is the gate's own claim and nothing to do with queries. And the gate is
+   the layer that does not need a table to be complete: the mute is an enumerated list living in
+   `surface/xterm.ts`, the one module the node-only tests cannot exercise against a real terminal
+   (D-18), while the gate takes *everything* `onData` produces during a replay whatever produced
+   it. An xterm bump that adds a responder, or moves the dispatch order the mute is read against,
+   lands on a closed channel rather than in the shell. Different failure, different layer. The
+   deadline is still a backstop rather than the mechanism, which is what separates it from the
+   time-based window that was rejected.
+
+   **What now goes unanswered, said plainly.** The daemon answers DA1, DA2, DSR 5/6, DECRQM and
+   `CSI 18 t` — `alacritty_terminal`'s `identify_terminal`, `device_status`, `report_mode` and
+   `text_area_size_chars`, all of which reach the pty through the reply sink. It does **not**
+   answer XTVERSION, DECRQSS, the kitty keyboard query, `CSI 14/16 t` or an OSC colour query:
+   alacritty either has no handler or raises an event (`TextAreaSizeRequest`, `ColorRequest`)
+   that the sink deliberately drops. Those five are now answered by nobody. That is the right
+   direction under D-7 — the window's palette, cell size and renderer version are not the
+   session's, and an answer from the cache would have been wrong as often as it was redundant —
+   but it is a daemon gap rather than a non-issue, and it is recorded here so the next program
+   that waits on one has somewhere to look.
+
+   **And one thing the window still writes to the child, which no parser hook can stop.**
+   `DECSET 2031` asks a terminal to *notify* the program when the colour scheme changes, and
+   xterm emits `CSI ?997;Nn` from its theme-change listener rather than from parsing anything —
+   `CoreBrowserTerminal` registers it on `ThemeService.onChangeColors`. There is no handler to
+   displace, and Nysia has a runtime theme switcher (§8), so the path is live: a program that set
+   2031 is typed at the next time the user changes theme. It is left as it is, and named here
+   rather than glossed over. It is the one item in this entry the authority does not hold — the
+   daemon has no theme — the program opted in rather than the cache volunteering, and suppressing
+   it means intercepting `CSI ? h` and dropping one mode out of a list that may carry several the
+   program does want. Worth doing if a shell ever sets 2031 and the stray line matters; not worth
+   folding into the change that closed the rest.
+
+   **The end-to-end step was a proxy too (#44), and is not one now.** It snapshotted the screen,
+   relaunched, waited for idle and asserted the screen was unchanged — which catches phantom
+   input only if it *echoes*, and the defect did not echo: F3 put a recalled line into the editor
+   without submitting it. `scripts/e2e/walking-skeleton.ps1` now does what the original
+   reproduction did. It types a command after the attach and asserts a whole screen line equal to
+   a token the shell computed — a whole line, never a substring, because the concatenation the
+   report describes still *contains* the token in its output — and then repeats it with two
+   characters left waiting in the editor and asserts the same check fails. One thing it
+   deliberately does not assert is the precondition that the replayed scrollback contained a
+   query: the replay ring is raw bytes and `terminal read` hands back text with the escapes
+   already stripped, so nothing a script can call can see one. The step stops depending on it
+   instead, and the control is what makes a pass mean something.
+
+   **One correction to the record.** The commit that fixed a race in the boundary interop test
+   diagnosed it as *a session nothing is watching does not fill its replay ring*. The pump says
+   otherwise: `state.feed(&chunk)` runs on every chunk it reads, and the ring is filled inside
+   it, unconditionally. What is discarded when no sink is attached is the *coalescing* buffer —
+   `flush_all` clears it and says why, because the grid already has the bytes. The test change
+   was right for a different reason: attaching a first window and draining it is a
+   synchronisation, and what it waits for is the pump having fed the state at all.
 
 ---
 
