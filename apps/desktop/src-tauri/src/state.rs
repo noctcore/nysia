@@ -162,6 +162,15 @@ enum RuntimeBinary {
     /// A path a test pinned, so it can prove a first launch without building a bundle.
     #[cfg(test)]
     Pinned(PathBuf),
+    /// The sidecar rule, applied beside a window a test placed rather than beside this one.
+    ///
+    /// The seam the missing-sidecar case needs, and it exists because the obvious test is
+    /// vacuous: `target/<profile>/deps` holds a `nysia` of cargo's own, so [`sidecar`] asked
+    /// for the missing case *from a test runner* finds one and proves nothing. This runs the
+    /// same [`beside`] — the production check, not a stand-in — against a directory that is
+    /// genuinely empty.
+    #[cfg(test)]
+    BesideWindow(PathBuf),
     /// Do not start one.
     ///
     /// What [`Client::at`] selects. The interop harness binds a daemon of its own, and a
@@ -249,6 +258,16 @@ impl Client {
         Self::configured(Some(endpoint), RuntimeBinary::Pinned(program))
     }
 
+    /// A client that dials `endpoint` and looks for its runtime beside `window`.
+    ///
+    /// The proof that a missing sidecar does not cost a daemon that is already listening.
+    /// Named apart from [`Self::at`] because it is the only constructor that can reach the
+    /// production resolver's *failure*, which is the case that mattered.
+    #[cfg(test)]
+    pub fn at_with_sidecar_beside(endpoint: Endpoint, window: PathBuf) -> Self {
+        Self::configured(Some(endpoint), RuntimeBinary::BesideWindow(window))
+    }
+
     fn configured(endpoint: Option<Endpoint>, binary: RuntimeBinary) -> Self {
         Self {
             inner: Arc::new(Mutex::new(None)),
@@ -269,6 +288,10 @@ impl Client {
     }
 
     /// What this client may start when nothing is listening.
+    ///
+    /// **Asked only after a probe has found nothing**, which is why the sidecar lookup — the
+    /// one thing here that can fail permanently — is safe to do at all. See
+    /// [`nysia_core::rpc::ensure_daemon`]'s contract, step 2.
     fn spawn_policy(&self) -> Result<SpawnPolicy, DaemonError> {
         match &self.binary {
             RuntimeBinary::Sidecar => Ok(SpawnPolicy::IfAbsent {
@@ -277,6 +300,12 @@ impl Client {
             #[cfg(test)]
             RuntimeBinary::Pinned(program) => Ok(SpawnPolicy::IfAbsent {
                 program: program.clone(),
+            }),
+            // The leaf name is irrelevant — [`beside`] reads the parent — but it is spelled
+            // the way an installed window is, so a failure message reads like a real one.
+            #[cfg(test)]
+            RuntimeBinary::BesideWindow(window) => Ok(SpawnPolicy::IfAbsent {
+                program: beside(window)?,
             }),
             #[cfg(test)]
             RuntimeBinary::Never => Ok(SpawnPolicy::Never),
@@ -292,6 +321,15 @@ impl Client {
     /// [`nysia_core::rpc::discover`], so the spawn lock that settles two clients racing and
     /// the lease that separates a live daemon from a stale record have exactly one
     /// implementation between the two front ends (§12 q5).
+    ///
+    /// ## The sidecar is resolved after the first probe, never before
+    ///
+    /// Attaching needs no runtime; only starting one does. The lookup that finds the binary
+    /// beside this executable fails **permanently** when it is not there — "reinstall
+    /// Nysia", which the store obeys by stopping for the life of the window — so a window
+    /// that resolved it up front refused a daemon that was listening and answering, and
+    /// contradicted step 1 of the seam's own contract from inside its caller. The policy is
+    /// therefore a closure the seam calls only once a probe has found nothing.
     ///
     /// ## Nothing here is done under the client lock
     ///
@@ -313,9 +351,19 @@ impl Client {
         }
 
         let endpoint = self.dial()?;
-        let policy = self.spawn_policy()?;
-        let ensured = ensure_daemon(&endpoint, &policy, || {
-            match Control::connect(endpoint.listening()) {
+        // Filled in by the policy closure below, if the seam ever gets as far as asking.
+        // Kept because [`spawn_failure`] has to name the program that would not run, and
+        // once the call returns this cell is the only party that saw it.
+        let resolved: std::cell::OnceCell<SpawnPolicy> = std::cell::OnceCell::new();
+
+        let outcome = ensure_daemon(
+            &endpoint,
+            || {
+                let policy = self.spawn_policy()?;
+                let _ = resolved.set(policy.clone());
+                Ok(policy)
+            },
+            || match Control::connect(endpoint.listening()) {
                 Ok(control) => {
                     let identity = control.identity().clone();
                     Ok(Probed::Answering {
@@ -328,9 +376,21 @@ impl Client {
                 // failure the seam's two-valued answer exists to prevent.
                 Err(DaemonError::Unreachable { .. }) => Ok(Probed::Absent),
                 Err(other) => Err(other),
+            },
+        );
+
+        let ensured = match outcome {
+            Ok(ensured) => ensured,
+            Err(error) => {
+                return Err(spawn_failure(
+                    &Attempt {
+                        endpoint: &endpoint,
+                        policy: resolved.get(),
+                    },
+                    error,
+                ));
             }
-        })
-        .map_err(|error| spawn_failure(&endpoint, &policy, error))?;
+        };
 
         if ensured.spawned {
             tracing::info!(
@@ -844,25 +904,34 @@ fn beside(exe: &std::path::Path) -> Result<PathBuf, DaemonError> {
 const THEN_REOPEN: &str = "Then reopen Nysia: it stops trying once starting a daemon cannot \
                            work.";
 
+/// What one attempt to reach a daemon was allowed to do, for the sentence it has to compose.
+struct Attempt<'a> {
+    /// Where it dialled.
+    endpoint: &'a Endpoint,
+    /// The policy, if the seam got as far as resolving one.
+    ///
+    /// `None` when it did not, which is the ordinary case for a daemon that answered and for
+    /// a probe that failed. A spawn that went wrong always has one, because a spawn cannot
+    /// happen without it.
+    policy: Option<&'a SpawnPolicy>,
+}
+
 /// What the user is told when no daemon could be reached or started.
-///
-/// `policy` is here for one sentence: a spawn that failed has to name the program it tried to
-/// run, and only the policy holds it.
 ///
 /// Each arm settles the sentence **and** whether the window keeps trying, and the two have to
 /// agree. The store reconnects on a retryable failure and stops on one that is not, so a
 /// permanent fault reported as retryable is a window that says *Reconnecting* for ever
 /// without once saying why — which is the defect this whole path exists to close, reappearing
 /// one layer up.
-fn spawn_failure(
-    endpoint: &Endpoint,
-    policy: &SpawnPolicy,
-    error: EnsureError<DaemonError>,
-) -> DaemonError {
+fn spawn_failure(attempt: &Attempt<'_>, error: EnsureError<DaemonError>) -> DaemonError {
     let discovery = match error {
         // The probe is this module's own dial, so its failure already carries the window's
         // phrasing and its own verdict on retrying. Passed through untouched.
         EnsureError::Probe(failure) => return failure,
+        // So is the policy's. Resolving the sidecar composes "reinstall Nysia, then reopen
+        // it" and names the file that is missing, which is worth more to a person than
+        // anything this function could say about it.
+        EnsureError::Policy(failure) => return failure,
         EnsureError::Discovery(discovery) => discovery,
     };
     match discovery {
@@ -877,12 +946,14 @@ fn spawn_failure(
             message: format!("Nysia could not start its runtime: {cause}"),
             // The program, not the runtime directory. A next step that named the wrong file
             // sends the reader to look at something that was never the problem.
-            next_step: match policy {
-                SpawnPolicy::IfAbsent { program } => format!(
+            next_step: match attempt.policy {
+                Some(SpawnPolicy::IfAbsent { program }) => format!(
                     "Check that {} can be run on this machine. {THEN_REOPEN}",
                     program.display()
                 ),
-                SpawnPolicy::Never => format!("Start a daemon yourself. {THEN_REOPEN}"),
+                Some(SpawnPolicy::Never) | None => {
+                    format!("Start a daemon yourself. {THEN_REOPEN}")
+                }
             },
         },
         // It started and died, or started and never bound. The daemon writes why to its log
@@ -893,7 +964,7 @@ fn spawn_failure(
             ),
             next_step: format!(
                 "The runtime wrote why to {}. {THEN_REOPEN}",
-                endpoint.log_path().display()
+                attempt.endpoint.log_path().display()
             ),
         },
         // Somebody else is mid-spawn. Retryable, and the window's reconnect is exactly the
@@ -1241,6 +1312,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
     }
 
+    /// **#48 as a test.** A window with no runtime beside it attaches to one that is already
+    /// listening.
+    ///
+    /// The window resolved its sidecar *before* the first probe, and that lookup fails
+    /// permanently — "reinstall Nysia", which the store obeys by stopping for the life of the
+    /// window. So a developer's tree with no `nysia` staged, or a bundle that shipped without
+    /// one, refused a daemon that was up and answering. Step 1 of the seam's own contract
+    /// says the opposite.
+    ///
+    /// ## Why it is written like this
+    ///
+    /// The obvious version of this test passes against the broken code, which is how the
+    /// defect survived: `target/<profile>/deps` holds a `nysia` of cargo's own, so a runner
+    /// asking [`sidecar`] for the missing case *finds one*. The seam is
+    /// [`Client::at_with_sidecar_beside`], which runs the production [`beside`] against a
+    /// directory that is genuinely empty — and the resolver is asserted to fail before the
+    /// connect is attempted, so a later change that made it succeed cannot leave this test
+    /// quietly proving nothing.
+    ///
+    /// Run against the code before the fix it fails on the connect, with the `Spawn` error
+    /// from a policy resolved before anything was dialled.
+    #[test]
+    fn a_window_whose_sidecar_is_missing_still_attaches_to_a_daemon_that_is_listening() {
+        let endpoint = crate::interop::scratch("no-sidecar");
+        let runtime = runtime_binary();
+        assert!(
+            runtime.is_file(),
+            "{} was not built; `cargo test --workspace` builds it before running this",
+            runtime.display()
+        );
+
+        // A daemon on this endpoint, brought up by a client that *can* start one. The client
+        // under test must never start anything — it has nothing to start.
+        let starter = Client::at_with_runtime(endpoint.clone(), runtime);
+        let listening = starter.connect().expect("a daemon to attach to");
+
+        // A window installed in a directory with no runtime in it.
+        let bare = endpoint.runtime_dir().join("bundle-with-no-runtime");
+        std::fs::create_dir_all(&bare).expect("a directory to stand in for a bundle");
+        let window = bare.join(if cfg!(windows) {
+            "nysia-desktop.exe"
+        } else {
+            "nysia-desktop"
+        });
+        let client = Client::at_with_sidecar_beside(endpoint.clone(), window);
+
+        // The resolver really cannot find one, and really is permanent. Without this the
+        // test could pass because a sidecar happened to be there.
+        let refused = client
+            .spawn_policy()
+            .expect_err("nothing was installed beside that window");
+        assert!(matches!(refused, DaemonError::Spawn { .. }), "{refused:?}");
+        assert!(
+            !refused.retryable(),
+            "the resolver must be the permanent failure this test is about"
+        );
+        assert!(
+            refused.to_string().contains(RUNTIME_BINARY),
+            "the resolver must name the runtime it looked for, got {refused}"
+        );
+
+        // And the window connects anyway: attaching needs no runtime, only starting one does.
+        let attached = client
+            .connect()
+            .expect("a daemon is listening, so a missing sidecar is beside the point");
+        assert_eq!(
+            attached.launch_nonce, listening.launch_nonce,
+            "the window attached to something other than the daemon that was already there"
+        );
+
+        client.disconnect();
+        starter.disconnect();
+        stop_daemon(&endpoint);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
     /// The production rule, which the proof above deliberately does not use.
     ///
     /// Asserted rather than driven, because driving it would mean putting a `nysia` beside
@@ -1298,18 +1445,21 @@ mod tests {
             program: program.clone(),
         };
 
+        let attempt = Attempt {
+            endpoint: &endpoint,
+            policy: Some(&policy),
+        };
+
         let failures = [
             spawn_failure(
-                &endpoint,
-                &policy,
+                &attempt,
                 EnsureError::Discovery(DiscoveryError::Spawn(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "refused",
                 ))),
             ),
             spawn_failure(
-                &endpoint,
-                &policy,
+                &attempt,
                 EnsureError::Discovery(DiscoveryError::NeverReady {
                     endpoint: endpoint.listening().to_string(),
                     seconds: 20,
