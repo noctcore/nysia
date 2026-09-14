@@ -283,28 +283,39 @@ impl Client {
     /// [`DaemonError::Disconnected`] if no daemon is attached, or whatever the handshake
     /// produced.
     pub fn attach_channel(&self, sink: impl FrameSink) -> Result<(), DaemonError> {
-        let socket = {
-            // The lock is not held across the connect: opening a socket and shaking hands
-            // can block for as long as the daemon takes, and every other command would
-            // queue behind it.
+        {
             let held = self.lock()?;
             held.as_ref().ok_or(DaemonError::Disconnected)?;
-            endpoint::open(self.dial()?.listening())?
-        };
+        }
 
-        let mut reader = std::io::BufReader::new(socket);
-        endpoint::handshake(&mut reader, ClientRole::Stream, &endpoint::client_id()?)?;
-
-        // Claim this stream connection and take the reader it supersedes, **before** the
-        // table below is emptied. Dropping the superseded `Stream` signals it to stop — it
-        // does not join it, see `Stream`'s `Drop` — and doing that first is what keeps an
-        // ordinary supersede out of the log: the old reader resolves every frame's id
-        // against the shared table, so resetting the table under it makes the frame it is
-        // holding look like one the daemon never assigned, and it reports a desync for a
-        // reload that went perfectly. A reader already parked inside a `read` can still
-        // surface one such frame; the signal cannot reach it until the read returns.
+        // **Claimed before the socket is opened, not after the handshake.** The daemon
+        // supersedes this window's stream connection the moment it answers the *new*
+        // hello, and closes the one it replaces. So between the hello being answered and
+        // this line, the old reader can reach end-of-file and run `disconnect_generation`
+        // while its generation is still the live one — which takes the healthy control
+        // connection with it, fails this attach with `Disconnected`, and has the window
+        // announce it is not connected to a daemon and reconnect.
+        //
+        // The natural window is small but it is not microseconds: this takes the inner
+        // lock, and a control round trip still in flight from the webview being replaced —
+        // a keystroke, a resize — holds that lock for the length of the round trip.
+        //
+        // Claiming first inverts the failure. A handshake that then fails leaves a
+        // generation no reader owns: nothing can tear this connection down through it, the
+        // attach returns the handshake's own error, and the store's reconnect replaces it.
+        // That is the direction to be wrong in.
+        //
+        // Taking the superseded reader here signals it to stop — dropping a `Stream` signals
+        // and returns, it never joins — before the table below is emptied under it. A reader
+        // that resolves a frame against a table reset out from under it reports a desync for
+        // a reload that went perfectly; one already parked inside a `read` can still surface
+        // one such frame, because the signal cannot reach it until the read returns.
         let (generation, superseded) = self.supersede_stream()?;
         drop(superseded);
+
+        let socket = endpoint::open(self.dial()?.listening())?;
+        let mut reader = std::io::BufReader::new(socket);
+        endpoint::handshake(&mut reader, ClientRole::Stream, &endpoint::client_id()?)?;
 
         // **Every id this window held is void.** Proto scopes a `StreamId` to one stream
         // connection — "neither id means anything on the other's connection" — so ids
@@ -372,9 +383,20 @@ impl Client {
             table.remember(attached.stream_id, attached.handle.clone());
         }
 
-        // Nothing is signalled to the reader: it resolves attachment from the table above,
-        // which cannot race the frames the daemon is already entitled to send. See
-        // `daemon::stream::route`.
+        // The table above is the source of truth, and it is written first for the reason
+        // `daemon::stream::route` gives: a signal alone would race the frames the daemon is
+        // already entitled to send. What the signal adds is a **wake**. The daemon flushes
+        // this response before it enqueues a single replay frame, so the reader can be
+        // holding one for this very id — and if it is blocked because no attached stream can
+        // take another chunk, nothing else would wake it to notice the table has changed.
+        {
+            let Ok(held) = self.lock() else {
+                return Ok(attached.stream_id);
+            };
+            if let Some(live) = held.as_ref().and_then(|c| c.stream.as_ref()) {
+                live.attached();
+            }
+        }
         Ok(attached.stream_id)
     }
 
@@ -741,6 +763,76 @@ mod tests {
 
         // And the connection itself is untouched: waking a watcher is not a disconnect.
         assert!(client.identity().is_some());
+    }
+
+    /// The ordinary constructor goes through the resolver, and the pinned one does not.
+    ///
+    /// The link the interop module cannot make. Its harness pins an endpoint through
+    /// [`Client::at`] so it can bind a daemon of its own, which means a resolver that
+    /// answered something wrong would leave every interop test green — they would all dial
+    /// the pinned value and find the daemon exactly where they put it.
+    ///
+    /// Asserted rather than driven through a real connect because pointing the process at a
+    /// scratch runtime directory means `set_var`, and that is undefined behaviour against
+    /// the `getenv` calls the sibling interop tests make continuously while resolving
+    /// programs and scrubbing a session's environment.
+    #[test]
+    fn the_ordinary_constructor_dials_what_the_resolver_answers() {
+        let resolved = endpoint::endpoint().expect("this environment resolves an endpoint");
+        assert_eq!(
+            Client::new().dial().expect("the window dials").listening(),
+            resolved.listening(),
+            "the window dials somewhere the resolver did not name"
+        );
+
+        // And the pinned constructor stays confined to what it was given, so the seam cannot
+        // quietly become the path the window takes.
+        let pinned = crate::interop::scratch("dial");
+        assert_eq!(
+            Client::at(pinned.clone())
+                .dial()
+                .expect("a pinned client dials"),
+            pinned
+        );
+        assert_ne!(pinned.listening(), resolved.listening());
+    }
+
+    /// The generation is claimed **before** the socket is opened, not after the handshake.
+    ///
+    /// Ordering, made observable without a race. The attach below cannot get past `open` —
+    /// nothing is listening on that endpoint — and the claim must already have happened by
+    /// then, so the reader this attach supersedes can no longer tear anything down.
+    ///
+    /// Claimed after the handshake instead, the daemon's supersede-on-hello closes the old
+    /// socket first, its reader reaches end-of-file while its generation is still the live
+    /// one, and it takes the healthy control connection with it — the attach then fails with
+    /// `Disconnected` and the window announces it is not connected to a daemon.
+    #[test]
+    fn a_failed_attach_has_already_claimed_its_generation() {
+        struct Nowhere;
+        impl FrameSink for Nowhere {
+            fn deliver(&self, _bytes: Vec<u8>) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let client = Client::at(crate::interop::scratch("attach-order"));
+        client.pretend_connected();
+        let (superseded, _) = client.supersede_stream().expect("a connection is held");
+
+        let refused = client.attach_channel(Nowhere);
+        assert!(
+            refused.is_err(),
+            "this endpoint has no daemon, so the attach must not have got past `open`"
+        );
+
+        let quiet = client.edge_count();
+        client.disconnect_generation(superseded);
+        assert!(
+            client.identity().is_some(),
+            "the reader superseded by an attach that never opened a socket took the live              connection down, so the generation had not been claimed yet"
+        );
+        assert_eq!(client.edge_count(), quiet);
     }
 
     #[test]
