@@ -920,50 +920,7 @@ fn flush_all(
 mod tests {
     use super::*;
 
-    /// Every wait in these tests is bounded; a test that can hang is a test that will.
-    const DEADLINE: Duration = Duration::from_secs(20);
-
-    /// The shell these tests drive, and the lines that make it compute a token.
-    ///
-    /// `pwsh` where it is installed — CI has it on both runners and it is what §9 names — and
-    /// the platform's own shell where it is not, so a developer machine without PowerShell 7
-    /// still exercises the pump rather than skipping the test that proves it works.
-    struct TestShell {
-        profile: Option<WireProfile>,
-        lines: Vec<&'static str>,
-    }
-
-    impl TestShell {
-        /// Pick a shell and the commands that make it *compute* `NYSIA-42`.
-        ///
-        /// Computed, never typed: matching on a token that also appears in the line as typed
-        /// means kernel echo plus a redisplay satisfies the assertion with the shell having
-        /// run nothing at all. Every line below either arithmetic-expands or expands a
-        /// variable, so the token can only come from the shell.
-        fn pick() -> Self {
-            if crate::pty::resolve("pwsh").is_ok() {
-                return Self {
-                    profile: Some(WireProfile::Pwsh),
-                    lines: vec![r#"Write-Output ("NYSIA" + "-" + (6*7))"#],
-                };
-            }
-            if cfg!(windows) {
-                // `cmd` expands `%NYS%` when it *parses* the line, so the assignment has to be
-                // a separate command — which also keeps `42` out of everything that is typed.
-                return Self {
-                    profile: Some(WireProfile::Cmd),
-                    lines: vec!["set /a NYS=6*7", "echo NYSIA-%NYS%"],
-                };
-            }
-            Self {
-                profile: None,
-                lines: vec![r#"echo "NYSIA-$((6*7))""#],
-            }
-        }
-    }
-
-    /// The token the chosen shell computes. It appears in no line that is typed.
-    const TOKEN: &str = "NYSIA-42";
+    use crate::rpc::testing::{DEADLINE, TOKEN, TestShell};
 
     #[test]
     fn a_sink_that_stops_half_way_resumes_rather_than_being_offered_the_buffer_again() {

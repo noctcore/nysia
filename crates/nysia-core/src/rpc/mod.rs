@@ -81,6 +81,11 @@ pub mod session;
 pub mod stream;
 pub mod transport;
 
+#[cfg(test)]
+mod interop;
+#[cfg(test)]
+pub(crate) mod testing;
+
 pub use client::{Client, ClientError};
 pub use control::{ControlError, ControlReader, ControlWriter, MAX_CONTROL_LINE_BYTES};
 pub use discovery::{Discovered, DiscoveryError, SpawnPolicy, discover};

@@ -1,0 +1,693 @@
+//! Interop: a real [`Daemon`] on a real socket, driven by a real [`Client`].
+//!
+//! # Why this module exists at all
+//!
+//! The daemon and the Tauri client shipped green on both runners and did not interoperate.
+//! Neither tree had a test that made the two halves talk, so both gates were measuring one
+//! half against its own assumptions: the credit exchange was inverted, the two ends counted
+//! credit in different units, stream ids were numbered daemon-globally where proto scopes
+//! them per connection, the replay raced the response that names it, and a second stream
+//! connection under one client id took the first one's sinks down.
+//!
+//! Every one of those is invisible to a test that stops at the socket. So these tests do not
+//! stop at the socket: they bind a daemon, dial it with [`Client`], open a second connection
+//! in [`ClientRole::Stream`], and drive the binary frame protocol the way a renderer does —
+//! decoding frames, classifying ids by proto's own rule, and acking **payload bytes after
+//! rendering**, which is what §7.3 asks a consumer to do.
+//!
+//! # What each test pins down
+//!
+//! | Test | The claim |
+//! |---|---|
+//! | [`a_flood_keeps_flowing_past_the_per_stream_ceiling`] | credit round-trips, in units both ends agree on |
+//! | [`an_attach_answers_before_a_byte_of_replay_is_enqueued`] | the response cannot lose to the replay it explains |
+//! | [`a_second_stream_connection_does_not_take_the_first_one_s_streams_down`] | a reload does not deafen the window |
+//! | [`a_client_grant_cannot_talk_the_daemon_out_of_its_own_window`] | the producer grants; a consumer's grant is not one |
+//!
+//! Each fails against the code as it was and passes against the code as it is.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use nysia_proto::stream::UnattachedFrame;
+use nysia_proto::{
+    ClientId, ClientRole, CreditAck, CreditFrame, CreditWindow, Frame, FrameDecoder, FrameKind,
+    SessionCreate, SessionCreated, SessionHandle, SessionKind, StreamId, TerminalRead,
+    TerminalSend, TerminalWait, WaitFor,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::rpc::client::Client;
+use crate::rpc::endpoint::Endpoint;
+use crate::rpc::server::{Daemon, DaemonConfig};
+use crate::rpc::testing::{TOKEN, TestShell};
+use crate::rpc::transport::{ConnectionReader, ConnectionWriter};
+
+/// No interop test may run longer than this. A test that can hang is a test that will.
+const DEADLINE: Duration = Duration::from_secs(90);
+
+/// How long an answer that must not wait on anything is given.
+///
+/// Generous for a local socket and still an order of magnitude short of the replay-blocked
+/// case it has to tell apart.
+const PROMPT_ANSWER: Duration = Duration::from_secs(10);
+
+/// A window small enough that the accounting bug shows up in a test's worth of output.
+///
+/// The arithmetic, because it is the whole reason these numbers are not the defaults: a
+/// daemon charging the nine-byte header drains `per_stream_initial / 9` frames' worth of
+/// allowance no matter how diligently the client acks. At the shipped defaults that is
+/// ~58,000 frames of 48 KiB — 2.7 GB, which no test will ever push. At 2 KiB and 256-byte
+/// chunks it is ~227 frames, or about 58 KiB of output, which one shell loop produces in a
+/// second. The bug is identical; only the patience needed to see it changes.
+const TIGHT: CreditWindow = CreditWindow {
+    per_stream_initial: 2 * 1024,
+    per_stream_max: 4 * 1024,
+    total_initial: 2 * 1024,
+    total_max: 4 * 1024,
+    pending_cap: 2 * 1024,
+    ack_batch: 512,
+    chunk: 256,
+};
+
+/// A daemon listening on a scratch endpoint, torn down on drop.
+struct Harness {
+    daemon: Arc<Daemon>,
+    endpoint: Endpoint,
+    serving: tokio::task::JoinHandle<()>,
+}
+
+impl Harness {
+    /// Bind, start serving, and hand back the endpoint to dial.
+    fn start(tag: &str, window: CreditWindow) -> Self {
+        let endpoint = crate::rpc::endpoint::scratch(tag);
+        let (daemon, listener) = Daemon::bind(DaemonConfig {
+            // Never retire: these tests hold a control connection open across waits long
+            // enough that an idle timer would be a second, invisible failure mode.
+            idle_retire_after: None,
+            credit_window: window,
+            ..DaemonConfig::new(endpoint.clone())
+        })
+        .expect("a scratch daemon binds");
+        let serving = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move {
+                let _ = daemon.serve(listener).await;
+            }
+        });
+        Self {
+            daemon,
+            endpoint,
+            serving,
+        }
+    }
+
+    /// A control connection, handshaken.
+    async fn control(&self, client_id: &ClientId) -> Client {
+        Client::connect(&self.endpoint, client_id, ClientRole::Control)
+            .await
+            .expect("a control connection is accepted")
+    }
+
+    /// A stream connection, handshaken and ready to decode frames.
+    async fn stream(&self, client_id: &ClientId) -> StreamPeer {
+        let client = Client::connect(&self.endpoint, client_id, ClientRole::Stream)
+            .await
+            .expect("a stream connection is accepted");
+        StreamPeer::new(client)
+    }
+
+    /// Stop serving and take the scratch directory with it.
+    fn stop(self) {
+        self.daemon.shutdown();
+        self.serving.abort();
+        let _ = std::fs::remove_dir_all(self.endpoint.runtime_dir());
+    }
+}
+
+/// The client half of a stream connection, behaving the way §7.3 asks a consumer to.
+///
+/// It renders (into a buffer, which is all a test needs of a renderer), acks **payload
+/// bytes** once [`CreditWindow::ack_batch`] of them have been rendered, and applies proto's
+/// own routing rule to any id it has no entry for. That last part is what makes this a
+/// protocol test rather than a byte counter: a frame naming an id at or beyond the next one
+/// this connection would be assigned is, by proto's definition, a desync — so it fails the
+/// test here instead of silently dropping a connection in front of a user.
+struct StreamPeer {
+    reader: ConnectionReader,
+    writer: ConnectionWriter,
+    decoder: FrameDecoder,
+    /// Ids this connection has been told about, by an attach response.
+    live: HashSet<u32>,
+    /// One past the highest id this connection has been given: proto's watermark.
+    next_to_assign: StreamId,
+    /// The window the daemon announced in its opening grant, per stream.
+    window: HashMap<u32, CreditWindow>,
+    /// Bytes rendered but not yet acked, per stream.
+    unacked: HashMap<u32, u32>,
+    /// Everything rendered, per stream.
+    rendered: HashMap<u32, Vec<u8>>,
+    /// How many payload bytes have been rendered in total, across every stream.
+    total_rendered: u64,
+}
+
+impl StreamPeer {
+    fn new(client: Client) -> Self {
+        let (leftover, reader, writer) = client.into_stream_parts();
+        let mut decoder = FrameDecoder::new();
+        // Whatever the handshake read past the `hello` line is already frame bytes. Dropping
+        // it would lose the opening grant for no reason a client could ever diagnose.
+        decoder.push(&leftover);
+        Self {
+            reader,
+            writer,
+            decoder,
+            live: HashSet::new(),
+            next_to_assign: StreamId::FIRST,
+            window: HashMap::new(),
+            unacked: HashMap::new(),
+            rendered: HashMap::new(),
+            total_rendered: 0,
+        }
+    }
+
+    /// Record an id the daemon has just handed this connection, moving the watermark.
+    fn assign(&mut self, stream_id: StreamId) {
+        self.live.insert(stream_id.get());
+        if let Some(next) = stream_id.next()
+            && next > self.next_to_assign
+        {
+            self.next_to_assign = next;
+        }
+    }
+
+    /// Read once and handle every frame that completes, acking what got rendered.
+    ///
+    /// `Ok(false)` means the daemon closed the connection.
+    async fn pump(&mut self, patience: Duration) -> std::io::Result<bool> {
+        let mut buffer = [0u8; 8192];
+        let read = match tokio::time::timeout(patience, self.reader.read(&mut buffer)).await {
+            Ok(Ok(0)) => return Ok(false),
+            Ok(Ok(read)) => read,
+            Ok(Err(err)) => return Err(err),
+            // Nothing arrived in time. Not an error: the caller is looping against its own
+            // deadline and decides what a quiet socket means.
+            Err(_) => return Ok(true),
+        };
+        self.decoder.push(&buffer[..read]);
+        let mut acks: Vec<(StreamId, u32)> = Vec::new();
+        loop {
+            let frame = match self.decoder.next_frame() {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break,
+                Err(err) => panic!("the daemon wrote a frame this client cannot decode: {err}"),
+            };
+            if !self.live.contains(&frame.stream.get()) {
+                // Proto's rule, applied rather than described. `DropConnection` is the case
+                // the ordering fix exists to make impossible.
+                assert_eq!(
+                    frame.stream.classify_unattached(self.next_to_assign),
+                    UnattachedFrame::DiscardFrame,
+                    "the daemon sent a frame for stream {} before telling this connection the \
+                     id existed; the next id this connection expects to be assigned is {}",
+                    frame.stream,
+                    self.next_to_assign
+                );
+                continue;
+            }
+            if let Some(ack) = self.render(&frame) {
+                acks.push((frame.stream, ack));
+            }
+        }
+        for (stream, bytes) in acks {
+            self.ack(stream, bytes).await?;
+        }
+        Ok(true)
+    }
+
+    /// Take one frame for a live stream, returning an ack that is now due.
+    fn render(&mut self, frame: &Frame) -> Option<u32> {
+        let id = frame.stream.get();
+        match frame.kind {
+            FrameKind::Credit => {
+                match serde_json::from_slice::<CreditFrame>(&frame.payload) {
+                    Ok(CreditFrame::Grant(grant)) => {
+                        self.window.insert(id, grant.window);
+                    }
+                    // The daemon is the producer; it never acks.
+                    Ok(CreditFrame::Ack(ack)) => panic!("the daemon acked its own stream: {ack:?}"),
+                    Err(err) => panic!("the daemon wrote an unreadable credit frame: {err}"),
+                }
+                None
+            }
+            FrameKind::Output => {
+                // "Rendered" is the whole point of the window: this stands in for xterm's
+                // `write()` callback, and the ack below is what that callback triggers.
+                self.rendered
+                    .entry(id)
+                    .or_default()
+                    .extend_from_slice(&frame.payload);
+                self.total_rendered += frame.payload.len() as u64;
+                let batch = self
+                    .window
+                    .get(&id)
+                    .map_or(CreditWindow::DEFAULT.ack_batch, |window| window.ack_batch);
+                let owed = self.unacked.entry(id).or_default();
+                *owed = owed.saturating_add(
+                    u32::try_from(frame.payload.len()).expect("a frame payload fits a u32"),
+                );
+                if *owed >= batch {
+                    return Some(std::mem::take(owed));
+                }
+                None
+            }
+            // An exit or a bell is not rendered text and is never acked.
+            _ => None,
+        }
+    }
+
+    /// Tell the daemon how many payload bytes have been rendered.
+    ///
+    /// Payload bytes, because that is all a renderer ever sees. An ack counted in encoded
+    /// bytes would return more than was spent; one counted here while the daemon charged the
+    /// header returns less, and the difference is the leak that strands a long session.
+    async fn ack(&mut self, stream: StreamId, bytes: u32) -> std::io::Result<()> {
+        let payload = serde_json::to_vec(&CreditFrame::Ack(CreditAck { bytes }))
+            .expect("a credit ack serialises");
+        let encoded = nysia_proto::encode(&Frame::new(FrameKind::Credit, stream, payload))
+            .expect("a credit ack encodes");
+        self.writer.write_all(&encoded).await?;
+        self.writer.flush().await
+    }
+
+    /// Flush whatever is rendered but still unacked, whatever the batch says.
+    async fn ack_everything(&mut self) -> std::io::Result<()> {
+        let owed: Vec<(u32, u32)> = self
+            .unacked
+            .iter()
+            .filter(|(_, bytes)| **bytes > 0)
+            .map(|(id, bytes)| (*id, *bytes))
+            .collect();
+        for (id, bytes) in owed {
+            self.unacked.insert(id, 0);
+            self.ack(StreamId(id), bytes).await?;
+        }
+        Ok(())
+    }
+
+    /// Everything rendered for one stream, as text.
+    fn text(&self, stream: StreamId) -> String {
+        self.rendered
+            .get(&stream.get())
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Pump until `predicate` holds over what has been rendered, or give up.
+    async fn until(&mut self, predicate: impl Fn(&Self) -> bool) -> bool {
+        let deadline = Instant::now() + DEADLINE;
+        while Instant::now() < deadline {
+            if predicate(self) {
+                return true;
+            }
+            if !self
+                .pump(Duration::from_millis(250))
+                .await
+                .expect("reading a stream connection")
+            {
+                break;
+            }
+        }
+        predicate(self)
+    }
+}
+
+/// Start a shell session through the daemon, the way any client would.
+async fn start_shell(client: &mut Client) -> SessionCreated {
+    client
+        .session_create(SessionCreate {
+            kind: SessionKind::Shell,
+            pane_key: None,
+            profile: TestShell::pick().profile,
+            cwd: None,
+            env_overrides: std::collections::BTreeMap::new(),
+            cols: 80,
+            rows: 24,
+        })
+        .await
+        .expect("a shell session starts")
+}
+
+/// Wait until the shell has drawn its prompt and gone quiet.
+///
+/// Typing before this reliably loses rather than occasionally: a shell that has not finished
+/// starting echoes what is typed and then redraws the line when its line editor takes over,
+/// so the command appears twice and runs zero times.
+async fn await_prompt(client: &mut Client, handle: &SessionHandle) {
+    let deadline = Instant::now() + DEADLINE;
+    while Instant::now() < deadline {
+        let read = client
+            .terminal_read(TerminalRead::screen(handle.clone()))
+            .await
+            .expect("reading the screen");
+        if !read.lines.join("\n").trim().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    settle(client, handle).await;
+}
+
+/// Wait for the session to stop producing output.
+async fn settle(client: &mut Client, handle: &SessionHandle) {
+    let _ = client
+        .terminal_wait(TerminalWait {
+            handle: handle.clone(),
+            wait_for: WaitFor::Idle,
+            timeout_ms: Some(DEADLINE.as_millis() as u64),
+        })
+        .await;
+}
+
+/// Type the lines that make the shell *compute* [`TOKEN`].
+async fn compute_token(client: &mut Client, handle: &SessionHandle) {
+    for line in TestShell::pick().lines {
+        client
+            .terminal_send(TerminalSend::line(handle.clone(), line))
+            .await
+            .expect("writing a line");
+        // Settle between lines rather than wait for the token: only the *last* line produces
+        // it, and `cmd` needs the assignment to have run before it parses the line using it.
+        settle(client, handle).await;
+    }
+}
+
+/// Wait until the daemon has bound `want` stream connections.
+///
+/// A client's connect returns once the handshake is answered, which is strictly before the
+/// daemon binds the connection and makes it attachable. Attaching in that gap lands on the
+/// *previous* connection, which would be a race in the test rather than in the daemon — and
+/// a test that races is a test that eventually passes for the wrong reason.
+async fn until_bound(daemon: &Daemon, want: u64) {
+    let deadline = Instant::now() + DEADLINE;
+    while Instant::now() < deadline && daemon.streams().bound() < want {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        daemon.streams().bound() >= want,
+        "the daemon never bound the stream connection"
+    );
+}
+
+fn client_id(name: &str) -> ClientId {
+    name.parse().expect("a well-formed client id")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flood_keeps_flowing_past_the_per_stream_ceiling() {
+    // Decision B. The consumer acks what it rendered, in payload bytes; the producer must
+    // charge the same units or the allowance leaks the frame header on every frame and the
+    // session stalls for good — with the pump stopped, which freezes `terminal read` for the
+    // CLI and the hooks too, not just the window.
+    let harness = Harness::start("iflood", TIGHT);
+    let me = client_id("nysia-interop-flood");
+    let mut control = harness.control(&me).await;
+    let mut stream = harness.stream(&me).await;
+
+    let created = start_shell(&mut control).await;
+    await_prompt(&mut control, &created.handle).await;
+
+    let attached = control
+        .stream_attach(created.handle.clone())
+        .await
+        .expect("attaches");
+    stream.assign(attached.stream_id);
+
+    let shell = TestShell::pick();
+    control
+        .terminal_send(TerminalSend::line(created.handle.clone(), shell.flood))
+        .await
+        .expect("starting the flood");
+    // The token goes in behind the flood, so seeing it is proof the whole flood got through
+    // rather than proof that some of it did. Nothing typed contains the token.
+    for line in shell.lines {
+        control
+            .terminal_send(TerminalSend::line(created.handle.clone(), line))
+            .await
+            .expect("writing a line");
+    }
+
+    let id = attached.stream_id;
+    let arrived = stream.until(|peer| peer.text(id).contains(TOKEN)).await;
+    assert!(
+        arrived,
+        "the flood stalled after {} rendered bytes and never reached the token; the opening \
+         allowance is {} bytes, so a window that replenishes cannot stop here",
+        stream.total_rendered, TIGHT.per_stream_initial
+    );
+    assert!(
+        stream.total_rendered > u64::from(TIGHT.per_stream_initial),
+        "nothing was proven: {} bytes is inside the opening allowance, so no credit ever had \
+         to come back",
+        stream.total_rendered
+    );
+
+    control
+        .session_close(created.handle)
+        .await
+        .expect("closes the session");
+    harness.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_attach_answers_before_a_byte_of_replay_is_enqueued() {
+    // Decision D, made deterministic. The replay reads the session's terminal state, so a
+    // test that holds that lock holds the replay: a daemon that replays before it answers
+    // cannot answer at all, and a daemon that answers first is untouched by the lock. The
+    // race becomes an assertion, in both directions, with no sleeps and no repetition.
+    let harness = Harness::start("iattach", CreditWindow::DEFAULT);
+    let me = client_id("nysia-interop-attach");
+    let mut control = harness.control(&me).await;
+    let mut stream = harness.stream(&me).await;
+
+    let created = start_shell(&mut control).await;
+    await_prompt(&mut control, &created.handle).await;
+    // Scrollback worth replaying: this is the re-attach D-1 is about, not a fresh pane.
+    compute_token(&mut control, &created.handle).await;
+
+    let session = harness
+        .daemon
+        .sessions()
+        .get(&created.handle)
+        .expect("the session is there");
+    let vt = Arc::clone(session.terminal_state());
+    let (taken, taken_rx) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = vt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        taken.send(()).ok();
+        release_rx.recv().ok();
+    });
+    taken_rx
+        .recv_timeout(DEADLINE)
+        .expect("the terminal state lock was taken");
+
+    let answered =
+        tokio::time::timeout(PROMPT_ANSWER, control.stream_attach(created.handle.clone())).await;
+    release.send(()).ok();
+    holder.join().ok();
+
+    let attached = answered
+        .expect(
+            "the attach response waited on the replay ring; nothing orders the control and \
+             stream sockets, so a replay enqueued first can beat the answer that names its id",
+        )
+        .expect("attaches");
+    stream.assign(attached.stream_id);
+
+    // And the replay does arrive, once it can — on the id the answer named, which is the
+    // only id this connection will accept a frame for.
+    let id = attached.stream_id;
+    assert_eq!(
+        id,
+        StreamId::FIRST,
+        "the first attach on a fresh connection"
+    );
+    let replayed = stream.until(|peer| peer.text(id).contains(TOKEN)).await;
+    assert!(
+        replayed,
+        "the scrollback never replayed; a re-attach to a live session is D-1's flagship path"
+    );
+
+    control
+        .session_close(created.handle)
+        .await
+        .expect("closes the session");
+    harness.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_stream_connection_does_not_take_the_first_one_s_streams_down() {
+    // Decisions C and E. A webview reload opens a second stream socket under the same client
+    // id. Ids are per connection, so the new one counts from the start; and the old one's
+    // teardown — which on Windows cannot be interrupted and so arrives whenever it arrives —
+    // must close only what it opened.
+    let harness = Harness::start("ireload", CreditWindow::DEFAULT);
+    let me = client_id("nysia-interop-reload");
+    let mut control = harness.control(&me).await;
+
+    let first = harness.stream(&me).await;
+    until_bound(&harness.daemon, 1).await;
+    let created = start_shell(&mut control).await;
+    await_prompt(&mut control, &created.handle).await;
+    let before = control
+        .stream_attach(created.handle.clone())
+        .await
+        .expect("attaches");
+    assert_eq!(
+        before.stream_id,
+        StreamId::FIRST,
+        "the first attach on the first connection"
+    );
+
+    // The reload.
+    let mut second = harness.stream(&me).await;
+    until_bound(&harness.daemon, 2).await;
+    let after = control
+        .stream_attach(created.handle.clone())
+        .await
+        .expect("attaches on the new connection");
+    assert_eq!(
+        after.stream_id,
+        StreamId::FIRST,
+        "stream ids are scoped to one stream connection, so a fresh one counts from the \
+         start; a daemon-global counter makes the client's discard-versus-drop watermark \
+         unknowable and hands out an id the new connection has no way to have expected"
+    );
+    second.assign(after.stream_id);
+
+    // The superseded reader finally wakes and lets go. Everything it takes with it must be
+    // its own.
+    drop(first);
+
+    compute_token(&mut control, &created.handle).await;
+    let id = after.stream_id;
+    let flowing = second.until(|peer| peer.text(id).contains(TOKEN)).await;
+    assert!(
+        flowing,
+        "output stopped reaching the surviving connection after the superseded one went; a \
+         window in this state shows a dead pane while still believing it is attached"
+    );
+    second.ack_everything().await.expect("acking");
+    // By now the superseded connection's teardown has certainly run — the output above came
+    // through after it — so this is the state it left behind, not a state it has yet to reach.
+    assert_eq!(
+        harness.daemon.streams().connections(),
+        1,
+        "the superseded connection's teardown took the connection that replaced it with it; an \
+         unbind must close only what its own connection owns"
+    );
+    assert_eq!(harness.daemon.streams().len(), 1, "and its stream with it");
+
+    // And the connection is still usable for a session it has not seen before, rather than
+    // refused with "this client has no stream connection to route output to".
+    let another = start_shell(&mut control).await;
+    let fresh = control
+        .stream_attach(another.handle.clone())
+        .await
+        .expect("a fresh attach must still find the surviving stream connection");
+    assert_eq!(
+        fresh.stream_id,
+        StreamId(2),
+        "the surviving connection keeps counting; a detached or retired id is never recycled"
+    );
+
+    control
+        .session_close(created.handle)
+        .await
+        .expect("closes the session");
+    control
+        .session_close(another.handle)
+        .await
+        .expect("closes the session");
+    harness.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_grant_cannot_talk_the_daemon_out_of_its_own_window() {
+    // Decision A, from the wire. The daemon owns the window and issues grants; a consumer
+    // that could grant itself credit would be turning the backpressure off from outside.
+    let harness = Harness::start("igrant", TIGHT);
+    let me = client_id("nysia-interop-grant");
+    let mut control = harness.control(&me).await;
+    let mut stream = harness.stream(&me).await;
+
+    let created = start_shell(&mut control).await;
+    await_prompt(&mut control, &created.handle).await;
+    let attached = control
+        .stream_attach(created.handle.clone())
+        .await
+        .expect("attaches");
+    stream.assign(attached.stream_id);
+
+    // Read the opening grant, so the window below is the daemon's own number rather than a
+    // constant this test holds a second copy of.
+    let id = attached.stream_id;
+    assert!(
+        stream
+            .until(|peer| peer.window.contains_key(&id.get()))
+            .await,
+        "the daemon opens a stream by announcing the window"
+    );
+    assert_eq!(
+        stream.window.get(&id.get()).copied(),
+        Some(TIGHT),
+        "the grant carries the window in force, so the client holds no copy of the constants"
+    );
+
+    let sink = harness
+        .daemon
+        .streams()
+        .attach(&client_id("nysia-interop-onlooker"));
+    assert!(
+        sink.is_none(),
+        "a client with no stream connection has nothing to attach to"
+    );
+
+    // A grant from the consumer. The daemon must not act on it.
+    let payload = serde_json::to_vec(&CreditFrame::Grant(nysia_proto::CreditGrant {
+        bytes: u32::MAX,
+        window: CreditWindow::DEFAULT,
+    }))
+    .expect("serialises");
+    let encoded =
+        nysia_proto::encode(&Frame::new(FrameKind::Credit, id, payload)).expect("encodes");
+    stream.writer.write_all(&encoded).await.expect("writes");
+    stream.writer.flush().await.expect("flushes");
+
+    // The connection survives it — an ignored grant is not a fatal frame — and the stream is
+    // still there, which it would not be had the daemon taken the grant for a desync.
+    let alive = control
+        .terminal_read(TerminalRead::screen(created.handle.clone()))
+        .await;
+    assert!(alive.is_ok(), "an ignored grant must not cost the session");
+    assert!(
+        stream
+            .pump(Duration::from_millis(250))
+            .await
+            .expect("reading"),
+        "an ignored grant must not cost the stream connection either"
+    );
+    assert_eq!(
+        harness.daemon.streams().len(),
+        1,
+        "and the stream it named is still open, on the allowance the daemon set"
+    );
+
+    control
+        .session_close(created.handle)
+        .await
+        .expect("closes the session");
+    harness.stop();
+}
