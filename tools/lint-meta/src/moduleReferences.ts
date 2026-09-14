@@ -353,3 +353,126 @@ export function callSites(file: string, source: string, name: string): number[] 
   visit(sourceFile);
   return lines;
 }
+
+/** One value a module binds from another, and the local name it binds it to. */
+export interface ImportedValue {
+  /** The module it came from, as written. */
+  readonly specifier: string;
+  /** The exported name, `default` for a default import, or `*` for a namespace. */
+  readonly imported: string;
+  /** What the importing module calls it. `Terminal as T` binds `T`. */
+  readonly local: string;
+  readonly line: number;
+}
+
+/**
+ * Every value a module imports, with the local name each is bound to.
+ *
+ * Narrower than {@link moduleReferences} on purpose, and narrower in the one direction that
+ * matters: **a type-only binding is not here.** `import type { Terminal } from '@xterm/xterm'`
+ * and `import { type Terminal }` both erase, so neither can construct anything, and a rule
+ * that asked "does this module reach the library" reported them. Type-ness lives at two
+ * levels — the clause (`import type { … }`) and each specifier (`import { type X, Y }`) — and
+ * both are read, because `verbatimModuleSyntax` keeps the second form's import statement at
+ * runtime while binding no value from it.
+ *
+ * A bare `import '@xterm/xterm'` binds nothing and is likewise absent. Re-exports are not
+ * imports and are {@link reExports}.
+ */
+export function importedValues(file: string, source: string): ImportedValue[] {
+  const sourceFile = ts.createSourceFile(
+    file,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKindFor(file),
+  );
+
+  const found: ImportedValue[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node)) {
+      const specifier = literalText(node.moduleSpecifier);
+      const clause = node.importClause;
+      if (specifier !== undefined && clause !== undefined && !clause.isTypeOnly) {
+        const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+        if (clause.name !== undefined) {
+          found.push({ specifier, imported: 'default', local: clause.name.text, line });
+        }
+        const bindings = clause.namedBindings;
+        if (bindings !== undefined && ts.isNamespaceImport(bindings)) {
+          found.push({ specifier, imported: '*', local: bindings.name.text, line });
+        } else if (bindings !== undefined && ts.isNamedImports(bindings)) {
+          for (const element of bindings.elements) {
+            if (element.isTypeOnly) continue;
+            found.push({
+              specifier,
+              imported: (element.propertyName ?? element.name).text,
+              local: element.name.text,
+              line,
+            });
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return found;
+}
+
+/** One re-export that hands another module's values straight on. */
+export interface ReExport {
+  /** The module the values come from, as written. */
+  readonly specifier: string;
+  /** The exported names, or `*` for `export * from`. */
+  readonly names: readonly string[];
+  readonly line: number;
+}
+
+/**
+ * Every re-export of another module's values, type-only ones excluded.
+ *
+ * Reported apart from {@link importedValues} because a re-export binds nothing locally and
+ * yet is the more interesting half for a rule that matches on specifiers: it **launders**
+ * one. Whoever imports the re-exporting module names *it*, not the module it came from, so a
+ * rule keyed on the original specifier stops seeing anything.
+ */
+export function reExports(file: string, source: string): ReExport[] {
+  const sourceFile = ts.createSourceFile(
+    file,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKindFor(file),
+  );
+
+  const found: ReExport[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier !== undefined && !node.isTypeOnly) {
+      const specifier = literalText(node.moduleSpecifier);
+      if (specifier !== undefined) {
+        const clause = node.exportClause;
+        const names =
+          clause === undefined
+            ? ['*']
+            : ts.isNamedExports(clause)
+              ? clause.elements
+                  .filter((element) => !element.isTypeOnly)
+                  .map((element) => (element.propertyName ?? element.name).text)
+              : [clause.name.text];
+        if (names.length > 0) {
+          found.push({
+            specifier,
+            names,
+            line: sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1,
+          });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return found;
+}

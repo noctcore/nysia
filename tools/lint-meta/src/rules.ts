@@ -13,7 +13,12 @@ import {
   matches,
   matchesAny,
 } from './boundaries.ts';
-import { callSites, moduleReferences } from './moduleReferences.ts';
+import {
+  callSites,
+  importedValues,
+  moduleReferences,
+  reExports,
+} from './moduleReferences.ts';
 import {
   isTauriEdge,
   isTauriPackage,
@@ -579,6 +584,17 @@ function buildsATerminal(specifier: string): boolean {
   return !specifier.endsWith('.css');
 }
 
+/** The class a renderer constructs. Binding it as a value is what makes a module one. */
+const TERMINAL_CLASS = 'Terminal';
+
+/** Whether a name bound from a build of the library is the terminal class itself. */
+function isTheTerminalClass(imported: string): boolean {
+  // `*` is the namespace, which carries `Terminal` along with everything else. `default` is
+  // conservative: no build of this library has one today, and one that grew a default export
+  // would rather be reported wrongly than be missed.
+  return imported === TERMINAL_CLASS || imported === '*' || imported === 'default';
+}
+
 /**
  * Rule (e): a module that builds a terminal must mute the replies it would otherwise send.
  *
@@ -599,15 +615,52 @@ function buildsATerminal(specifier: string): boolean {
  * matter was guarded by nothing, which is the shape traps register #12 is about.
  *
  * So the invariant is written as an architecture fact rather than as a pin on one file: **a
- * module that imports the terminal library must call the mute.** That survives a second such
- * module, which is the case a pin would have missed, and it says nothing at all about a
- * module that builds no terminal.
+ * module that binds the `Terminal` class from the terminal library must call the mute.** That
+ * survives a second such module, which is the case a pin would have missed.
  *
- * What it cannot see, said rather than implied: a call reached through an alias or a computed
- * member, and a renderer that is not `@xterm/xterm`. The first is the boundary every rule here
- * has — a parser can say a name is computed but not what it computes to. The second is real
- * and deliberate: §7.3 keeps `ghostty-web` swappable, and when it arrives this rule needs its
- * package name added rather than being quietly correct about a library nobody uses any more.
+ * `Terminal`, and as a **value**, because the first spelling of this rule asked only whether a
+ * module reached the library at all and obliged two kinds of module that build nothing:
+ *
+ * - `import type { Terminal } from '@xterm/xterm'` and `import { type Terminal }`. Both erase;
+ *   neither can construct anything. Type-ness lives at the clause and at each specifier, and
+ *   {@link importedValues} reads both, so neither form is a binding here.
+ * - A module that imports some other export — `import { EscapeSequenceParser } from
+ *   '@xterm/xterm/src/common/parser/EscapeSequenceParser'`, which is a value, and constructed.
+ *   That is not hypothetical: it is the executed proof of this parser's handler ordering,
+ *   considered for this PR and dropped for unrelated reasons. Had it shipped, a rule with no
+ *   suppression mechanism would have reported a script that builds no terminal, and there
+ *   would have been no honest way out.
+ *
+ * What it cannot see, said rather than implied.
+ *
+ * **It checks that a call by that name exists, not that it ran.** A locally defined stub named
+ * `muteTerminalReplies`, a call sitting in dead code, and a second unmuted `Terminal` in a
+ * module that mutes its first one all satisfy this rule. Reaching past that means deciding
+ * which code runs, which a scanner cannot do; `muteReplies.test.ts` is what covers the call
+ * actually taking effect, and this rule covers the call existing at all.
+ *
+ * **A call reached through an alias or a computed member** is the boundary every rule in this
+ * file has — a parser can say a name is computed but not what it computes to. Note which way
+ * that fails: an aliased import (`import { Terminal as T }`) is still bound from the library
+ * under the name the library exports, so it is still obliged; indirection hides the mute, not
+ * the terminal, and hiding the mute reports.
+ *
+ * **A re-export launders the specifier**, so it is reported outright rather than obliged:
+ * whoever imports `Terminal` from a module that re-exported it names *that* module, and this
+ * rule, which matches on specifiers, stops seeing the library at all.
+ *
+ * **A terminal class reached under another name** is the one thing this narrowing gives up.
+ * `Terminal` is the library's public facade; `CoreBrowserTerminal` behind it would build the
+ * same thing, and a deep import of that is now silent where the first spelling would have
+ * caught it. Traded knowingly: nothing in this repository imports past the facade, the cost of
+ * being wrong the other way was a report with no way out, and widening this back to every
+ * exported name whose spelling ends in `Terminal` is a one-line change if a second facade ever
+ * appears. Nothing else the first spelling closed is open — an alias, an indirection through a
+ * variable, a wrapper that passes the class on and a bare re-export all still report.
+ *
+ * **A renderer that is not `@xterm/xterm`** is real and deliberate: §7.3 keeps `ghostty-web`
+ * swappable, and when it arrives this rule needs its package name added rather than being
+ * quietly correct about a library nobody uses any more.
  */
 export function noUnmutedRenderer(root: string, files: readonly string[]): Violation[] {
   const violations: Violation[] = [];
@@ -617,23 +670,38 @@ export function noUnmutedRenderer(root: string, files: readonly string[]): Viola
     if (!SOURCE_EXTENSIONS.includes(extension) || extension === '.rs') continue;
 
     const source = read(root, file);
-    const builds = moduleReferences(file, source).filter(
-      (reference) =>
-        reference.kind !== 'glob' &&
-        reference.specifier !== undefined &&
-        buildsATerminal(reference.specifier),
+
+    const handedOn = reExports(file, source).filter(
+      (reExport) =>
+        buildsATerminal(reExport.specifier) && reExport.names.some(isTheTerminalClass),
     );
-    if (builds.length === 0) continue;
+    if (handedOn.length > 0) {
+      violations.push({
+        rule: 'renderer-must-mute-replies',
+        file,
+        line: handedOn[0]?.line ?? 0,
+        message:
+          `re-exports ${TERMINAL_CLASS} straight from ${XTERM_PACKAGE}; whoever builds one ` +
+          'then names this module rather than the library, which is where this rule stops ' +
+          `seeing it — import it here, ${MUTE_CALL}() it, and hand on the muted one`,
+      });
+      continue;
+    }
+
+    const bound = importedValues(file, source).filter(
+      (value) => buildsATerminal(value.specifier) && isTheTerminalClass(value.imported),
+    );
+    if (bound.length === 0) continue;
     if (callSites(file, source, MUTE_CALL).length > 0) continue;
 
     violations.push({
       rule: 'renderer-must-mute-replies',
       file,
-      line: builds[0]?.line ?? 0,
+      line: bound[0]?.line ?? 0,
       message:
-        `imports ${XTERM_PACKAGE} but never calls ${MUTE_CALL}(); a terminal answers the ` +
-        'queries it parses and the daemon has already answered them, so an unmuted one ' +
-        'types into the child as though somebody had (D-7, §12 q7)',
+        `binds ${TERMINAL_CLASS} from ${XTERM_PACKAGE} but never calls ${MUTE_CALL}(); a ` +
+        'terminal answers the queries it parses and the daemon has already answered them, ' +
+        'so an unmuted one types into the child as though somebody had (D-7, §12 q7)',
     });
   }
 
