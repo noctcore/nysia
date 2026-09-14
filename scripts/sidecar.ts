@@ -23,14 +23,22 @@
  * running is holding `target/<profile>/nysia`, which is the file about to be deleted.
  * Windows unlinks a running image only while another name for it survives, so the build
  * panicked with `PermissionDenied` as soon as Tauri's own copy had replaced the hardlink
- * cargo leaves from `deps/`. Renaming the sidecar does not help: whatever it is called,
- * something is running from the file being deleted.
+ * cargo leaves from `deps/`.
  *
- * Declared in a config the bundler merges with `--config` and `cargo` never reads, none of it
- * happens: `cargo build`, `cargo test` and `cargo clippy` neither need the sidecar nor touch
- * it, a developer's window starts the runtime cargo just built rather than a copy of an older
- * one, and the copy happens exactly once — during the bundle build, which is the only time
- * anybody wants it.
+ * Declared in a config the bundler merges with `--config` and `cargo` never reads, **the
+ * ordinary loop is clear of it**: `cargo build`, `cargo test`, `cargo clippy` and `tauri dev`
+ * neither need the sidecar nor touch it, and a developer's window starts the runtime cargo
+ * just built rather than a copy of an older one. The copy happens during the bundle build,
+ * which is the only time anybody wants it.
+ *
+ * **The bundle build itself still deletes, and this file should not say otherwise.** `tauri
+ * build --config` passes the merged config on in `TAURI_CONFIG`, so `tauri-build` reads the
+ * declaration too and reaches the same `fs::remove_file(target/<profile>/nysia).unwrap()`,
+ * which panics when a daemon is running from that exact file. Survivable: bundling is
+ * occasional, it builds `--release` where development runs `debug`, and the way out is to
+ * stop that daemon. Not fixable by staging elsewhere either — the file has to be called
+ * `nysia` and has to land beside the window, which is the file the daemon runs from. §12 q5
+ * of the architecture doc carries that with the line numbers in it.
  *
  * Two commands:
  *
