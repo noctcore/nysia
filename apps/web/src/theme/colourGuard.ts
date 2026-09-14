@@ -385,7 +385,13 @@ const PROPERTY_INTRO =
  * with two arguments, which is in the residue above.
  *
  * A quote does **not** bound it, and the comment used to say it did — which was not just
- * wrong but backwards. A quoted string in the expression, which is what a comparison like
+ * wrong but backwards. All three of them, which took two goes: the chunk alternation was
+ * written for the two ordinary quote characters and the class beside it excluded the third,
+ * so a span could cross a string and not a template. That left the asymmetry alive in the
+ * one spelling this codebase is most likely to use it in — the colour vocabulary here is
+ * custom properties, so an interpolated token on one branch against a hardcoded fallback on
+ * the other is the natural way to write it, and whoever wrote the branches the other way
+ * round got the red gate for the same code. A quoted string in the expression, which is what a comparison like
  * `status === 'failed' ? …` is made of, was taken as the value: the rule read the first
  * literal after the separator, found no colour word in it, and skipped past the real one.
  * So the span swallows a complete quoted string as a unit. The alternation is ordered
@@ -409,7 +415,7 @@ const PROPERTY_INTRO =
  * the half nobody looked at any more. It costs a false positive, below — an operand and a
  * branch are both literals in the same span, and which is which is a question about syntax.
  */
-const QUOTED_CHUNK = `'[^'\\n]*'|"[^"\\n]*"`;
+const QUOTED_CHUNK = `'[^'\\n]*'|"[^"\\n]*"|\`[^\`]*\``;
 const BEFORE_VALUE = `(?:${QUOTED_CHUNK}|[^'"\`;,{}]){0,120}`;
 
 /**
@@ -510,12 +516,27 @@ export function findColourLiterals(source: string): readonly ColourLiteral[] {
       found.push({ kind: 'named-colour', text: span[0] });
     }
   }
+  /*
+   * The three patterns read the same properties, one per quote character, so a value whose
+   * branches use different quotes is matched by more than one of them. They start at the
+   * same index because they start at the same property, which is what makes them one
+   * violation rather than two; the longest match is kept because it is the one that reached
+   * furthest through the value.
+   */
+  const byProperty = new Map<number, string>();
   for (const pattern of STYLE_VALUES) {
     for (const match of source.matchAll(pattern)) {
-      if (someCandidateNamesAColour(match[1] ?? '')) {
-        found.push({ kind: 'named-colour', text: match[0] });
+      if (!someCandidateNamesAColour(match[1] ?? '')) {
+        continue;
+      }
+      const seen = byProperty.get(match.index);
+      if (seen === undefined || match[0].length > seen.length) {
+        byProperty.set(match.index, match[0]);
       }
     }
+  }
+  for (const [, text] of [...byProperty].sort(([a], [b]) => a - b)) {
+    found.push({ kind: 'named-colour', text });
   }
 
   return found;

@@ -232,6 +232,41 @@ describe('findColourLiterals', () => {
     }
   });
 
+  it('reads a colour branch whose sibling is a template literal', () => {
+    // The third quote character. The span could cross the other two and not this one, so a
+    // branch written as a template blocked it and the colour on the far side went unread -
+    // and the same code with the branches swapped fired. This is the shape this codebase
+    // will actually write it in: the colour vocabulary here is custom properties, so an
+    // interpolated token on one branch against a hardcoded fallback on the other is the
+    // ordinary way to reach for one.
+    const t = '`';
+    for (const styled of [
+      `<path fill={on ? ${t}var(--color-acc)${t} : 'red'} />`,
+      `<path fill={on ? 'red' : ${t}var(--color-acc)${t}} />`,
+      `style={{ background: on ? ${t}var(--color-acc)${t} : 'navy' }}`,
+      `style={{ background: on ? 'navy' : ${t}var(--color-acc)${t} }}`,
+      `el.style.color = on ? ${t}var(--color-acc)${t} : 'red';`,
+      `el.style.setProperty('color', on ? ${t}var(--c)${t} : 'red');`,
+    ]) {
+      expect(findColourLiterals(styled).map((c) => c.kind), styled).toContain('named-colour');
+    }
+  });
+
+  it('reports one violation per property, whichever quotes the branches use', () => {
+    // Three patterns read the same property, one per quote character, so a value with a
+    // branch in each used to be reported once per pattern that could see a colour - two
+    // findings for one literal. They start at the same place because they start at the same
+    // property, which is what makes them the same violation.
+    const t = '`';
+    for (const mixed of [
+      `style={{ color: on ? 'red' : "navy" }}`,
+      `style={{ color: on ? 'red' : "steel" }}`,
+      `style={{ color: on ? 'red' : ${t}var(--x)${t} }}`,
+    ]) {
+      expect(findColourLiterals(mixed).map((c) => c.kind), mixed).toEqual(['named-colour']);
+    }
+  });
+
   it('reads a colour branch in an object literal the same way', () => {
     // The same miss, in the form that has been here since before the container was
     // admitted, and that no bullet ever named.
