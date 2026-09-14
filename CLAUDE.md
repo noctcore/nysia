@@ -107,6 +107,16 @@ decisions D-1..D-18), `docs/design/design-spec.md` (tokens, chrome, three screen
 
 ## 7. Gates — all must pass before you open a PR
 
+From a clean checkout, build the daemon and stage the sidecar first. The desktop crate
+resolves its bundled binary at compile time and the staging directory is gitignored, so
+`cargo test` and `cargo clippy` both fail until it exists:
+
+```
+cargo build -p nysia && pnpm sidecar
+```
+
+Then:
+
 ```
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
