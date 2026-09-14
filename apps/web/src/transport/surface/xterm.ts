@@ -3,6 +3,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 
+import { muteTerminalReplies } from './muteReplies';
 import type { TerminalFactory, XtermLike } from './XtermSurface';
 
 /**
@@ -84,6 +85,15 @@ export const createXterm: TerminalFactory = ({
     scrollback: 1000,
     allowProposedApi: true,
   });
+
+  // **Before anything is written.** The daemon has already answered every query this
+  // terminal is about to parse — its virtual terminal has a reply sink and the pump writes
+  // what that sink collects straight to the pty — so a second answer from here is not a
+  // duplicate, it is the display cache typing into the child on the user's behalf (D-7).
+  // On Windows ConPTY reads the end of a cursor-position report as F3. See `muteReplies.ts`
+  // for the table, and for the dispatch ordering it was read out of xterm's source to rest
+  // on.
+  muteTerminalReplies(terminal.parser);
 
   // The addon that knows how many cells fit in the host. It is loaded for every renderer,
   // because measuring is not a WebGL concern.
