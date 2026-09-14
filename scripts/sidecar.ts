@@ -34,11 +34,11 @@
  * **The bundle build itself still deletes, and this file should not say otherwise.** `tauri
  * build --config` passes the merged config on in `TAURI_CONFIG`, so `tauri-build` reads the
  * declaration too and reaches the same `fs::remove_file(target/<profile>/nysia).unwrap()`,
- * which panics when a daemon is running from that exact file. Survivable: bundling is
- * occasional, it builds `--release` where development runs `debug`, and the way out is to
- * stop that daemon. Not fixable by staging elsewhere either — the file has to be called
- * `nysia` and has to land beside the window, which is the file the daemon runs from. §12 q5
- * of the architecture doc carries that with the line numbers in it.
+ * which panics when a daemon is running from that exact file. Survivable: it takes a daemon
+ * running under the profile being bundled, bundling is deliberate and occasional, and the
+ * way out is to stop that daemon. Not fixable by staging elsewhere either — the file has to
+ * be called `nysia` and has to land beside the window, which is the file the daemon runs
+ * from. §12 q5 of the architecture doc carries that with the line numbers in it.
  *
  * Two commands:
  *
