@@ -819,13 +819,55 @@ async fn a_replay_is_closed_by_one_boundary_with_live_output_strictly_after_it()
     let harness = Harness::start("ibound", CreditWindow::DEFAULT);
     let first = client_id("nysia-interop-boundary-a");
     let mut control = harness.control(&first).await;
-    let stream = harness.stream(&first).await;
+    let mut stream = harness.stream(&first).await;
 
     let created = start_shell(&mut control).await;
     await_prompt(&mut control, &created.handle).await;
     // Scrollback worth replaying. A fresh pane has nothing to mark the end of, and a test
     // that attached to one would pass against a daemon that never replays.
+    //
+    // **The first window has to attach and drain, not merely type.** A session nothing is
+    // watching coalesces its output and holds it: the pump has no sink to flush into, so the
+    // bytes stay pending and are delivered to the *first* sink that appears — after its
+    // replay and after its boundary, as live output. Skipping this step made the second
+    // window's "replay" a bare prompt with the whole session arriving live behind it, which
+    // reads exactly like a boundary in the wrong place and failed on both runners while
+    // passing locally, where `cmd` writes little enough for the screen to hold the token
+    // anyway. Draining here is what makes the token genuinely *past* by the time the second
+    // window arrives, which is what a relaunch actually is.
+    let watching = control
+        .stream_attach(created.handle.clone())
+        .await
+        .expect("the first window routes the session it is watching");
+    stream.assign(watching.stream_id);
     compute_token(&mut control, &created.handle).await;
+    let watched = stream
+        .until(|peer| peer.text(watching.stream_id).contains(TOKEN))
+        .await;
+    assert!(
+        watched,
+        "the first window never saw the token it typed, so there is nothing to relaunch into"
+    );
+    // The precondition the seam assertions below rest on, checked separately so a failure
+    // says which half broke. The replay is a ring of the raw bytes the pump fed it, so a
+    // daemon whose screen holds the token has the token to replay; without this, a stale
+    // screen would fail as "the boundary landed in the wrong place", which it would not have.
+    let screen = control
+        .terminal_read(TerminalRead::screen(created.handle.clone()))
+        .await
+        .expect("reading the screen");
+    assert!(
+        screen
+            .lines
+            .join(
+                "
+"
+            )
+            .contains(TOKEN),
+        "the daemon's own screen does not hold {TOKEN}, so there is nothing for a re-attach          to replay; it holds {:?}",
+        screen.lines
+    );
+
     drop(stream);
     drop(control);
 
