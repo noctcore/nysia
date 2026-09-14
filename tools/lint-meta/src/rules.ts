@@ -13,7 +13,7 @@ import {
   matches,
   matchesAny,
 } from './boundaries.ts';
-import { moduleReferences } from './moduleReferences.ts';
+import { callSites, moduleReferences } from './moduleReferences.ts';
 import {
   isTauriEdge,
   isTauriPackage,
@@ -564,6 +564,82 @@ export function noStoreContextOutsideStore(root: string, files: readonly string[
   return violations;
 }
 
+/** The package a `Terminal` comes from. Its stylesheet is not one. */
+const XTERM_PACKAGE = '@xterm/xterm';
+
+/** The call that displaces every responder on a terminal's parser. */
+const MUTE_CALL = 'muteTerminalReplies';
+
+/** Whether a specifier hands the importer something that can construct a terminal. */
+function buildsATerminal(specifier: string): boolean {
+  if (specifier === XTERM_PACKAGE) return true;
+  if (!specifier.startsWith(`${XTERM_PACKAGE}/`)) return false;
+  // `@xterm/xterm/css/xterm.css` is the stylesheet, and a stylesheet constructs nothing.
+  // Every other subpath is a build of the library, `lib/xterm.mjs` included.
+  return !specifier.endsWith('.css');
+}
+
+/**
+ * Rule (e): a module that builds a terminal must mute the replies it would otherwise send.
+ *
+ * D-7 puts terminal state in Rust and makes the webview a display cache. The daemon's virtual
+ * terminal answers every query the child writes — it is built with a reply sink and the pump
+ * drains it into the pty — so a renderer that answers the same query a second time is not
+ * adding a service, it is typing into the child on the user's behalf. On Windows ConPTY reads
+ * the end of a cursor-position report as F3, which is `cmd`'s recall-previous-command, and
+ * that is §12 q7: a pane that came back after a relaunch with a command nobody typed sitting
+ * in the line editor.
+ *
+ * `apps/web/src/transport/surface/muteReplies.ts` closes it by registering a handler ahead of
+ * every built-in responder, and one line in `surface/xterm.ts` applies it. **That line is what
+ * this rule exists for.** Deleting it left `pnpm test` entirely green: `xterm.ts` needs a DOM
+ * and a canvas to construct, v0.1's tests are node-only (D-18), and so the one module that
+ * builds the real terminal is the one module nothing executes. The mute table itself is
+ * covered — deleting a line from it reddens two tests — but the call site that makes the table
+ * matter was guarded by nothing, which is the shape traps register #12 is about.
+ *
+ * So the invariant is written as an architecture fact rather than as a pin on one file: **a
+ * module that imports the terminal library must call the mute.** That survives a second such
+ * module, which is the case a pin would have missed, and it says nothing at all about a
+ * module that builds no terminal.
+ *
+ * What it cannot see, said rather than implied: a call reached through an alias or a computed
+ * member, and a renderer that is not `@xterm/xterm`. The first is the boundary every rule here
+ * has — a parser can say a name is computed but not what it computes to. The second is real
+ * and deliberate: §7.3 keeps `ghostty-web` swappable, and when it arrives this rule needs its
+ * package name added rather than being quietly correct about a library nobody uses any more.
+ */
+export function noUnmutedRenderer(root: string, files: readonly string[]): Violation[] {
+  const violations: Violation[] = [];
+
+  for (const file of files) {
+    const extension = file.slice(file.lastIndexOf('.'));
+    if (!SOURCE_EXTENSIONS.includes(extension) || extension === '.rs') continue;
+
+    const source = read(root, file);
+    const builds = moduleReferences(file, source).filter(
+      (reference) =>
+        reference.kind !== 'glob' &&
+        reference.specifier !== undefined &&
+        buildsATerminal(reference.specifier),
+    );
+    if (builds.length === 0) continue;
+    if (callSites(file, source, MUTE_CALL).length > 0) continue;
+
+    violations.push({
+      rule: 'renderer-must-mute-replies',
+      file,
+      line: builds[0]?.line ?? 0,
+      message:
+        `imports ${XTERM_PACKAGE} but never calls ${MUTE_CALL}(); a terminal answers the ` +
+        'queries it parses and the daemon has already answered them, so an unmuted one ' +
+        'types into the child as though somebody had (D-7, §12 q7)',
+    });
+  }
+
+  return violations;
+}
+
 /** Which crate a dependency is, spelled for a message — `ui (package = "tauri")` renamed. */
 function describe(edge: CargoDependencyEdge): string {
   return edge.rename === null
@@ -682,7 +758,11 @@ function shortestChainToTauri(
  */
 export function runSourceRules(root: string, includeFixtures = false): Violation[] {
   const files = walk(root, includeFixtures);
-  return [...noTauriOutsideDesktop(root, files), ...noStoreContextOutsideStore(root, files)];
+  return [
+    ...noTauriOutsideDesktop(root, files),
+    ...noStoreContextOutsideStore(root, files),
+    ...noUnmutedRenderer(root, files),
+  ];
 }
 
 /**

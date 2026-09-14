@@ -1,11 +1,13 @@
 /**
  * The architecture-rule runner, wired into `pnpm lint`.
  *
- * Three rules today (D-14 keeps the set minimal and lets it ratchet):
+ * Five rules today (D-14 keeps the set minimal and lets it ratchet):
  *
  *   a. nothing outside `apps/desktop` and `apps/web/src/transport` may import tauri;
  *   b. no Rust crate outside `apps/desktop` may depend on tauri;
- *   c. `nysia-core` must not reach tauri through anything.
+ *   c. `nysia-core` must not reach tauri through anything;
+ *   d. nothing outside the store may reach `StoreContext` through a call;
+ *   e. a module that builds a terminal must mute the replies it would otherwise send.
  *
  * (b) is the load-bearing one: if no crate outside `apps/desktop` depends on tauri then
  * `use tauri::…` there cannot compile, which makes (a) belt and braces. (a) is kept anyway
@@ -13,7 +15,10 @@
  * reports a manifest.
  *
  * Each ships a fixture proving it trips — `pnpm prove:lint-meta`. A check that passes
- * without exercising anything is worse than no check (traps register #13).
+ * without exercising anything is worse than no check (traps register #13). Rule (e) is here
+ * for a reason worth naming: the module that builds the real terminal needs a DOM and a
+ * canvas, v0.1's tests are node-only (D-18), and so the line that mutes it was the one line
+ * in the repository nothing executed — deleting it left every gate green.
  *
  * Exit codes: 0 clean, 1 violations, **2 the rules could not run**. Rules (b) and (c) shell
  * out to `cargo metadata`; if that fails this exits 2 rather than reporting zero.
@@ -88,8 +93,9 @@ try {
 }
 
 if (violations.length === 0) {
-  // Two source rules (tauri imports, store-context calls); the cargo rules add two more.
-  process.stdout.write(`lint-meta: ${sourceOnly ? 2 : 4} rules, 0 violations\n`);
+  // Three source rules (tauri imports, store-context calls, an unmuted renderer); the cargo
+  // rules add two more.
+  process.stdout.write(`lint-meta: ${sourceOnly ? 3 : 5} rules, 0 violations\n`);
   process.exit(0);
 }
 

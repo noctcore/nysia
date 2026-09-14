@@ -1,9 +1,18 @@
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { CargoMetadataError } from './cargoGraph.ts';
+import { callSites } from './moduleReferences.ts';
 import { findRepoRoot } from './repoRoot.ts';
-import { blankRustComments, runCargoRules, runSourceRules, walk } from './rules.ts';
+import {
+  blankRustComments,
+  noUnmutedRenderer,
+  runCargoRules,
+  runSourceRules,
+  walk,
+} from './rules.ts';
 
 const repoRoot = findRepoRoot();
 const fixture = (name: string): string => join(repoRoot, 'tools/lint-meta/fixtures', name);
@@ -155,6 +164,54 @@ describe('the source rules', () => {
 
   it('pass against the real repository', () => {
     expect(runSourceRules(repoRoot)).toEqual([]);
+  });
+});
+
+describe('a renderer that answers queries the daemon has already answered', () => {
+  const surface = 'apps/web/src/transport/surface/xterm.ts';
+
+  it('reports the module that builds a terminal and never mutes it', () => {
+    const violations = noUnmutedRenderer(fixture('trips'), [surface]);
+    expect(violations).toHaveLength(1);
+    // The `@xterm/xterm` import, not the stylesheet under it, and not the comment above it
+    // that names the mute — which is the whole reason this reads a tree rather than the text.
+    expect(violations[0]?.line).toBe(8);
+    expect(violations[0]?.message).toContain('muteTerminalReplies()');
+  });
+
+  it('says nothing about a module that builds one and mutes it', () => {
+    expect(noUnmutedRenderer(fixture('clean'), [surface])).toEqual([]);
+  });
+
+  it('obliges no module that builds no terminal', () => {
+    // The mute's own module imports nothing from xterm. A rule keyed on the mute being
+    // *called* everywhere, rather than on the terminal being *built* here, would report it.
+    const mute = 'apps/web/src/transport/surface/muteReplies.ts';
+    expect(noUnmutedRenderer(fixture('clean'), [mute])).toEqual([]);
+  });
+
+  it('reports the real file the moment the call is removed from it', () => {
+    // The finding this rule exists for: deleting `muteTerminalReplies(terminal.parser)` from
+    // the shipped file left every gate green, because that file needs a DOM to construct and
+    // v0.1's tests are node-only (D-18). Run against the repository as it stands the rule is
+    // silent; run against the same file with the call cut out of it, it reports.
+    const source = readFileSync(join(repoRoot, surface), 'utf8');
+    expect(source, 'the call site this rule pins').toContain('muteTerminalReplies(terminal.parser)');
+    expect(noUnmutedRenderer(repoRoot, [surface]), 'the file as it ships').toEqual([]);
+
+    // Both halves of the deletion that was measured: the call, and the import that goes
+    // orphaned with it. Cutting the import too is the case that left every gate green.
+    const cut = source.replace(/^.*muteTerminalReplies.*$/gm, '');
+    expect(callSites(surface, cut, 'muteTerminalReplies')).toEqual([]);
+
+    const scratch = mkdtempSync(join(tmpdir(), 'lint-meta-mute-'));
+    try {
+      mkdirSync(join(scratch, 'apps/web/src/transport/surface'), { recursive: true });
+      writeFileSync(join(scratch, surface), cut, 'utf8');
+      expect(noUnmutedRenderer(scratch, [surface]), 'the same file with the call cut out').toHaveLength(1);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });
 
