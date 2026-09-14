@@ -118,10 +118,11 @@ const PALETTE_CLASS = new RegExp(
  *    `text-decoration`, `column-rule`, `text-emphasis`, the `border-inline` and
  *    `border-block` families, and `filter` or `backdrop-filter` carrying a drop shadow are
  *    all absent. The sentence here used to say it covered CSS, which was simply false.
- *  - a colour key belonging to a library rather than to CSS: a terminal theme object, a
- *    chart config. A key that merely *contains* one of the listed words is outside it too,
- *    because the boundary guard that stops `fill` matching inside `autofill` is the same
- *    guard and the same trade.
+ *  - a colour key belonging to a library the list does not name. xterm's are named now,
+ *    because that terminal is in this app and its keys are where the next literal would be
+ *    written; a chart config's, or any other dependency's, are not. A key that merely
+ *    *contains* one of the listed words is outside it too, because the boundary guard that
+ *    stops `fill` matching inside `autofill` is the same guard and the same trade.
  *  - bare CSS text carried inside a string or a template — a `cssText` assignment, a
  *    tagged `css` template, a `style` attribute inside a markup string. The rule looks for
  *    a property introducing a literal, and in all three the property is *inside* the
@@ -164,6 +165,39 @@ const PAINTING_PROPERTY =
   'outline|fill|stroke|box-?[sS]hadow|text-?[sS]hadow';
 
 /**
+ * The keys of xterm's `ITheme`, which paint but are not CSS.
+ *
+ * Scoping the rule to painting properties is what stopped it shouting at modules that paint
+ * nothing, and the price was every library whose colour keys are its own. That price was
+ * abstract while nothing in `apps/web/src` built a terminal. It is not any more: the surface
+ * renders, xterm takes concrete colour strings rather than variables — so a value has to be
+ * resolved at the call site — and none of its two dozen keys ends in the word the CSS half
+ * of this list matches on. That combination is precisely where the next literal in this app
+ * gets written, so the keys are named rather than inferred.
+ *
+ * Taken from `ITheme` in the pinned `@xterm/xterm` typings, not from memory, and split from
+ * a string for the same reason the palette ramps are: a bracketed list of colour names is a
+ * bracket span full of colour names, and rule 4 would report this module as its own worst
+ * offender. The eight ANSI names are ordinary English words, which is survivable only
+ * because they still have to introduce a *value* that names a colour — a key called `red`
+ * set to something that is not a colour stays quiet.
+ *
+ * `background`, `cursor` and `overviewRulerBorder` overlap the CSS list either exactly or
+ * inside a longer word; the boundary guard means the longer spellings have to be written
+ * out, which is the same trade that keeps `fill` from matching in `autofill`.
+ */
+const TERMINAL_THEME_KEYS =
+  ('foreground cursor cursorAccent selectionBackground selectionForeground ' +
+    'selectionInactiveBackground scrollbarSliderBackground scrollbarSliderHoverBackground ' +
+    'scrollbarSliderActiveBackground overviewRulerBorder extendedAnsi ' +
+    'black red green yellow blue magenta cyan white ' +
+    'brightBlack brightRed brightGreen brightYellow brightBlue brightMagenta brightCyan ' +
+    'brightWhite').split(' ');
+
+/** Every name that can introduce a colour value: CSS's painting properties and xterm's. */
+const COLOUR_INTRODUCER = `${PAINTING_PROPERTY}|${TERMINAL_THEME_KEYS.join('|')}`;
+
+/**
  * The property and its separator.
  *
  * The leading guard is what stops the list matching inside a longer word — without it
@@ -176,7 +210,7 @@ const PAINTING_PROPERTY =
  * covers a quoted key and `setProperty`.
  */
 const PROPERTY_INTRO =
-  `(?<![\\w-])(?:${PAINTING_PROPERTY})(?:\\s*[:=]|['"\`]\\s*[,:=])`;
+  `(?<![\\w-])(?:${COLOUR_INTRODUCER})(?:\\s*[:=]|['"\`]\\s*[,:=])`;
 
 /**
  * Whatever sits between the separator and the literal — a ternary head, a call, nothing.
