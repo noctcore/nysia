@@ -54,7 +54,7 @@ use crate::rpc::errors::{IntoEnvelope, envelope};
 use crate::rpc::lease::PidRecordFile;
 use crate::rpc::peer::{CallerSession, PeerCredentials};
 use crate::rpc::session::{OwnedSession, SessionRegistry};
-use crate::rpc::stream::{BoundStream, ConnectionKey, StreamRegistry, StreamSink};
+use crate::rpc::stream::{BoundStream, ConnectionKey, CreditOutcome, StreamRegistry, StreamSink};
 use crate::rpc::transport::{Connection, Listener, TransportError};
 
 /// How long a connected peer has to send its `hello`.
@@ -788,7 +788,21 @@ impl Daemon {
                     Ok(Some(frame)) if frame.kind == FrameKind::Credit => {
                         match serde_json::from_slice::<CreditFrame>(&frame.payload) {
                             Ok(credit) => {
-                                self.streams.apply_credit(connection, frame.stream, &credit);
+                                // Proto's discard-versus-drop rule, applied rather than
+                                // described. The registry makes the call — it holds both the
+                                // table and the watermark — and this honours both halves of
+                                // the answer. Discarding *everything* unroutable would be the
+                                // tolerated deviation it was: harmless by the client's good
+                                // behaviour rather than by the protocol, and one direction
+                                // quietly opting out of a shared rule is how two
+                                // implementations start to disagree about what is on the wire.
+                                match self.streams.apply_credit(connection, frame.stream, &credit) {
+                                    CreditOutcome::Routed | CreditOutcome::DiscardFrame => {}
+                                    // The connection, and every session riding it. The
+                                    // registry has already said which id and against which
+                                    // watermark.
+                                    CreditOutcome::DropConnection => return,
+                                }
                             }
                             Err(err) => {
                                 tracing::debug!(%err, "ignored an unreadable credit frame");
@@ -988,7 +1002,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use nysia_proto::{SessionCreate, SessionKind, StreamAttach};
+    use nysia_proto::{CreditAck, Frame, SessionCreate, SessionKind, StreamAttach};
 
     use super::*;
     use crate::rpc::testing::TestShell;
@@ -1023,6 +1037,14 @@ mod tests {
         ) -> std::task::Poll<std::io::Result<()>> {
             std::task::Poll::Ready(Ok(()))
         }
+    }
+
+    /// One credit ack, framed the way a client puts it on the wire.
+    fn credit_ack(stream: StreamId, bytes: u32) -> Vec<u8> {
+        let payload = serde_json::to_vec(&CreditFrame::Ack(CreditAck { bytes }))
+            .expect("a credit ack serialises");
+        nysia_proto::encode(&Frame::new(FrameKind::Credit, stream, payload))
+            .expect("a credit ack encodes")
     }
 
     #[test]
@@ -1456,6 +1478,151 @@ mod tests {
             .sessions()
             .close(&session.handle)
             .expect("the session closes");
+        daemon.shutdown();
+        drop(listener);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    #[tokio::test]
+    async fn credit_for_a_stream_that_has_been_detached_is_discarded_and_the_reader_goes_on() {
+        // Proto's discard half, in the client-to-daemon direction. Control and stream are
+        // separate sockets with nothing ordering them, so a detach always races the acks
+        // already in flight for the id it retired — and dropping the connection over one
+        // would take every other session riding it down for an ordinary detach.
+        let endpoint = crate::rpc::endpoint::scratch("discard");
+        let (daemon, listener) = Daemon::bind(DaemonConfig {
+            idle_retire_after: None,
+            ..DaemonConfig::new(endpoint.clone())
+        })
+        .expect("binds");
+        let client_id: ClientId = "nysia-test".parse().expect("a well-formed client id");
+
+        let bound = daemon.streams().bind(&client_id);
+        let retired = daemon.streams().attach(&client_id).expect("attaches").sink;
+        let retired_id = retired.stream_id();
+        assert!(daemon.streams().detach(&client_id, retired_id));
+        let live = daemon.streams().attach(&client_id).expect("attaches").sink;
+        let live_id = live.stream_id();
+        // Spend some allowance first, so "the reader went on" is something this test can see
+        // rather than something it infers from the absence of a teardown.
+        live.send(&Frame::new(FrameKind::Output, live_id, vec![b'x'; 4096]));
+        let spent = live.credit();
+
+        let (mut peer, ours) = tokio::io::duplex(64 * 1024);
+        let (ours_reader, ours_writer) = tokio::io::split(ours);
+        let serving = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            let client_id = client_id.clone();
+            async move {
+                daemon
+                    .serve_stream(
+                        ControlReader::new(ours_reader),
+                        ControlWriter::new(ours_writer),
+                        &client_id,
+                        bound,
+                    )
+                    .await;
+            }
+        });
+
+        peer.write_all(&credit_ack(retired_id, 4096))
+            .await
+            .expect("the stale ack goes out");
+        peer.write_all(&credit_ack(live_id, 4096))
+            .await
+            .expect("the live ack goes out");
+        peer.flush().await.expect("both acks are on the wire");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && live.credit() <= spent {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            live.credit() > spent,
+            "the ack queued behind the discarded one never landed; a daemon that drops the \
+             connection over the tail of a detach race takes every other session on it down"
+        );
+        assert_eq!(
+            daemon.streams().connections(),
+            1,
+            "a frame it merely discards must cost the connection nothing"
+        );
+        assert!(
+            !serving.is_finished(),
+            "and must leave the reader reading, which is the difference between discarding \
+             one frame and discarding the connection"
+        );
+
+        serving.abort();
+        daemon.shutdown();
+        drop(listener);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    #[tokio::test]
+    async fn credit_for_a_stream_id_that_was_never_assigned_drops_the_connection() {
+        // Proto's other half, which the daemon used to opt out of: an id at or beyond the
+        // next one to assign was never handed out here, so no sequence of events puts a
+        // well-behaved client in this position. Discarding it instead is tolerable only for
+        // as long as the client behaves — the protocol bounds nothing in this direction —
+        // and a rule that holds in one direction is one the two ends can disagree about.
+        let endpoint = crate::rpc::endpoint::scratch("desync");
+        let (daemon, listener) = Daemon::bind(DaemonConfig {
+            idle_retire_after: None,
+            ..DaemonConfig::new(endpoint.clone())
+        })
+        .expect("binds");
+        let client_id: ClientId = "nysia-test".parse().expect("a well-formed client id");
+
+        let bound = daemon.streams().bind(&client_id);
+        // One real attach first, so the watermark has moved and the id below is refused for
+        // being past it rather than for being the first id on an untouched connection.
+        let attached = daemon.streams().attach(&client_id).expect("attaches").sink;
+        let never = daemon
+            .streams()
+            .next_stream_id(&client_id)
+            .expect("the connection is bound");
+
+        let (mut peer, ours) = tokio::io::duplex(64 * 1024);
+        let (ours_reader, ours_writer) = tokio::io::split(ours);
+        // Exactly the next id to assign. The *client* has one reason to wait on this one id —
+        // the daemon may write a frame for an attach whose answer the client has not finished
+        // parsing — and the daemon has none: it assigns the id before the answer naming it
+        // goes out, so nothing can put a client here first.
+        peer.write_all(&credit_ack(never, 1))
+            .await
+            .expect("the desynchronised ack goes out");
+        peer.flush().await.expect("it is on the wire");
+
+        let served = tokio::time::timeout(
+            Duration::from_secs(10),
+            daemon.serve_stream(
+                ControlReader::new(ours_reader),
+                ControlWriter::new(ours_writer),
+                &client_id,
+                bound,
+            ),
+        )
+        .await;
+
+        assert!(
+            served.is_ok(),
+            "credit naming an id this connection never assigned must drop it; discarded \
+             instead, the daemon goes on reading from a peer it no longer agrees with"
+        );
+        assert_eq!(
+            daemon.streams().connections(),
+            0,
+            "and dropping the connection is what it says: the socket and every sink on it"
+        );
+        assert!(
+            attached.is_closed(),
+            "including the streams that were riding it, which can never be acked again"
+        );
+        // Still open, so nothing but the rule ended this: a test where the client had hung up
+        // would pass with the rule deleted.
+        drop(peer);
+
         daemon.shutdown();
         drop(listener);
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());

@@ -43,12 +43,21 @@
 //! [`StreamId::FIRST`]. `nysia-proto` says an id is scoped to one stream connection, and its
 //! discard-versus-drop rule is defined against "the next id to assign on this connection" —
 //! a watermark a client can only know if the daemon counts where the client can see it.
+//!
+//! That rule runs in **both** directions. [`StreamRegistry::apply_credit`] classifies an
+//! incoming credit frame with the same [`StreamId::classify_unattached`] the client applies
+//! to output travelling the other way, and answers with a [`CreditOutcome`] its reader has to
+//! honour: credit for an id this connection has retired is discarded, and credit for one it
+//! never assigned costs the connection. Making the policy executable was only worth it if
+//! both ends call the same function — one direction deciding locally is how two
+//! implementations start to disagree about what is on the wire.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError};
 
+use nysia_proto::stream::UnattachedFrame;
 use nysia_proto::{
     ClientId, CreditAck, CreditFrame, CreditGrant, CreditWindow, Frame, FrameKind, StreamId,
 };
@@ -119,6 +128,28 @@ pub enum SendOutcome {
     WouldBlock,
     /// The client is gone. The sink can be forgotten.
     Closed,
+}
+
+/// What a credit frame from a client turned out to be, and what its reader owes it.
+///
+/// The two unroutable cases are [`UnattachedFrame`]'s, named the same way on purpose: the
+/// decision is proto's, not this module's, and a reader matching on these is applying the
+/// same rule the client applies to frames travelling the other way. A rule that held in only
+/// one direction would be one the two ends could disagree about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "an unroutable credit frame decides whether the connection survives"]
+pub enum CreditOutcome {
+    /// The id named a live stream on this connection, and the frame has been dealt with: an
+    /// ack replenished the sink, a grant was ignored. **Keep reading.**
+    Routed,
+    /// No live entry, but the id was assigned on this connection and has since been detached
+    /// — the tail of the detach race, which is routine. **Throw this one frame away and keep
+    /// reading.**
+    DiscardFrame,
+    /// The id was never assigned on this connection. No sequence of events puts a well-behaved
+    /// client here, so it is a desync in the same class as a malformed frame. **Drop the
+    /// connection.**
+    DropConnection,
 }
 
 /// One client's view of one session's output.
@@ -515,33 +546,80 @@ impl StreamRegistry {
     /// A [`CreditFrame::Grant`] arriving from a client is ignored rather than acted on: the
     /// daemon is the producer, it holds the window, and a consumer that could hand itself an
     /// allowance would be able to turn the backpressure off from the outside.
+    ///
+    /// An id with no live entry is [`StreamId::classify_unattached`]'s call rather than this
+    /// module's, and the caller has to honour the answer — see [`CreditOutcome`]. The kind is
+    /// decided second on purpose: the classification is a property of the *id*, so a grant
+    /// naming an id this connection never assigned is the same desync an ack naming one is,
+    /// and "the daemon does not honour grants" is a separate rule that only applies once the
+    /// frame has been found routable.
+    ///
+    /// Credit arriving on a connection the registry has already let go of is
+    /// [`CreditOutcome::DropConnection`] too — there is nothing left to route to and its
+    /// reader is on its way out — but it is not the desync that verdict usually means, and is
+    /// not logged as one.
     pub fn apply_credit(
         &self,
         key: ConnectionKey,
         stream_id: StreamId,
         credit: &CreditFrame,
-    ) -> bool {
+    ) -> CreditOutcome {
+        // The table and the watermark that qualifies it are read under one lock. Read apart,
+        // a detach landing in between would have an id classified against a watermark that no
+        // longer describes the table the lookup missed in.
+        let (sink, next_to_assign) = {
+            let inner = self.lock();
+            let connection = inner.connections.get(&key);
+            let sink = connection
+                .and_then(|connection| connection.sinks.get(&stream_id.get()))
+                .map(Arc::clone);
+            let next_to_assign = connection.map(|connection| connection.next_id);
+            (sink, next_to_assign)
+        };
+        let Some(sink) = sink else {
+            let Some(next_to_assign) = next_to_assign else {
+                // There is no watermark to classify against: the registry has already let
+                // this connection go, superseded or unbound, and its reader is on its way
+                // out. Routine on a reload — the abandoned webview goes on flushing acks for
+                // a moment after a newer connection took its client id over — so it is said
+                // at debug, and never as the desync below, which it is not.
+                tracing::debug!(
+                    connection = key.get(),
+                    stream = stream_id.get(),
+                    "credit arrived on a stream connection the registry has let go of"
+                );
+                return CreditOutcome::DropConnection;
+            };
+            return match stream_id.classify_unattached(next_to_assign) {
+                UnattachedFrame::DiscardFrame => {
+                    tracing::debug!(
+                        connection = key.get(),
+                        stream = stream_id.get(),
+                        "discarded a credit frame for a stream that has been detached"
+                    );
+                    CreditOutcome::DiscardFrame
+                }
+                UnattachedFrame::DropConnection => {
+                    tracing::error!(
+                        connection = key.get(),
+                        stream = stream_id.get(),
+                        next_to_assign = next_to_assign.get(),
+                        "a client sent credit for a stream id this connection never assigned"
+                    );
+                    CreditOutcome::DropConnection
+                }
+            };
+        };
         let CreditFrame::Ack(CreditAck { bytes }) = credit else {
             tracing::debug!(
                 connection = key.get(),
                 stream = stream_id.get(),
                 "ignored a credit grant from a client; the daemon owns the window"
             );
-            return false;
-        };
-        let sink = {
-            let inner = self.lock();
-            inner
-                .connections
-                .get(&key)
-                .and_then(|connection| connection.sinks.get(&stream_id.get()))
-                .map(Arc::clone)
-        };
-        let Some(sink) = sink else {
-            return false;
+            return CreditOutcome::Routed;
         };
         sink.replenish(*bytes);
-        true
+        CreditOutcome::Routed
     }
 
     /// The next id `client`'s current connection would hand out, which is the watermark its
@@ -858,32 +936,63 @@ mod tests {
 
         sink.send(&output(id, 4096));
         let spent = sink.credit();
-        assert!(registry.apply_credit(mine.key, id, &CreditFrame::Ack(CreditAck { bytes: 4096 })));
+        assert_eq!(
+            registry.apply_credit(mine.key, id, &CreditFrame::Ack(CreditAck { bytes: 4096 })),
+            CreditOutcome::Routed
+        );
         assert!(sink.credit() > spent);
 
         // The same id on somebody else's connection is somebody else's stream.
         elsewhere.send(&output(id, 4096));
         let theirs_spent = elsewhere.credit();
-        assert!(registry.apply_credit(ours.key, id, &CreditFrame::Ack(CreditAck { bytes: 4096 })));
+        assert_eq!(
+            registry.apply_credit(ours.key, id, &CreditFrame::Ack(CreditAck { bytes: 4096 })),
+            CreditOutcome::Routed
+        );
         assert!(elsewhere.credit() > theirs_spent);
 
         // A client granting itself credit would be turning the backpressure off from the
-        // outside, so the daemon does not act on one.
+        // outside, so the daemon does not act on one. The frame is still routable — the id is
+        // live — so the connection is not in question; only the allowance is.
         let before = sink.credit();
-        assert!(!registry.apply_credit(
-            mine.key,
-            id,
-            &CreditFrame::Grant(CreditGrant {
-                bytes: u32::MAX,
-                window: CreditWindow::DEFAULT,
-            })
-        ));
+        assert_eq!(
+            registry.apply_credit(
+                mine.key,
+                id,
+                &CreditFrame::Grant(CreditGrant {
+                    bytes: u32::MAX,
+                    window: CreditWindow::DEFAULT,
+                })
+            ),
+            CreditOutcome::Routed
+        );
         assert_eq!(sink.credit(), before);
 
-        // An ack for a stream that is gone is answered with `false`, never a panic: the
-        // detach race is routine, and proto says most such frames are simply discarded.
+        // An ack for a stream that is gone is discarded, never fatal and never a panic: the
+        // detach race is routine, and proto separates it from a desync by the watermark.
         registry.detach(&me, id);
-        assert!(!registry.apply_credit(mine.key, id, &CreditFrame::Ack(CreditAck { bytes: 1 })));
+        assert_eq!(
+            registry.apply_credit(mine.key, id, &CreditFrame::Ack(CreditAck { bytes: 1 })),
+            CreditOutcome::DiscardFrame
+        );
+
+        // At or beyond the next id to assign is the other half of the same rule: nothing this
+        // connection ever handed out, so nothing a well-behaved client could be naming.
+        let next = registry
+            .next_stream_id(&me)
+            .expect("the connection is bound");
+        assert_eq!(
+            registry.apply_credit(mine.key, next, &CreditFrame::Ack(CreditAck { bytes: 1 })),
+            CreditOutcome::DropConnection
+        );
+
+        // And a connection the registry has forgotten has assigned nothing that is still its
+        // to credit, so every id on it reads the same way.
+        registry.unbind(ours.key);
+        assert_eq!(
+            registry.apply_credit(ours.key, id, &CreditFrame::Ack(CreditAck { bytes: 1 })),
+            CreditOutcome::DropConnection
+        );
     }
 
     #[tokio::test]

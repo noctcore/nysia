@@ -99,6 +99,7 @@ pub use peer::{CallerSession, PeerCredentials, PeerError, ancestry, parent_of};
 pub use server::{Daemon, DaemonConfig, ServerError};
 pub use session::{OwnedSession, SessionError, SessionRegistry};
 pub use stream::{
-    AttachedStream, BoundStream, ConnectionKey, SendOutcome, StreamRegistry, StreamSink,
+    AttachedStream, BoundStream, ConnectionKey, CreditOutcome, SendOutcome, StreamRegistry,
+    StreamSink,
 };
 pub use transport::{Connection, ConnectionReader, ConnectionWriter, Listener, TransportError};
