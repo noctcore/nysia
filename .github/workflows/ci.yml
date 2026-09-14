@@ -59,6 +59,17 @@ jobs:
       - name: Build the web frontend
         run: pnpm build
 
+      # `externalBin` in tauri.conf.json is resolved by `tauri_build::build()` at *compile*
+      # time, so the sidecar has to be staged before any cargo command that touches the
+      # desktop crate — not only before a bundle. Without it every cargo step below fails
+      # with `resource path binaries/nysia-<triple> doesn't exist`.
+      - name: Build the nysia runtime
+        working-directory: crates/nysia
+        run: cargo build -p nysia
+
+      - name: Stage the nysia sidecar
+        run: node scripts/sidecar.ts stage
+
       - name: cargo fmt
         run: cargo fmt --all --check
 
@@ -90,6 +101,9 @@ jobs:
 
       - name: prove the eslint import bans trip
         run: pnpm prove:eslint-bans
+
+      - name: prove the sidecar check trips
+        run: pnpm prove:sidecar
 
       # The proof scripts mutate tracked files and restore them. If a restore ever fails,
       # the run must go red rather than leave the next step guessing.
