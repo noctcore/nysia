@@ -15,6 +15,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
+use nysia_core::rpc::Listening;
 use nysia_proto::envelope::{RequestEnvelope, RequestPayload, ResponseEnvelope, ResponsePayload};
 use nysia_proto::handshake::{ClientRole, DaemonIdentity};
 
@@ -35,15 +36,18 @@ pub struct Control {
 }
 
 impl Control {
-    /// Connect, shake hands, and start serving.
+    /// Connect to the daemon at `listening`, shake hands, and start serving.
+    ///
+    /// The endpoint is passed in rather than resolved here so that one resolution serves
+    /// both of a window's connections — and so an interop test can put a daemon of its own
+    /// somewhere the real one is not.
     ///
     /// # Errors
     ///
     /// Every [`DaemonError`] the endpoint can produce: no daemon listening, a refused
     /// hello, a protocol mismatch.
-    pub fn connect() -> Result<Self, DaemonError> {
-        let path = endpoint::endpoint()?;
-        let socket = endpoint::open(&path)?;
+    pub fn connect(listening: &Listening) -> Result<Self, DaemonError> {
+        let socket = endpoint::open(listening)?;
         let mut reader = BufReader::new(socket);
         let identity =
             endpoint::handshake(&mut reader, ClientRole::Control, &endpoint::client_id()?)?;

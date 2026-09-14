@@ -13,6 +13,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::time::Duration;
 
+use nysia_core::rpc::{Endpoint, Listening};
 use nysia_proto::handshake::{
     ClientId, ClientRole, DaemonIdentity, HelloRequest, HelloResponse, RejectReason,
 };
@@ -64,45 +65,25 @@ impl Socket for std::os::unix::net::UnixStream {
 
 /// Where this build expects to find the daemon.
 ///
-/// Composed by `nysia-proto`, which is the sole authority on the endpoint's spelling, so
-/// that the window and the CLI cannot disagree about which pipe is v1's.
+/// **One resolver, and it is not this one.** [`nysia_core::rpc::Endpoint`] composes the
+/// endpoint for the daemon that binds it and for every client that dials it, so the window
+/// asks it rather than reimplementing the recipe. A previous version of this function did
+/// reimplement it and got three things wrong at once: on Unix it composed
+/// `$XDG_RUNTIME_DIR/nysiad-v1.sock` while the daemon binds under its own runtime
+/// directory, so the macOS leg could never find a daemon at all; it ignored
+/// [`nysia_core::rpc::RUNTIME_DIR_VAR`] and [`nysia_core::rpc::ENDPOINT_VAR`], which is how
+/// every isolated daemon is pointed somewhere else; and it composed the Windows pipe from a
+/// raw `%USERNAME%` without the sanitiser, so it matched only for plain account names.
+///
+/// None of those are the sort of mistake a reader catches. They are the sort two
+/// implementations of one convention produce, which is why there is now one.
 ///
 /// # Errors
 ///
-/// [`DaemonError::Endpoint`] when the account name cannot appear in a pipe name — see
-/// [`nysia_proto::version::windows_pipe_name`].
-pub fn endpoint() -> Result<String, DaemonError> {
-    #[cfg(windows)]
-    {
-        // `GetUserNameEx` can hand back `DOMAIN\user`, which proto refuses outright rather
-        // than splicing into a different pipe namespace. USERNAME is the account half.
-        let account = std::env::var("USERNAME").unwrap_or_default();
-        nysia_proto::version::windows_pipe_name(PROTOCOL_VERSION, &account)
-            .map_err(|error| DaemonError::Endpoint(error.to_string()))
-    }
-    #[cfg(not(windows))]
-    {
-        // The daemon owns the directory, because that is where the owner-only permissions
-        // live (§7.3, traps register #14 — scrollback can contain secrets). The client only
-        // composes the same path it would have chosen.
-        let base = std::env::var("XDG_RUNTIME_DIR")
-            .or_else(|_| std::env::var("TMPDIR"))
-            .unwrap_or_else(|_| "/tmp".to_owned());
-        let base = base.trim_end_matches('/');
-
-        // A relative base would compose a socket path relative to whatever directory the
-        // window happened to be launched from, which is not where the daemon is listening.
-        // The failure that produces is a connection refused with a plausible-looking path
-        // in the message, so it is worth refusing here where the reason is still known.
-        if !base.starts_with('/') {
-            return Err(DaemonError::Endpoint(format!(
-                "the runtime directory {base:?} is not an absolute path, so the daemon's                  socket cannot be located from it"
-            )));
-        }
-
-        let name = nysia_proto::version::unix_socket_file_name(PROTOCOL_VERSION);
-        Ok(format!("{base}/{name}"))
-    }
+/// [`DaemonError::Endpoint`] when no runtime directory can be chosen or created, or when
+/// the composed name does not fit what the platform allows.
+pub fn endpoint() -> Result<Endpoint, DaemonError> {
+    Endpoint::from_env().map_err(|error| DaemonError::Endpoint(error.to_string()))
 }
 
 /// Cap what a pipe server may do with this process's identity: check it, never wear it.
@@ -135,38 +116,58 @@ pub fn endpoint() -> Result<String, DaemonError> {
 #[cfg(windows)]
 const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 
-/// Open a socket to the daemon at `path`.
+/// Open a socket to the daemon at `listening`.
+///
+/// The variant decides which syscall, which is the whole reason
+/// [`nysia_core::rpc::Listening`] is an enum rather than a path: a Windows pipe name is not
+/// a filesystem path, and a `CreateFile` that treats one as such creates a file literally
+/// named for the pipe instead of opening it.
 ///
 /// # Errors
 ///
 /// [`DaemonError::Unreachable`] when nothing is listening — which is the ordinary case on a
-/// machine where the daemon has not been started, not a fault.
-pub fn open(path: &str) -> Result<Box<dyn Socket>, DaemonError> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
+/// machine where the daemon has not been started, not a fault — and
+/// [`DaemonError::Endpoint`] when the endpoint names a transport this platform cannot dial.
+pub fn open(listening: &Listening) -> Result<Box<dyn Socket>, DaemonError> {
+    match listening {
+        #[cfg(windows)]
+        Listening::NamedPipe(name) => {
+            use std::os::windows::fs::OpenOptionsExt;
 
-        // A Win32 named pipe is opened like a file. `read(true).write(true)` is what makes
-        // it the duplex handle the protocol needs rather than a one-way reader.
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .security_qos_flags(SECURITY_IDENTIFICATION)
-            .open(path)
-            .map(|pipe| Box::new(pipe) as Box<dyn Socket>)
-            .map_err(|error| DaemonError::Unreachable {
-                endpoint: path.to_owned(),
-                cause: error.to_string(),
-            })
-    }
-    #[cfg(not(windows))]
-    {
-        std::os::unix::net::UnixStream::connect(path)
+            // A Win32 named pipe is opened like a file. `read(true).write(true)` is what
+            // makes it the duplex handle the protocol needs rather than a one-way reader.
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .security_qos_flags(SECURITY_IDENTIFICATION)
+                .open(name)
+                .map(|pipe| Box::new(pipe) as Box<dyn Socket>)
+                .map_err(|error| DaemonError::Unreachable {
+                    endpoint: name.clone(),
+                    cause: error.to_string(),
+                })
+        }
+        #[cfg(not(windows))]
+        Listening::UnixSocket(path) => std::os::unix::net::UnixStream::connect(path)
             .map(|socket| Box::new(socket) as Box<dyn Socket>)
             .map_err(|error| DaemonError::Unreachable {
-                endpoint: path.to_owned(),
+                endpoint: path.display().to_string(),
                 cause: error.to_string(),
-            })
+            }),
+
+        // Resolution is shared, so the wrong variant can only come from an explicit
+        // `NYSIA_ENDPOINT` naming the other platform's transport. Refused with the endpoint
+        // in the message rather than panicked on: it is a mistake in someone's environment,
+        // and §6 keeps panics out of a path a person can reach.
+        #[cfg(windows)]
+        Listening::UnixSocket(path) => Err(DaemonError::Endpoint(format!(
+            "{} is a Unix socket, which this Windows build cannot dial",
+            path.display()
+        ))),
+        #[cfg(not(windows))]
+        Listening::NamedPipe(name) => Err(DaemonError::Endpoint(format!(
+            "{name} is a Windows named pipe, which this build cannot dial"
+        ))),
     }
 }
 
@@ -524,49 +525,21 @@ mod tests {
         );
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn a_relative_runtime_directory_is_refused_rather_than_composed_into_a_path() {
-        // Composing a socket path relative to the launch directory produces a connection
-        // refused with a plausible-looking path in the message, which is much harder to
-        // diagnose than a refusal here.
-        //
-        // Serial by construction: it is the only test that touches these variables, and it
-        // restores them before returning.
-        let previous = (
-            std::env::var("XDG_RUNTIME_DIR").ok(),
-            std::env::var("TMPDIR").ok(),
-        );
-        // SAFETY: single-threaded within this test, and both variables are restored below.
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", "relative/run");
-            std::env::remove_var("TMPDIR");
-        }
-
-        let refused = endpoint();
-
-        unsafe {
-            match previous.0 {
-                Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
-            }
-            if let Some(value) = previous.1 {
-                std::env::set_var("TMPDIR", value);
-            }
-        }
-
+    fn the_endpoint_is_the_one_both_halves_resolve() {
+        // Not a second spelling of the recipe — that is exactly what this module stopped
+        // owning. What is worth asserting here is that the window asks `nysia-core` and gets
+        // the same answer a daemon in this environment would bind, which is the property the
+        // deleted copy quietly broke on the Unix leg.
+        let mine = endpoint().expect("this environment can name an endpoint");
+        let daemons = nysia_core::rpc::Endpoint::from_env().expect("core resolves it too");
+        assert_eq!(mine.listening(), daemons.listening());
         assert!(
-            matches!(refused, Err(DaemonError::Endpoint(_))),
-            "got {refused:?}"
-        );
-    }
-
-    #[test]
-    fn the_endpoint_is_the_one_proto_names() {
-        let endpoint = endpoint().expect("this account can name a pipe");
-        assert!(
-            endpoint.contains(&nysia_proto::version::endpoint_stem(PROTOCOL_VERSION)),
-            "the endpoint {endpoint:?} must be proto's, not a second spelling"
+            mine.listening()
+                .to_string()
+                .contains(&nysia_proto::version::endpoint_stem(PROTOCOL_VERSION)),
+            "the endpoint {} must carry proto's stem",
+            mine.listening()
         );
     }
 }
