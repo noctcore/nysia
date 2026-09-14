@@ -497,8 +497,18 @@ fn spawn_daemon(program: &std::path::Path, endpoint: &Endpoint) -> std::io::Resu
     // that pipe open for its whole life, and the shell waits for an answer it already has.
     // Detaching the parent's own handles first is what stops it; on Unix the redirections
     // replace fds 0, 1 and 2 outright and nothing else is inherited, so there is nothing to do.
+    //
+    // This closes the handles this process can name. It does **not** close the ones it cannot
+    // — see [`stop_inheriting`] for which those are and why the fix for them is out of reach.
     #[cfg(windows)]
-    detach_parent_stdio();
+    {
+        use std::os::windows::io::AsRawHandle;
+        stop_inheriting(&[
+            std::io::stdin().as_raw_handle(),
+            std::io::stdout().as_raw_handle(),
+            std::io::stderr().as_raw_handle(),
+        ]);
+    }
 
     let child = command.spawn()?;
     // The handle is dropped on purpose. Waiting on the daemon is precisely what a client must
@@ -508,31 +518,62 @@ fn spawn_daemon(program: &std::path::Path, endpoint: &Endpoint) -> std::io::Resu
     Ok(())
 }
 
-/// Stop this process's stdio handles from being inherited by anything it spawns.
+/// Stop `handles` from being inherited by anything this process spawns.
 ///
 /// Best effort, and harmless to this process: clearing the inherit flag does not affect the
-/// current process's own use of the handle, only whether a child receives a copy.
+/// current process's own use of the handle, only whether a child receives a copy. A null
+/// handle is skipped — a windowed process has no standard handles to clear.
+///
+/// # What this does not cover
+///
+/// Only the handles a caller can *name*. Windows inherits every inheritable handle in the
+/// table when `bInheritHandles` is true, and `std::process::Command` sets it true whenever
+/// any stdio is redirected — which the spawn above must do, because the daemon's output has
+/// to reach its log. So an inheritable handle that arrived from a parent shell or a GUI
+/// shell is inherited by the daemon and held for its whole life, which under D-1 is days.
+///
+/// The fix for that is `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, which names the *only* handles a
+/// child may receive and makes every other one non-inheritable for that spawn regardless of
+/// its flag. Reaching it from `std::process::Command` needs
+/// [`CommandExt::raw_attribute`](std::os::windows::process::CommandExt), and **this repo's
+/// pinned toolchain does not have it** — `rust-toolchain.toml` pins rustc 1.97.1, where the
+/// method does not exist. Bumping that pin is a coordinator-owned change.
+///
+/// Two things would still be in the way if it were bumped, and both are worth knowing before
+/// anybody tries:
+///
+/// - **The list could not name the child's stdio.** `Stdio::from(File)` does not hand the
+///   file's handle to the child; `Command::spawn` duplicates it as inheritable inside the
+///   call, so the handle the child actually receives does not exist until after the last
+///   moment a caller could have described it. Confirmed by experiment on 1.97.1: a log file
+///   opened the ordinary way reads back `HANDLE_FLAG_INHERIT` clear, and the child writes to
+///   it anyway. An explicit list therefore needs `CreateProcessW` by hand, which is a large
+///   unsafe surface for a leak that is benign today.
+/// - **Sweeping the handle table instead is not a local decision.** Clearing the inherit flag
+///   on every handle this process holds would work in the CLI, which spawns nothing else —
+///   but the window is the other caller, and WebView2 starts child processes of its own from
+///   that same table. Turning inheritance off underneath them is not this function's to do.
+///
+/// Rust opens files, sockets and pipes non-inheritable by default, so in practice the only
+/// inheritable handles in a Nysia process are the standard ones cleared here and whatever a
+/// parent chose to pass down. That is the residual risk, and it is recorded rather than
+/// closed.
 #[cfg(windows)]
-fn detach_parent_stdio() {
-    use std::os::windows::io::AsRawHandle;
+fn stop_inheriting(handles: &[std::os::windows::io::RawHandle]) {
     use windows::Win32::Foundation::{
         HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation,
     };
 
-    let handles = [
-        std::io::stdin().as_raw_handle(),
-        std::io::stdout().as_raw_handle(),
-        std::io::stderr().as_raw_handle(),
-    ];
     for handle in handles {
         if handle.is_null() {
             continue;
         }
-        // SAFETY: the handle is this process's own standard handle, borrowed for the call.
+        // SAFETY: the handle is one this process owns, borrowed for the call.
         // `SetHandleInformation` only changes the flag bits named by the mask and writes
         // nothing through a pointer.
-        let _ =
-            unsafe { SetHandleInformation(HANDLE(handle), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) };
+        let _ = unsafe {
+            SetHandleInformation(HANDLE(*handle), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0))
+        };
     }
 }
 
@@ -745,6 +786,69 @@ mod tests {
                 app_version: "0.1.0".to_owned(),
             },
         }
+    }
+
+    /// Whether Windows would hand a copy of `handle` to a child of this process.
+    #[cfg(windows)]
+    fn is_inheritable(handle: std::os::windows::io::RawHandle) -> bool {
+        use windows::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+
+        let mut flags = 0u32;
+        // SAFETY: the handle is one this test owns and `flags` is a live local for the call.
+        unsafe { GetHandleInformation(HANDLE(handle), &raw mut flags) }
+            .expect("the handle under test is still open");
+        flags & HANDLE_FLAG_INHERIT.0 != 0
+    }
+
+    /// The clearing reaches a handle that really was inheritable.
+    ///
+    /// Written against a **planted** handle rather than this process's standard ones, which
+    /// is the whole reason [`stop_inheriting`] takes a slice. Rust opens files
+    /// non-inheritable, so a test that only read back stdin, stdout and stderr would assert
+    /// the flag is clear on handles that were never set — and pass just as well against a
+    /// function whose body had been deleted, or under a harness that leaves a windowed
+    /// process no standard handles at all (traps register #12).
+    #[cfg(windows)]
+    #[test]
+    fn clearing_inheritance_reaches_a_handle_a_parent_marked_inheritable() {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{
+            HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation,
+        };
+
+        let endpoint = crate::rpc::endpoint::scratch("inheritable");
+        std::fs::create_dir_all(endpoint.runtime_dir()).expect("somewhere to put the file");
+        let planted =
+            std::fs::File::create(endpoint.runtime_dir().join("planted")).expect("a handle");
+        let raw = planted.as_raw_handle();
+
+        // What a parent shell or a GUI shell hands down, arranged by hand because nothing
+        // Rust opens arrives this way.
+        // SAFETY: the handle is this test's own open file, borrowed for the call.
+        unsafe {
+            SetHandleInformation(
+                HANDLE(raw),
+                HANDLE_FLAG_INHERIT.0,
+                HANDLE_FLAGS(HANDLE_FLAG_INHERIT.0),
+            )
+        }
+        .expect("the flag can be set on a handle this process owns");
+        assert!(
+            is_inheritable(raw),
+            "the handle was never planted, so clearing it would prove nothing"
+        );
+
+        stop_inheriting(&[raw]);
+        assert!(
+            !is_inheritable(raw),
+            "a handle a parent marked inheritable would still reach the spawned daemon"
+        );
+
+        // A null handle is the windowed case, and it must not be a panic.
+        stop_inheriting(&[std::ptr::null_mut()]);
+
+        drop(planted);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
     }
 
     /// A program that exists on both platforms and does nothing useful with `--daemon`.
