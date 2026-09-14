@@ -100,10 +100,15 @@ export const CREDIT_WINDOW_DEFAULT = {
  * remove nothing from the union — not merely the open tail, the whole union survives into
  * every arm — so a handled arm cannot read `detail` or `daemon`, and an `assertNever`
  * default stays a type error after all five cases are written out rather than clearing
- * once they are. TypeScript stops treating `kind` as a discriminant the moment one
- * constituent types it `string`, and "any string but these five" is not a type
- * TypeScript can express. Measured on 5.9.3; `nysia-proto`'s `bindings` module records the
- * branded and pattern-literal tails that were tried on the way to that conclusion.
+ * once they are. The cause is the `string & {}` tail: a union collapses string literals
+ * into a plain `string`, and the intersection is the spelling that resists that, so
+ * `reason.kind` stays a union that still carries the tail and every constituent stays
+ * comparable with the literal it is compared to. Spelling the tail `string` is not the fix
+ * that narrowing makes it look like — it drops the other four constituents, but the tail
+ * survives every arm, so `detail` stays unreachable and `assertNever` still does not
+ * clear. "Any string but these five" is not a type TypeScript can express. Measured on
+ * 5.9.3; `nysia-proto`'s `bindings` module records the branded and pattern-literal tails
+ * that were tried on the way to that conclusion.
  *
  * So read a reason that arrived from a peer like this:
  *
