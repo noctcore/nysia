@@ -16,10 +16,12 @@
     "lint": "eslint . --max-warnings 0 && node tools/lint-meta/src/cli.ts",
     "test": "vitest run",
     "ts-drift": "node scripts/ts-drift.ts",
+    "sidecar": "node scripts/sidecar.ts stage",
     "prove:ts-drift": "node scripts/prove-ts-drift.ts",
     "prove:lint-meta": "node scripts/prove-lint-meta.ts",
     "prove:eslint-bans": "node scripts/prove-eslint-bans.ts",
-    "prove": "pnpm prove:ts-drift && pnpm prove:lint-meta && pnpm prove:eslint-bans"
+    "prove:sidecar": "node scripts/prove-sidecar.ts",
+    "prove": "pnpm prove:ts-drift && pnpm prove:lint-meta && pnpm prove:eslint-bans && pnpm prove:sidecar"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

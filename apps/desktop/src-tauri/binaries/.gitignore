@@ -1,0 +1,4 @@
+# The sidecar is built, never committed: it is the `nysia` binary for one target triple,
+# staged by `pnpm sidecar` (scripts/sidecar.ts) before any build of the desktop crate.
+*
+!.gitignore
