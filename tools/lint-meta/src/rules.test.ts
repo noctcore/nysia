@@ -299,6 +299,8 @@ describe('what a module binds from another', () => {
     expect(read("export { Terminal } from '@xterm/xterm';")).toEqual([]);
     expect(names("export { Terminal } from '@xterm/xterm';")).toEqual([['Terminal']]);
     expect(names("export * from '@xterm/xterm';")).toEqual([['*']]);
+    // Aliasing the namespace hands on exactly as much, so it reads as exactly as much.
+    expect(names("export * as xterm from '@xterm/xterm';")).toEqual([['*']]);
     expect(names("export type { Terminal } from '@xterm/xterm';")).toEqual([]);
     expect(names("export { type Terminal, FitAddon } from '@xterm/xterm';")).toEqual([
       ['FitAddon'],

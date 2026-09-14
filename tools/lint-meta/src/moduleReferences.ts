@@ -425,7 +425,7 @@ export function importedValues(file: string, source: string): ImportedValue[] {
 export interface ReExport {
   /** The module the values come from, as written. */
   readonly specifier: string;
-  /** The exported names, or `*` for `export * from`. */
+  /** The exported names, or `*` where the whole module is handed on, aliased or not. */
   readonly names: readonly string[];
   readonly line: number;
 }
@@ -453,14 +453,14 @@ export function reExports(file: string, source: string): ReExport[] {
       const specifier = literalText(node.moduleSpecifier);
       if (specifier !== undefined) {
         const clause = node.exportClause;
+        // `export * as ns from …` is `*` like the bare form: the local name it arrives under
+        // says nothing about what came with it, and everything did.
         const names =
-          clause === undefined
+          clause === undefined || ts.isNamespaceExport(clause)
             ? ['*']
-            : ts.isNamedExports(clause)
-              ? clause.elements
-                  .filter((element) => !element.isTypeOnly)
-                  .map((element) => (element.propertyName ?? element.name).text)
-              : [clause.name.text];
+            : clause.elements
+                .filter((element) => !element.isTypeOnly)
+                .map((element) => (element.propertyName ?? element.name).text);
         if (names.length > 0) {
           found.push({
             specifier,
