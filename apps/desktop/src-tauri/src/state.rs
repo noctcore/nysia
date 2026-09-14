@@ -788,8 +788,18 @@ impl Default for Client {
 fn sidecar() -> Result<PathBuf, DaemonError> {
     let exe = std::env::current_exe().map_err(|error| DaemonError::Spawn {
         message: format!("Nysia could not find its own program file: {error}"),
-        next_step: RUN_ONE_BY_HAND.to_owned(),
+        next_step: format!("Reinstall Nysia. {THEN_REOPEN}"),
     })?;
+    beside(&exe)
+}
+
+/// The runtime that belongs next to `exe`, checked.
+///
+/// Split from [`sidecar`] so the answer for a directory with no runtime in it can be tested:
+/// the one that matters is the *failure*, and a test runner cannot arrange for its own
+/// executable to live somewhere else. `target/<profile>/deps` happens to hold a `nysia` of
+/// cargo's own, so asking [`sidecar`] for the missing case in-process tests nothing.
+fn beside(exe: &std::path::Path) -> Result<PathBuf, DaemonError> {
     let beside = exe
         .parent()
         .map(|dir| dir.join(RUNTIME_BINARY))
@@ -798,7 +808,7 @@ fn sidecar() -> Result<PathBuf, DaemonError> {
                 "Nysia is installed at {}, which has no directory to hold the runtime it starts",
                 exe.display()
             ),
-            next_step: RUN_ONE_BY_HAND.to_owned(),
+            next_step: format!("Reinstall Nysia somewhere ordinary. {THEN_REOPEN}"),
         })?;
     if !beside.is_file() {
         return Err(DaemonError::Spawn {
@@ -807,15 +817,26 @@ fn sidecar() -> Result<PathBuf, DaemonError> {
                 beside.display()
             ),
             next_step: format!(
-                "Reinstall Nysia — this copy shipped without the `nysia` runtime it starts. {RUN_ONE_BY_HAND}"
+                "Reinstall Nysia — this copy shipped without the runtime it starts, which \
+                 belongs at {}. {THEN_REOPEN}",
+                beside.display()
             ),
         });
     }
     Ok(beside)
 }
 
-/// The step every spawn failure ends with: there is a way through that does not need a fix.
-const RUN_ONE_BY_HAND: &str = "Until then, start one yourself with `nysia --daemon`.";
+/// The sentence every spawn failure ends with.
+///
+/// **Not "run `nysia --daemon`".** That was advice for a developer: an installed app puts its
+/// runtime beside itself and nothing of the sort on `PATH`, so a user who followed it got
+/// "command not found" on top of the failure they already had. Where the path is known the
+/// caller names it; what is common to all of them is the second half, because the window
+/// **stops** on a failure it was told is permanent — `DaemonStore.run` returns rather than
+/// spawning a process every twenty seconds — so fixing the cause outside the window is only
+/// half of what the user has to do.
+const THEN_REOPEN: &str = "Then reopen Nysia: it stops trying once starting a daemon cannot \
+                           work.";
 
 /// What the user is told when no daemon could be reached or started.
 ///
@@ -852,10 +873,10 @@ fn spawn_failure(
             // sends the reader to look at something that was never the problem.
             next_step: match policy {
                 SpawnPolicy::IfAbsent { program } => format!(
-                    "Check that {} can be run on this machine. {RUN_ONE_BY_HAND}",
+                    "Check that {} can be run on this machine. {THEN_REOPEN}",
                     program.display()
                 ),
-                SpawnPolicy::Never => RUN_ONE_BY_HAND.to_owned(),
+                SpawnPolicy::Never => format!("Start a daemon yourself. {THEN_REOPEN}"),
             },
         },
         // It started and died, or started and never bound. The daemon writes why to its log
@@ -865,7 +886,7 @@ fn spawn_failure(
                 "Nysia started its runtime but it did not answer within {seconds} seconds"
             ),
             next_step: format!(
-                "The daemon wrote why to {}. {RUN_ONE_BY_HAND}",
+                "The runtime wrote why to {}. {THEN_REOPEN}",
                 endpoint.log_path().display()
             ),
         },
@@ -1253,12 +1274,83 @@ mod tests {
         }
     }
 
+    /// Every permanent failure names something the user can act on **and** tells them the
+    /// window has stopped.
+    ///
+    /// Both halves, because they are one instruction: `DaemonStore.run` returns on a
+    /// non-retryable failure rather than spawning a process every twenty seconds, so a next
+    /// step that ended at "start one yourself" would leave the reader in front of a window
+    /// that is never going to notice they did.
+    ///
+    /// And never `nysia --daemon` as a bare command: an installed app puts its runtime beside
+    /// itself and nothing on `PATH`, so that advice answers a user with `command not found`.
+    #[test]
+    fn a_permanent_failure_says_what_to_fix_and_that_the_window_has_stopped() {
+        let endpoint = crate::interop::scratch("steps");
+        let program = endpoint.runtime_dir().join("no-such-nysia-runtime");
+        let policy = SpawnPolicy::IfAbsent {
+            program: program.clone(),
+        };
+
+        let failures = [
+            spawn_failure(
+                &endpoint,
+                &policy,
+                EnsureError::Discovery(DiscoveryError::Spawn(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "refused",
+                ))),
+            ),
+            spawn_failure(
+                &endpoint,
+                &policy,
+                EnsureError::Discovery(DiscoveryError::NeverReady {
+                    endpoint: endpoint.listening().to_string(),
+                    seconds: 20,
+                }),
+            ),
+        ];
+
+        for failure in failures {
+            assert!(
+                !failure.retryable(),
+                "{failure:?} would have the window loop"
+            );
+            let steps = failure.next_steps().join(" ");
+            assert!(
+                steps.contains("reopen Nysia"),
+                "{failure:?} leaves the reader waiting on a window that has stopped: {steps}"
+            );
+            assert!(
+                !steps.contains("`nysia --daemon`"),
+                "an installed app has no `nysia` on PATH: {steps}"
+            );
+        }
+
+        // The sidecar's own failure names the file that is missing, which is the only thing
+        // that tells a reader whether reinstalling is really the answer. Asked of a directory
+        // that has no runtime in it, because the one the test runner lives in does.
+        let bare = endpoint.runtime_dir().join("Nysia.exe");
+        let missing = beside(&bare).expect_err("nothing was installed beside that");
+        let steps = missing.next_steps().join(" ");
+        assert!(steps.contains(RUNTIME_BINARY), "{steps} names no runtime");
+        assert!(steps.contains("reopen Nysia"), "{steps}");
+        assert!(
+            !missing.retryable(),
+            "a missing runtime does not appear by waiting"
+        );
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
     /// The `nysia` that `cargo` built for this run.
     ///
     /// Derived from the test runner's own path — `target/<profile>/deps/<test>.exe` — rather
     /// than from `CARGO_MANIFEST_DIR`, which must never be baked into anything path-shaped
     /// (traps register #9) and would in any case name the source tree rather than the build.
     fn runtime_binary() -> PathBuf {
+        // The same name production resolves, one directory up: cargo's own output, which no
+        // build of the desktop crate writes over, so what this test starts is always what
+        // cargo just compiled.
         let exe = std::env::current_exe().expect("a test runner knows its own path");
         exe.parent()
             .and_then(std::path::Path::parent)
