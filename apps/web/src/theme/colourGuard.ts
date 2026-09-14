@@ -169,8 +169,9 @@ const PALETTE_CLASS = new RegExp(
  *    of the ones it does to consume later. The comma separator is spelled as part of a
  *    named call now; before it was, both of those were caught, but by the accident that
  *    caught every unrelated two-argument call with a property name in front of a string.
- *    Three setters are named, which is the DOM's three; a project's own wrapper around one
- *    of them is the shape most likely to land here, and it is indistinguishable from the
+ *    Four call shapes are named — `setProperty`, `setAttribute`, the namespaced setter whose
+ *    first argument is skipped, and the typed-OM map's `set`; a project's own wrapper around
+ *    any of them is the shape most likely to land here, and it is indistinguishable from the
  *    false positive that accident was — same two arguments, different intent, nothing in
  *    the text to tell them apart.
  *  - a colour carried inside a `url()`, which is set aside as a path before the words are
@@ -202,10 +203,14 @@ const PALETTE_CLASS = new RegExp(
  *    which fires once per entry. The ANSI words are introducers because xterm's theme keys
  *    are spelled that way, and a key called `red` set to a sentence containing the word is
  *    indistinguishable from one set to a colour.
- *  - a ternary between two quoted colour names with no property in front of it at all. The
- *    first branch reads as a quoted key introducing the second. Inside a JSX container that
- *    reading lands on the right answer for the wrong reason; on its own it is a false
- *    positive, and it is the residue of the same accident the brace fix stopped relying on.
+ *  - a quoted colour name followed by a colon, anywhere, with no painting property in front
+ *    of it at all: the name reads as a quoted key and whatever literal follows reads as its
+ *    value. A ternary between two colour names is one spelling of it, and only when the
+ *    *first* branch is one of the introducer words — a ternary headed by any other colour
+ *    name is quiet, which is the give-away that this is the key form and not a branch form.
+ *    A `switch` case returning a display string is another, and more likely to be written.
+ *    Inside a JSX container the same reading used to land on the right answer for the wrong
+ *    reason; the brace fix stopped the rule depending on that, and this is what is left.
  *  - a comparison operand that spells a colour, since every literal in the span is now read
  *    and nothing in the text distinguishes an operand from a branch. Half of this was here
  *    before: when the operand happened to be the last literal in range it was taken as the
@@ -221,7 +226,26 @@ const PALETTE_CLASS = new RegExp(
  *    working that out by pattern is how a scanner comes to mistake a regex literal for a
  *    comment — this module has one carrying a backtick — and fall silent over everything
  *    after it. That failure is quiet and this one is not, so this one stays. Marking a
- *    property up in prose is safe; putting a separator after it is what fires.
+ *    property up in prose is safe; putting a separator after it is what fires. *
+ * ## Why this list keeps growing
+ *
+ * Read the two lists above together and they say one thing. Every round of review has found
+ * another *position* this rule reads wrongly — a property flush against its colon, then one
+ * behind a ternary, then a quoted key, then a custom property, then a JSX container, then
+ * whichever branch the quantifier reached last — and each was closed by spelling that
+ * position out. That is not a run of bad luck. "Is this string the value of a painting
+ * property" is a question about syntax, and every answer here is a pattern over characters.
+ * A pattern can be made right about a position somebody has thought of; it cannot be made
+ * right about position, because it has no idea what one is. The false positives say the
+ * same thing from the other side: an operand, a branch, a key and a comment are four
+ * different things that look identical to a regex.
+ *
+ * The answer is to walk a TypeScript syntax tree — find JSX attributes, object-literal
+ * properties and assignment targets whose key paints, and look at the value — which is the
+ * same argument that took the architecture rules from a lexer to a parser. No spans, no
+ * greedy quantifiers, no ordering accidents, and most of the residue above stops existing
+ * rather than being described. That is deliberate separate work, tracked as its own issue,
+ * and not another patch on this one.
 
  */
 const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
@@ -263,7 +287,8 @@ const PAINTING_PROPERTY =
  * bracket span full of colour names, and rule 4 would report this module as its own worst
  * offender. The eight ANSI names are ordinary English words, which is survivable only
  * because they still have to introduce a *value* that names a colour — a key called `red`
- * set to something that is not a colour stays quiet.
+ * set to something that does not contain a colour word stays quiet. Set to something that
+ * merely mentions one, it does not; that is in the false positives, with a case.
  *
  * `background`, `cursor` and `overviewRulerBorder` overlap the CSS list either exactly or
  * inside a longer word; the boundary guard means the longer spellings have to be written
