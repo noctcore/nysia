@@ -625,14 +625,28 @@ Each of these cost someone a day already.
    such a step would have to guess is the one thing a package script cannot see, and guessing
    wrong deletes the runtime beside a window somebody is running.
 
-   **When it cannot spawn, the window says so and stops.** A missing sidecar, a file that will
-   not execute, a daemon that starts and never binds — none of them improve by waiting, so
-   each becomes a non-retryable `DaemonError::Spawn` carrying the path that was tried or the
-   log that says why. `DaemonStore.run` **returns** on that answer rather than looping: a
-   retry re-takes the spawn lock, starts a process and waits twenty seconds for it, so a
-   window that kept trying would start one every twenty-odd seconds for its whole life and
-   append to the daemon log each time. The next steps say to reopen Nysia, because a window
-   that has stopped is not going to notice the fix on its own.
+   **When it cannot spawn, the window says so and stops — and "cannot" is now two cases, not
+   three.** A missing sidecar and a file that will not execute do not improve by waiting, so
+   each is still a non-retryable `DaemonError::Spawn` carrying the path that was tried or the
+   log that says why. `DaemonStore.run` **returns** on that answer rather than looping: a retry
+   re-takes the spawn lock, starts a process and waits twenty seconds for it, so a window that
+   kept trying would start one every twenty-odd seconds for its whole life and append to the
+   daemon log each time. The next steps say to reopen Nysia, because a window that has stopped
+   is not going to notice the fix on its own.
+
+   **A runtime that ran and has not answered is the third case, and it was wrong to call it
+   permanent.** A readiness wait bounds one call; it is not a verdict on the daemon, and
+   Defender scanning a binary it has never seen pushes a first bind past twenty seconds on
+   exactly the machine where a first launch happens. So that case is `DaemonError::Starting`,
+   which is **retryable**, and the window keeps probing on the store's backoff — 250ms, 500ms,
+   1s, 2s, then 5s — for `PROBES_BEFORE_RESPAWN` (12) probes, a little over three quarters of a
+   minute on top of the readiness wait that came first. Then it starts one more runtime, and
+   only one: `RUNTIME_STARTS` is 2, because a runtime can die on its way up for a reason that
+   does not repeat and an unbounded supply of them is the defect this bound closes, arriving a
+   minute at a time instead of twenty seconds at a time. After the second the failure is
+   permanent, the store ends its reconnect loop, and the notice on screen is the last word:
+   *Nysia started its runtime 2 times and none of them answered*, with the log named and
+   reopening offered.
 
    **Only two dial failures mean "nothing is listening".** `NotFound`, and on Unix
    `ConnectionRefused` — a socket file outlives its daemon and refuses. Everything else is an
@@ -801,9 +815,17 @@ Each of these cost someone a day already.
    The muted set is every path by which parsing output reaches xterm's `triggerDataEvent`: DA1,
    DA2, DSR, DECDSR, XTVERSION, DECRQM in both forms, the kitty keyboard query, DECRQSS, the
    three `CSI t` options that report, and an `OSC 4/10/11/12` whose value is `?`. Sequences that
-   also *act* are read by parameter, so a title push and a palette set still run. No ESC handler
-   is registered: xterm has no ESC-level responder to displace, and claiming a guarantee about a
-   handler that does not exist would be worse than the gap.
+   also *act* are read by parameter, so a palette set still runs and a title push is left to the
+   built-in. No ESC handler is registered: xterm has no ESC-level responder to displace, and
+   claiming a guarantee about a handler that does not exist would be worse than the gap.
+
+   **Two of those are muted for safety rather than because they answer**, which is worth saying
+   because the difference is one option either way. `kittyKeyboardQuery` returns without writing
+   unless `vtExtensions.kittyKeyboard` is set, and `CSI t`'s reports are refused by
+   `paramToWindowOption` against `windowOptions` — xterm defaults both to `{}` and `surface/xterm.ts`
+   sets neither, so neither reaches `triggerDataEvent` as the app is configured today. They stay in
+   the table: a default an ordinary caller can undo with one option is a suggestion (CLAUDE.md §6),
+   and the `CSI t` split is the shape the app would need the moment a window option is turned on.
 
    **The ordering it rests on was read out of xterm's source, not its documentation** — the same
    standard the boundary itself was held to, and the reason that one held up. In
@@ -818,10 +840,10 @@ Each of these cost someone a day already.
    **The replay boundary stays, as defence in depth, and the reasons are not sentiment.** Two
    things the mute cannot do. Real keystrokes typed at a pane that is still painting history are
    still dropped, which is the gate's own claim and nothing to do with queries. And the gate is
-   the layer that does not need a table to be complete: the mute is an enumerated list living in
-   `surface/xterm.ts`, the one module the node-only tests cannot exercise against a real terminal
-   (D-18), while the gate takes *everything* `onData` produces during a replay whatever produced
-   it. An xterm bump that adds a responder, or moves the dispatch order the mute is read against,
+   the layer that does not need a table to be complete: the mute is an enumerated list, applied from
+   `surface/xterm.ts` — the one module the node-only tests cannot exercise against a real terminal
+   (D-18), which is why the line that applies it is pinned by a lint-meta rule of its own — while
+   the gate takes *everything* `onData` produces during a replay whatever produced it. An xterm bump that adds a responder, or moves the dispatch order the mute is read against,
    lands on a closed channel rather than in the shell. Different failure, different layer. The
    deadline is still a backstop rather than the mechanism, which is what separates it from the
    time-based window that was rejected.
@@ -829,9 +851,12 @@ Each of these cost someone a day already.
    **What now goes unanswered, said plainly.** The daemon answers DA1, DA2, DSR 5/6, DECRQM and
    `CSI 18 t` — `alacritty_terminal`'s `identify_terminal`, `device_status`, `report_mode` and
    `text_area_size_chars`, all of which reach the pty through the reply sink. It does **not**
-   answer XTVERSION, DECRQSS, the kitty keyboard query, `CSI 14/16 t` or an OSC colour query:
-   alacritty either has no handler or raises an event (`TextAreaSizeRequest`, `ColorRequest`)
-   that the sink deliberately drops. Those five are now answered by nobody. That is the right
+   answer XTVERSION, DECRQSS, `CSI 14/16 t` or an OSC colour query: alacritty either has no
+   handler or raises an event (`TextAreaSizeRequest`, `ColorRequest`) that the sink deliberately
+   drops. Those four are now answered by nobody. The kitty keyboard query belongs in neither
+   list — `alacritty_terminal`'s `report_keyboard_mode` returns early unless `kitty_keyboard` is
+   on and 0.26 defaults it to `false`, so as both sides are configured nobody answered it before
+   this change either. That is the right
    direction under D-7 — the window's palette, cell size and renderer version are not the
    session's, and an answer from the cache would have been wrong as often as it was redundant —
    but it is a daemon gap rather than a non-issue, and it is recorded here so the next program
