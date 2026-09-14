@@ -419,11 +419,6 @@ impl OwnedSession {
         &self.vt
     }
 
-    /// Stop routing to a stream.
-    pub fn detach(&self, stream: nysia_proto::StreamId) {
-        lock(&self.sinks).retain(|sink| sink.stream_id() != stream);
-    }
-
     /// Tear down the process tree and stop the pump.
     ///
     /// Ordered deliberately. The pump is told to stop first so it stops holding the output
