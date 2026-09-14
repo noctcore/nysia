@@ -259,6 +259,32 @@ describe('a renderer that answers queries the daemon has already answered', () =
     }
   });
 
+  it('obliges a renderer that arrives through a dynamic import or a require', () => {
+    // Scoping the obligation to a written-down name closed nothing on a module that never
+    // writes one down. Both of these were reported before the narrowing and must stay so:
+    // splitting a heavy renderer out of the main bundle is ordinary, and a terminal that
+    // arrives late answers the queries it parses like any other.
+    const lazy = 'apps/web/src/transport/surface/lazy.ts';
+    const violations = noUnmutedRenderer(fixture('trips'), [lazy]);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]?.line).toBe(6);
+    expect(violations[0]?.message).toContain('loads @xterm/xterm at runtime');
+
+    const required = 'apps/web/src/transport/surface/legacy.cjs';
+    const scratch = mkdtempSync(join(tmpdir(), 'lint-meta-lazy-'));
+    try {
+      mkdirSync(join(scratch, 'apps/web/src/transport/surface'), { recursive: true });
+      writeFileSync(
+        join(scratch, required),
+        "const { Terminal } = require('@xterm/xterm');\nmodule.exports = () => new Terminal();\n",
+        'utf8',
+      );
+      expect(noUnmutedRenderer(scratch, [required])).toHaveLength(1);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
   it('reports a module that hands the constructor on under its own name', () => {
     // A re-export launders the specifier: whoever builds the terminal then imports it from
     // here, and a rule that matches on specifiers stops seeing the library. Reported rather
