@@ -9,8 +9,8 @@ const opener = `/*`;
 const store = await import('../store/StoreContext');
 
 /*
- * As in `regex-backtick.ts`, this closer is what makes the fixture discriminating: a
- * runaway comment above ends here rather than at end of file, so only scanning the
- * substitution keeps the import visible.
+ * The closer that made this fixture discriminating while a scanner read the file: a runaway
+ * comment above ended here rather than at end of file. Kept, because the shape is what the
+ * fixture is about.
  */
 export const reached = [label, opener, store];

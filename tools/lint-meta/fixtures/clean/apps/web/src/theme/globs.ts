@@ -3,8 +3,9 @@
 // A glob import can hand back a module the specifier never names, so rule (d) reports one
 // by default. Two shapes cannot reach the provider and are exempt:
 //
-//   - `query: '?raw'`, which yields the file's source text rather than a module;
-//   - a pattern restricted to extensions that cannot carry commands.
+//   - `query: '?raw'` in the options, which yields source text rather than modules;
+//   - a pattern that reaches no module in the tree — this one reaches `index.css` and
+//     nothing else, which is what makes it a control rather than a vacuous pass.
 const sources = import.meta.glob('../**/*.{ts,tsx}', {
   query: '?raw',
   import: 'default',
@@ -20,5 +21,6 @@ export const scanned = [sources, stylesheets];
 // "report every glob" wearing a proof.
 const icons = import.meta.glob(['../**/*.css', '../**/*.svg']);
 const rawSources = import.meta.glob(['../**/*.ts', '../store/*.tsx'], { query: '?raw' });
+const nowhere = import.meta.glob('../nowhere/*.ts');
 
-export const alsoScanned = [icons, rawSources];
+export const alsoScanned = [icons, rawSources, nowhere];

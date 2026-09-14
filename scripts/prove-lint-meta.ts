@@ -134,14 +134,14 @@ expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/main.helper.ts
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dyn-template.ts', 5);
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dyn-multiline.ts', 6);
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dyn-blockcomment.ts', 5);
-expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/dyn-glob.ts', 5);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/dyn-glob.ts', 5);
 
-// The false-negative guards. Scanning a whole file rather than a line at a time means the
-// scanner has to know where comments end, and a literal that opens one it never closes
-// blanks every line below it — the rule then reports nothing and the gate reports success.
-// Each literal sits alone in its own file: a later quote or `*/` anywhere would close the
-// runaway and rescue the import by accident, which is how a first attempt at the astral
-// fixtures passed while the defect was still there.
+// Every spelling that defeated the hand-written scanner this rule used to be, kept as
+// regression cases. A string holding a comment opener, a regex holding a backtick, a
+// substitution holding one: each blanked the call below it out of existence while the gate
+// reported success, and each took a round of review to find. None of them is a case for a
+// parser — a comment is trivia and a string is a string — which is the argument for the
+// parser, so they stay as the record of what a scanner costs.
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/str-block-open.ts', 9);
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/str-line-open.ts', 4);
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/str-template-open.ts', 4);
@@ -153,14 +153,29 @@ expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/str-escaped-qu
 // the provider. A rule written to close "narrower than its words" was narrower than its
 // words, and its proof never noticed because it only ever passed a single-literal call. Both
 // cases below put the innocent pattern FIRST, which is the input that got through.
-expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/glob-array-first-innocent.ts', 10);
-expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/glob-array-leading-negation.ts', 4);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/glob-array-first-innocent.ts', 10);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/glob-array-leading-negation.ts', 4);
 
 // Two more ways to leak a `/*` into the scan, both of which end in the same runaway comment
 // blanking every line below. A backtick is the third quoting character and a template may
 // span lines, so neither is covered by the same-line rule that defuses `'` and `"`.
-expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/regex-backtick.ts', 11);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/regex-backtick.ts', 13);
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/template-nested.ts', 9);
+
+// The two that ended the hand-written scanner.
+//
+// A `?` in a glob is the single-character wildcard, not a URL query separator, so reading an
+// extension out of the pattern by hand exempted `*.t?x` while the matcher returns
+// `StoreProvider.tsx`. The glob question is put to a matcher over the real tree now, and
+// reverting that turns this case red on its own.
+//
+// The second is an ordinary component line — two sibling elements, the second with a
+// template prop holding a Tailwind fraction. The self-closing slash opened a regex scan that
+// swallowed the template's opening backtick, and everything after it was read one quote out
+// of step until the import vanished. There is nothing left to revert for that one: the
+// scanner is deleted rather than patched, which is the point.
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/chrome/glob-wildcard-question.ts', 7);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/jsx-sibling-template.tsx', 10);
 
 expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
 process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');

@@ -31,6 +31,11 @@
  * - **`no-restricted-imports` does not cover `require()`.** ESLint owns `import` and
  *   `export … from`; lint-meta owns `require()`, dynamic `import()` and `import.meta.glob`.
  *   Neither layer is complete alone, and that split is deliberate rather than an oversight.
+ * - **The TypeScript and JavaScript rules parse; they no longer scan.** Three rounds of
+ *   review found a spelling the hand-written scanner mishandled, and each fix introduced the
+ *   next — the last was an ordinary component line whose self-closing slash opened a regex
+ *   scan and blanked a store import out of existence. `moduleReferences.ts` walks a syntax
+ *   tree instead, where a comment is trivia and a string is not an import.
  * - **Rule (d) reads the specifier, so a specifier that is not a literal is invisible.**
  *   `import(name)`, `import('../store/' + name)` and a template with a `${…}` in it are all
  *   beyond it, and ESLint is equally blind to the static equivalents. This used to be
@@ -38,10 +43,11 @@
  *   matched only a single-line quoted literal, which over-claimed four spellings that
  *   passed every gate (#19); the rule now reads whole files with comments blanked, and
  *   `import.meta.glob` — which need not name the file at all — is reported unless **every**
- *   pattern in the call shows it cannot return a module. "Every" is load-bearing and was
- *   learned the same way: reading one pattern out of an array let a stylesheet in front of
- *   the store exempt a glob that returned the provider, inside the change that fixed the
- *   same shape one rule over.
+ *   pattern in the call reaches no module, asked of a glob matcher over the files that
+ *   exist. Both halves of that were learned the hard way: reading one pattern out of an
+ *   array let a stylesheet in front of the store exempt a glob that returned the provider,
+ *   and reading the extension out of a pattern by hand split `*.t?x` on the question mark as
+ *   though a glob carried a URL query, where it is the single-character wildcard.
  * - **A file ESLint's `ignores` excludes is covered only by rule (a)'s line scan**, which is
  *   weaker than ESLint's AST.
  *

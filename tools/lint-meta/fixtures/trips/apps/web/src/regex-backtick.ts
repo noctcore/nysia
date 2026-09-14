@@ -1,11 +1,13 @@
 // A regex literal holding a backtick.
 //
-// The doc for `blankJsComments` claimed a regex could only ever hold a quote, which the
-// same-line rule defuses. A backtick is the third quoting character and a template may span
+// The hand-written scanner claimed a regex could only ever hold a quote, which its
+// same-line rule defused. A backtick is the third quoting character and a template may span
 // lines, so the backtick below paired with the one on the next line, the scanner stepped
 // over both as one "literal", and the `/*` left behind opened a block comment that swallowed
-// the import under it. The rule then reported nothing — the over-blanking false negative
-// this file names as the failure that matters.
+// the import under it — a false negative, with the gate reporting success.
+//
+// Kept as a regression case. A parser has no opinion about quoting characters: this is a
+// RegularExpressionLiteral, that is a TemplateExpression, and the call below is a call.
 const re = /[`]/;
 const opener = `/*`;
 const store = await import('../store/StoreContext');
