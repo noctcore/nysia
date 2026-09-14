@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StreamId } from '../frames';
 import {
   HIDDEN_BUFFER_CAP_BYTES,
+  REPLAY_BOUNDARY_DEADLINE_MS,
   RESET_SEQUENCE,
   type TerminalSurface,
 } from './TerminalSurface';
@@ -193,6 +194,9 @@ describe('the surface adapter contract', () => {
     const typed: string[] = [];
     const stop = fixture.surface.onInput((data) => typed.push(data));
     fixture.surface.show(host());
+    // A pane is not interactive until the daemon's replay has been parsed; see the boundary
+    // suite below for why, and for what becomes of anything typed before this.
+    fixture.surface.replayEnded();
 
     fixture.latest().type('ls\r');
     expect(typed).toEqual(['ls\r']);
@@ -560,6 +564,7 @@ describe('a surface whose context is lost', () => {
 
     surface.onInput(typed);
     surface.show(host());
+    surface.replayEnded();
     losses[0]?.();
 
     built[1]?.type('x');
@@ -567,5 +572,240 @@ describe('a surface whose context is lost', () => {
 
     built[0]?.type('x');
     expect(typed, 'the disposed terminal must not still be heard').toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The cursor-position query, and the answer a terminal gives it.
+ *
+ * `ESC[6n` is what a shell writes to find out where it is, and every one the child ever
+ * wrote is in the scrollback the daemon replays. The reply is the byte sequence that broke
+ * the re-attach path: ConPTY reads the `…R` as F3, and `cmd` treats F3 as
+ * recall-previous-command, so it arrived at the shell as a keypress nobody made.
+ */
+const CURSOR_QUERY = '[6n';
+const CURSOR_REPLY = '[1;1R';
+
+/** Device attributes: the other query a replay routinely carries. */
+const DEVICE_QUERY = '[c';
+const DEVICE_REPLY = '[?1;2c';
+
+/**
+ * A terminal that answers the queries it parses, the way a real one does.
+ *
+ * This is the whole reason the defect existed and the only stub that can prove it is fixed.
+ * {@link StubTerminal} records writes and never reacts to them, so a test written against it
+ * passes whether input is gated or not. Here the parse has the one side effect that matters:
+ * reaching a query emits the answer on `onData` — **before** the write's callback fires,
+ * because that is the order xterm has, and a stub that answered afterwards would make a
+ * broken gate look like a working one.
+ *
+ * It cannot tell a replayed query from a live one. Neither can xterm. That is the point.
+ */
+class AnsweringTerminal extends StubTerminal {
+  #queue: { data: Uint8Array | string; done?: (() => void) | undefined }[] = [];
+
+  override write(data: Uint8Array | string, done?: () => void): void {
+    this.writes.push(data);
+    this.#queue.push({ data, done });
+  }
+
+  override flush(): void {
+    for (const { data, done } of this.#queue.splice(0, this.#queue.length)) {
+      const parsed = typeof data === 'string' ? data : new TextDecoder().decode(data);
+      if (parsed.includes(CURSOR_QUERY)) {
+        this.type(CURSOR_REPLY);
+      }
+      if (parsed.includes(DEVICE_QUERY)) {
+        this.type(DEVICE_REPLY);
+      }
+      done?.();
+    }
+  }
+}
+
+interface GateHarness {
+  readonly surface: XtermSurface;
+  /** Everything the surface forwarded as input. */
+  readonly forwarded: string[];
+  /** Every `(stream, dropped)` pair the deadline reported. */
+  readonly timeouts: [StreamId, number][];
+  readonly built: AnsweringTerminal[];
+  latest(): AnsweringTerminal;
+}
+
+function gateHarness(stream: StreamId = 1): GateHarness {
+  const built: AnsweringTerminal[] = [];
+  const forwarded: string[] = [];
+  const timeouts: [StreamId, number][] = [];
+
+  const surface = new XtermSurface({
+    stream,
+    createTerminal: ({ cols, rows, renderer }) => {
+      const terminal = new AnsweringTerminal(renderer, cols, rows);
+      built.push(terminal);
+      return terminal;
+    },
+    pool: new WebglPool(policyFor('windows')),
+    onRendered: () => {},
+    onReplayTimeout: (which, dropped) => timeouts.push([which, dropped]),
+  });
+  surface.onInput((data) => forwarded.push(data));
+
+  return {
+    surface,
+    forwarded,
+    timeouts,
+    built,
+    latest: () => {
+      const last = built.at(-1);
+      if (!last) {
+        throw new Error('no terminal has been built');
+      }
+      return last;
+    },
+  };
+}
+
+describe('the replay boundary holds input back', () => {
+  it('drops the answer to a query that was in the replayed scrollback', () => {
+    // The defect, reproduced. Without the gate this assertion reads `[CURSOR_REPLY]`, that
+    // string reaches `terminal_send`, ConPTY turns it into F3, and the pane comes back after
+    // a relaunch showing a command the user never typed.
+    const fixture = gateHarness();
+    fixture.surface.show(host());
+    fixture.surface.write(text.encode(`a prompt ${CURSOR_QUERY} and more`));
+    fixture.latest().flush();
+
+    expect(fixture.forwarded).toEqual([]);
+    expect(fixture.surface.inputDroppedWhileReplaying).toBe(CURSOR_REPLY.length);
+  });
+
+  it('stays shut while the marker is ahead of the parser', () => {
+    // **The timing claim, and the reason the gate is not in Rust.** The daemon's reader sees
+    // the boundary and hands it on long before the renderer has parsed the bytes it follows,
+    // so "the marker arrived" and "the replay has been answered" are different moments. A
+    // gate that opened on the first of them would forward every reply and fix nothing.
+    const fixture = gateHarness();
+    fixture.surface.show(host());
+    fixture.surface.write(text.encode(`history ${CURSOR_QUERY}`));
+
+    fixture.surface.replayEnded();
+    expect(fixture.surface.acceptsInput).toBe(false);
+
+    fixture.latest().flush();
+    expect(fixture.forwarded).toEqual([]);
+    expect(fixture.surface.acceptsInput).toBe(true);
+  });
+
+  it('answers a live query normally once the boundary has been parsed', () => {
+    // The property the two rejected workarounds would have broken. Stripping query sequences
+    // from every write would silence this one too, and a full-screen program that asks where
+    // the cursor is and never hears back hangs.
+    const fixture = gateHarness();
+    fixture.surface.show(host());
+    fixture.surface.write(text.encode(`history ${DEVICE_QUERY}`));
+    fixture.surface.replayEnded();
+    fixture.latest().flush();
+    expect(fixture.forwarded).toEqual([]);
+
+    fixture.surface.write(text.encode(`live ${DEVICE_QUERY}`));
+    fixture.latest().flush();
+    expect(fixture.forwarded).toEqual([DEVICE_REPLY]);
+  });
+
+  it('opens at once for a session with no scrollback to replay', () => {
+    // A brand-new session replays nothing, so the marker can be the first frame its stream
+    // ever carries. There is no write to wait on and nothing that could have answered, and a
+    // gate that waited anyway would leave every fresh pane dead for its whole deadline.
+    const fixture = gateHarness();
+    fixture.surface.show(host());
+    fixture.surface.replayEnded();
+    expect(fixture.surface.acceptsInput).toBe(true);
+
+    fixture.latest().type('ls');
+    expect(fixture.forwarded).toEqual(['ls']);
+  });
+
+  it('splits a hidden buffer at the boundary when the pane is revealed', () => {
+    // A hidden pane parses nothing, so nothing answers while it is hidden — the replayed
+    // queries sit in the transient buffer, and it is `show` that feeds them to a fresh
+    // parser. The seam has to survive the wait, or revealing a background pane re-creates the
+    // whole defect at the moment it becomes visible.
+    const fixture = gateHarness();
+    fixture.surface.write(text.encode(`history ${CURSOR_QUERY}`));
+    fixture.surface.replayEnded();
+    expect(fixture.surface.acceptsInput).toBe(false);
+
+    fixture.surface.write(text.encode(`live ${DEVICE_QUERY}`));
+    fixture.surface.show(host());
+    fixture.latest().flush();
+
+    // The replayed cursor query went nowhere; the live device query was answered.
+    expect(fixture.forwarded).toEqual([DEVICE_REPLY]);
+    expect(fixture.surface.acceptsInput).toBe(true);
+  });
+
+  it('opens on its deadline when the marker never arrives, and says so', () => {
+    // The bounded half. A daemon that violated its own protocol, or an outbox that swallowed
+    // the frame, must not leave a pane refusing input for ever — and must not open in silence
+    // either, because the keystrokes typed in the meantime are gone.
+    vi.useFakeTimers();
+    try {
+      const fixture = gateHarness(7);
+      fixture.surface.show(host());
+      fixture.latest().type('hello');
+      expect(fixture.forwarded).toEqual([]);
+      expect(fixture.timeouts).toEqual([]);
+
+      vi.advanceTimersByTime(REPLAY_BOUNDARY_DEADLINE_MS);
+
+      expect(fixture.surface.acceptsInput).toBe(true);
+      expect(fixture.timeouts).toEqual([[7, 'hello'.length]]);
+
+      fixture.latest().type('ls');
+      expect(fixture.forwarded).toEqual(['ls']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stands the deadline down once the boundary has been parsed', () => {
+    // A timer left armed on a pane that opened normally would put a notice about a failure
+    // that did not happen in front of the user five seconds into every session.
+    vi.useFakeTimers();
+    try {
+      const fixture = gateHarness();
+      fixture.surface.show(host());
+      fixture.surface.write(text.encode('history'));
+      fixture.surface.replayEnded();
+      fixture.latest().flush();
+      expect(fixture.surface.acceptsInput).toBe(true);
+
+      vi.advanceTimersByTime(REPLAY_BOUNDARY_DEADLINE_MS * 2);
+      expect(fixture.timeouts).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not leave a hidden pane waiting on a parse that will never happen', () => {
+    // Hiding drops the write queue with the terminal, so callbacks for chunks already issued
+    // never fire. A gate still counting them would sit shut until its deadline and report a
+    // daemon failure that never occurred.
+    vi.useFakeTimers();
+    try {
+      const fixture = gateHarness();
+      fixture.surface.show(host());
+      fixture.surface.write(text.encode(`history ${CURSOR_QUERY}`));
+      fixture.surface.replayEnded();
+      fixture.surface.hide();
+
+      expect(fixture.surface.acceptsInput).toBe(true);
+      vi.advanceTimersByTime(REPLAY_BOUNDARY_DEADLINE_MS * 2);
+      expect(fixture.timeouts).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

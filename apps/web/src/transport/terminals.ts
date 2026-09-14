@@ -48,6 +48,7 @@ export class TerminalRouter {
   readonly #pool: WebglPool;
   #onBell: (stream: StreamId) => void = () => {};
   #onExit: (stream: StreamId) => void = () => {};
+  #onReplayTimeout: (stream: StreamId, droppedChars: number) => void = () => {};
 
   constructor(options: {
     readonly bridge: DaemonBridge;
@@ -75,13 +76,24 @@ export class TerminalRouter {
     this.#pool.adopt(policyFor(platform));
   }
 
-  /** Be told when a session rings its bell or its child exits. */
+  /**
+   * Be told when a session rings its bell, its child exits, or a replay never ended.
+   *
+   * `replayTimeout` is the observable half of the input gate. A surface holds input shut
+   * from the moment it is built until the daemon's `replay_end` frame has been parsed, and
+   * if that frame never arrives the deadline opens the gate anyway — a pane that refused
+   * input for ever would be worse than the defect the gate closes. But it must not open in
+   * silence: keystrokes were dropped, and "the first few seconds of typing did nothing" with
+   * no notice anywhere is how a user concludes the window is broken.
+   */
   on(events: {
     readonly bell?: (stream: StreamId) => void;
     readonly exit?: (stream: StreamId) => void;
+    readonly replayTimeout?: (stream: StreamId, droppedChars: number) => void;
   }): void {
     this.#onBell = events.bell ?? this.#onBell;
     this.#onExit = events.exit ?? this.#onExit;
+    this.#onReplayTimeout = events.replayTimeout ?? this.#onReplayTimeout;
   }
 
   /**
@@ -106,6 +118,7 @@ export class TerminalRouter {
       pool: this.#pool,
       createTerminal: this.#createTerminal,
       onRendered: (which, bytes) => this.#rendered(which, bytes),
+      onReplayTimeout: (which, dropped) => this.#onReplayTimeout(which, dropped),
     });
     this.#surfaces.set(stream, surface);
     return surface;
@@ -148,6 +161,20 @@ export class TerminalRouter {
             // not two sources of truth — the daemon remains the only one — and the
             // alternative was this side running on compiled-in defaults for ever.
             this.#adopt(frame.payload);
+            break;
+          case 'replay_end':
+            // The seam between the scrollback the daemon replayed and what the child writes
+            // next. It paints nothing; what it does is tell this pane that the bytes ahead of
+            // it are the last of the replay, so the surface can stop swallowing what the
+            // terminal reports once it has finished parsing them. Until then everything
+            // `onData` produces is xterm answering a query it found in the history — see
+            // `XtermSurface` for the whole chain and what it costs.
+            //
+            // `surface(stream)` rather than a lookup, so a session with *no* scrollback still
+            // gets its gate opened: the marker can be the first frame that stream ever
+            // delivers, and a pane built lazily on the next byte would have opened on the
+            // deadline instead.
+            this.surface(stream).replayEnded();
             break;
           // Shell-integration state. Nothing here paints it yet.
           case 'osc133':

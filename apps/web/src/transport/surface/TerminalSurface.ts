@@ -32,6 +32,17 @@ export interface TerminalSurface {
   readonly visible: boolean;
 
   /**
+   * Whether what the terminal reports is forwarded yet.
+   *
+   * `false` from construction until the replay has been parsed — see
+   * {@link TerminalSurface.replayEnded}. On the interface rather than left private because it
+   * is the one piece of gate state a caller can honestly need: a pane that is shut is a pane
+   * that is dropping what the user types, and a surface that hid that would make the cost
+   * unmeasurable.
+   */
+  readonly acceptsInput: boolean;
+
+  /**
    * Draw terminal output.
    *
    * The bytes are the payload of one or more `output` frames, escape sequences intact. The
@@ -71,8 +82,25 @@ export interface TerminalSurface {
    *
    * Returns an unsubscribe function. The caller forwards the data to the daemon; a surface
    * never talks to a socket itself.
+   *
+   * **Nothing is reported until the replay is over.** See {@link TerminalSurface.replayEnded}:
+   * a terminal answers the queries it parses, it cannot tell a replayed one from a live one,
+   * and those answers arrive here indistinguishable from keystrokes. A surface holds this
+   * channel shut until it knows the bytes being parsed are live.
    */
   onInput(handler: (data: string) => void): () => void;
+
+  /**
+   * The daemon's replay for this stream is over; everything after it is live.
+   *
+   * Called when the `replay_end` frame arrives. What the surface owes it is **not** to open
+   * the input channel here, but to open it once the renderer has finished *parsing* the
+   * bytes that came before — those are different moments. A terminal parses on its own
+   * schedule, so the marker reaches this method while the replayed bytes are still queued,
+   * and a surface that opened on arrival would still forward every answer to a replayed
+   * query.
+   */
+  replayEnded(): void;
 
   /** Release everything. The surface is unusable afterwards. */
   dispose(): void;
@@ -101,3 +129,20 @@ export const HIDDEN_BUFFER_CAP_BYTES = 256 * 1024;
  * only cut that is safe at any offset.
  */
 export const RESET_SEQUENCE = 'c';
+
+/**
+ * How long a surface holds its input channel shut waiting for a replay boundary.
+ *
+ * A backstop, never the mechanism. The boundary is a frame the daemon sends exactly once per
+ * attach, and a client that timed its way past a replay instead of waiting for the marker
+ * would be the race the marker exists to remove — it would drop real keystrokes on a slow
+ * machine and still let a replayed query answer on a fast one.
+ *
+ * This is what happens when the marker does **not** arrive, which a v2 daemon only does by
+ * violating its own protocol or by losing the frame to a full outbox. Long enough that a
+ * large replay under a tight credit window is never mistaken for one, short enough that a
+ * user who has hit it is not still waiting when they give up. Hitting it raises a notice
+ * rather than passing in silence: a pane that quietly ignored the first few seconds of
+ * typing is indistinguishable from a broken keyboard.
+ */
+export const REPLAY_BOUNDARY_DEADLINE_MS = 5_000;
