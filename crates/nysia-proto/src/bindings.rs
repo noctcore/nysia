@@ -7,7 +7,8 @@
 //!
 //! The other thing is **[`OPEN_REJECT_REASON`]**, a type rather than a value, and it is
 //! here for the same reason: ts-rs cannot widen a tagged enum. See that constant for the
-//! five routes that were tried and why each one is a dead end.
+//! five routes that were tried and why each one is a dead end — and, below them, why the
+//! alias that resulted cannot narrow in a `switch` no matter how its open tail is spelled.
 //!
 //! The alternatives are both worse. Hand-writing them in the transport layer is five magic
 //! numbers copied across a language boundary — exactly the drift D-13 exists to prevent,
@@ -80,6 +81,34 @@ pub const CONSTANTS_FILE_NAME: &str = "wireConstants.ts";
 /// So the closed union stays, describing exactly what *this build writes*, and the open one
 /// is generated beside it describing what *may arrive*. Read a reason that came from a peer
 /// through this; the closed type is right for one this build constructed itself.
+///
+/// # It does not narrow, and no spelling of it can
+///
+/// The alias is a correct superset and assignment through it is sound, which is the job it
+/// actually does. It does not narrow, and the doc it used to carry promised otherwise —
+/// that the `default` branch stays a type error "until the case is handled". Measured on
+/// TypeScript 5.9.3 under `strict`, that is wrong in the direction that matters:
+///
+/// - `switch (reason.kind)` and `reason.kind === "unauthorized"` remove **nothing**. Not
+///   "everything but the open tail" — the whole union survives into every arm, probed by
+///   assigning the narrowed binding to `never` and reading back the full union. So a
+///   handled arm cannot reach `detail` or `daemon`, and `assertNever` in the `default`
+///   branch stays an error after all five cases are spelled out. It never clears.
+/// - The cause is upstream of the tail's shape. TypeScript treats a property as a
+///   discriminant only while every constituent types it as a unit type or a pattern
+///   literal, so one constituent typing `kind` as `string` disqualifies the property for
+///   the entire union. A branded tail (`string & { readonly [tag]: true }`, and `string &
+///   { __open: never }`) and a tail carrying absent-field markers (`detail?: never`) were
+///   both measured, and both behave exactly like the plain `string & {}` that ships.
+/// - A pattern-literal tail (`` `x-${string}` ``) does narrow, which is what isolates the
+///   cause — and is also why there is no sixth approach. "Any string except these five"
+///   needs a negated type, which TypeScript does not have, and no pattern literal denotes
+///   every string.
+///
+/// So this is a TypeScript limit rather than a ts-rs one, and widening on the Rust side
+/// would not have bought anything either. What the alias is good for is assignment, and
+/// for reading a field behind an `in` guard, which does narrow. The doc comment it
+/// generates says so in those terms rather than promising a `switch`.
 const OPEN_REJECT_REASON: &str = "OpenRejectReason";
 
 /// Render the numeric wire constants as a TypeScript module.
@@ -178,13 +207,30 @@ export const CREDIT_WINDOW_DEFAULT = {{
  * A `RejectReason` as it may *arrive*, rather than as this build writes it.
  *
  * Rust absorbs an unrecognised `kind` into `RejectReason::Unknown`, so the union ts-rs
- * exports is closed — it describes what this build produces. A daemon newer than this one
- * can send a kind that is in neither list, and an exhaustive `switch` over the closed type
- * with an `assertNever` default would compile and then throw the first time that happened.
+ * exports is closed: it describes what this build produces, and a daemon newer than this
+ * one can send a kind that is in neither list. Putting such a reason in a `RejectReason`
+ * is a lie; putting it here is not, and that is the job this alias does.
  *
- * Use this wherever a reason came from a peer. The open tail makes the default branch a
- * type error until it is handled, which is the whole point: the failure moves from runtime
- * to the compiler.
+ * **It does not narrow.** `switch (reason.kind)` and `reason.kind === \"unauthorized\"`
+ * remove nothing from the union — not merely the open tail, the whole union survives into
+ * every arm — so a handled arm cannot read `detail` or `daemon`, and an `assertNever`
+ * default stays a type error after all five cases are written out rather than clearing
+ * once they are. TypeScript stops treating `kind` as a discriminant the moment one
+ * constituent types it `string`, and \"any string but these five\" is not a type
+ * TypeScript can express. Measured on 5.9.3; `nysia-proto`'s `bindings` module records the
+ * branded and pattern-literal tails that were tried on the way to that conclusion.
+ *
+ * So read a reason that arrived from a peer like this:
+ *
+ * - branch on `HelloRejected.retryable`, which is on the wire for exactly this reason —
+ *   the daemon's own opinion, no reason taxonomy required;
+ * - to reach a field, use an `in` guard. `\"detail\" in reason` does narrow, to the two
+ *   variants that carry one.
+ *
+ * None of this applies at the webview boundary, where `RejectReason` is the right type:
+ * the Tauri shell deserializes into the Rust enum and re-serializes, so an unknown kind
+ * has already become `\"kind\": \"unknown\"` before TypeScript sees it. Only a reader of
+ * a rejection frame straight off the wire needs the open form.
  */
 export type {open} = RejectReason | {{ \"kind\": string & {{}} }};
 ",

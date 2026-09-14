@@ -92,12 +92,29 @@ export const CREDIT_WINDOW_DEFAULT = {
  * A `RejectReason` as it may *arrive*, rather than as this build writes it.
  *
  * Rust absorbs an unrecognised `kind` into `RejectReason::Unknown`, so the union ts-rs
- * exports is closed — it describes what this build produces. A daemon newer than this one
- * can send a kind that is in neither list, and an exhaustive `switch` over the closed type
- * with an `assertNever` default would compile and then throw the first time that happened.
+ * exports is closed: it describes what this build produces, and a daemon newer than this
+ * one can send a kind that is in neither list. Putting such a reason in a `RejectReason`
+ * is a lie; putting it here is not, and that is the job this alias does.
  *
- * Use this wherever a reason came from a peer. The open tail makes the default branch a
- * type error until it is handled, which is the whole point: the failure moves from runtime
- * to the compiler.
+ * **It does not narrow.** `switch (reason.kind)` and `reason.kind === "unauthorized"`
+ * remove nothing from the union — not merely the open tail, the whole union survives into
+ * every arm — so a handled arm cannot read `detail` or `daemon`, and an `assertNever`
+ * default stays a type error after all five cases are written out rather than clearing
+ * once they are. TypeScript stops treating `kind` as a discriminant the moment one
+ * constituent types it `string`, and "any string but these five" is not a type
+ * TypeScript can express. Measured on 5.9.3; `nysia-proto`'s `bindings` module records the
+ * branded and pattern-literal tails that were tried on the way to that conclusion.
+ *
+ * So read a reason that arrived from a peer like this:
+ *
+ * - branch on `HelloRejected.retryable`, which is on the wire for exactly this reason —
+ *   the daemon's own opinion, no reason taxonomy required;
+ * - to reach a field, use an `in` guard. `"detail" in reason` does narrow, to the two
+ *   variants that carry one.
+ *
+ * None of this applies at the webview boundary, where `RejectReason` is the right type:
+ * the Tauri shell deserializes into the Rust enum and re-serializes, so an unknown kind
+ * has already become `"kind": "unknown"` before TypeScript sees it. Only a reader of
+ * a rejection frame straight off the wire needs the open form.
  */
 export type OpenRejectReason = RejectReason | { "kind": string & {} };
