@@ -147,6 +147,21 @@ expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/str-line-open.
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/str-template-open.ts', 4);
 expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/str-escaped-quote.ts', 5);
 
+// The array form of a glob pattern, which Vite documents as first-class. The first version
+// of the glob check read one literal out of the call and decided the whole call on it, so a
+// stylesheet — or a negation naming one — in front of the store exempted a glob that returns
+// the provider. A rule written to close "narrower than its words" was narrower than its
+// words, and its proof never noticed because it only ever passed a single-literal call. Both
+// cases below put the innocent pattern FIRST, which is the input that got through.
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/glob-array-first-innocent.ts', 10);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/glob-array-leading-negation.ts', 4);
+
+// Two more ways to leak a `/*` into the scan, both of which end in the same runaway comment
+// blanking every line below. A backtick is the third quoting character and a template may
+// span lines, so neither is covered by the same-line rule that defuses `'` and `"`.
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/regex-backtick.ts', 11);
+expectLine(trips, 'no-store-context-outside-store', 'apps/web/src/template-nested.ts', 9);
+
 expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
 process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');
 // The clean fixture also reaches StoreContext by call from store/ and from main.tsx. If

@@ -137,12 +137,21 @@ const TS_STORE_CONTEXT_CALLS = [
  * `StoreContext` appearing anywhere, so no specifier test can decide it. Reported by
  * default, with two exits that can be read off the call:
  *
- * - `query: '?raw'` — the modules come back as source text, which has no commands on it;
- * - a pattern restricted to extensions outside {@link BUNDLED_EXTENSIONS} — a `.css` glob
- *   cannot return a module that holds the provider.
+ * - `query: '?raw'` in the options — every module comes back as source text, which has no
+ *   commands on it. Read from the options alone, because that is where it applies to the
+ *   whole call; the per-pattern `'…?raw'` spelling exempts only its own pattern;
+ * - **every** pattern restricted to extensions outside {@link BUNDLED_EXTENSIONS} — a glob
+ *   that can only return stylesheets cannot return the provider.
  *
- * Both exits are what `apps/web` already uses the glob for, and both are proven by the
- * clean fixture rather than merely observed on today's tree.
+ * The first argument may be an array, which Vite documents as first-class, and every literal
+ * in it is read. Reading only the first was the defect: a stylesheet, or a negation naming
+ * one, in front of the store exempted a call that returned the provider anyway. One pattern
+ * that could return a module is enough to report the call, and a first argument with no
+ * literal in it at all — built at runtime — is reported too.
+ *
+ * Both exits are what `apps/web` already uses the glob for, and both are proven by the clean
+ * fixture, in the array form as well as the single-pattern one, rather than merely observed
+ * on today's tree.
  */
 const TS_GLOB_IMPORT = /(?<![\w.$])import\s*\.\s*meta\s*\.\s*glob(?:Eager)?\s*\(/g;
 
@@ -353,7 +362,112 @@ function endOfJsLiteral(source: string, at: number): number | undefined {
       continue;
     }
     if (c === quote) return k + 1;
-    if (c === '\n' && quote !== '`') return undefined;
+    if (quote === '`') {
+      // A `${…}` substitution is code, and code can hold a backtick — in a string, in a
+      // nested template, in a regex. Running to the first unescaped backtick ended the
+      // literal inside the substitution, and every quote after that was read one out of
+      // step, which is how a later template leaked a `/*` into the scan.
+      if (c === '$' && source[k + 1] === '{') {
+        const close = endOfSubstitution(source, k + 2);
+        if (close === undefined) return undefined;
+        k = close - 1;
+      }
+      continue;
+    }
+    if (c === '\n') return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The index just past the `}` closing a `${` substitution, or `undefined` if it never closes.
+ *
+ * Braces are counted and literals inside are stepped over by {@link endOfJsLiteral}, which
+ * is why the two call each other. An unbalanced substitution means the template was not a
+ * template, and refusing it is the safe direction: the scan then reads less as comment.
+ */
+function endOfSubstitution(source: string, from: number): number | undefined {
+  let depth = 1;
+  let k = from;
+
+  while (k < source.length) {
+    const literalEnd = endOfJsLiteral(source, k);
+    if (literalEnd !== undefined) {
+      k = literalEnd;
+      continue;
+    }
+    const c = source[k];
+    if (c === '{') depth += 1;
+    else if (c === '}') {
+      depth -= 1;
+      if (depth === 0) return k + 1;
+    }
+    k += 1;
+  }
+  return undefined;
+}
+
+/**
+ * Characters after which a `/` opens a regular expression rather than dividing.
+ *
+ * The standard disambiguation, which needs the previous token: after a value, `/` divides;
+ * after an operator, a delimiter or nothing at all, it opens a literal.
+ */
+const REGEX_MAY_FOLLOW = new Set([
+  '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '^', '~',
+  '<', '>',
+]);
+
+/** Keywords a regex may follow, for the cases an operator character does not cover. */
+const REGEX_MAY_FOLLOW_KEYWORD = new Set([
+  'return',
+  'typeof',
+  'instanceof',
+  'in',
+  'of',
+  'new',
+  'delete',
+  'void',
+  'throw',
+  'do',
+  'else',
+  'case',
+  'yield',
+  'await',
+]);
+
+/**
+ * The index just past a regular expression literal opening at `at`, or `undefined`.
+ *
+ * A regex cannot span lines, and inside a character class a `/` needs no escape — both are
+ * why this is scanned rather than guessed at. The point of scanning it at all is that a
+ * regex may hold any quoting character: `` /[`]/ `` used to start a template literal that
+ * ran to the next backtick in the file, and the `/*` it left behind opened a block comment
+ * that blanked every line below it.
+ */
+function endOfRegexLiteral(source: string, at: number): number | undefined {
+  let inClass = false;
+
+  for (let k = at + 1; k < source.length; k += 1) {
+    const c = source[k];
+    if (c === '\\') {
+      k += 1;
+      continue;
+    }
+    if (c === '\n') return undefined;
+    if (inClass) {
+      if (c === ']') inClass = false;
+      continue;
+    }
+    if (c === '[') {
+      inClass = true;
+      continue;
+    }
+    if (c === '/') {
+      let end = k + 1;
+      while (end < source.length && /[a-z]/i.test(source[end] ?? '')) end += 1;
+      return end;
+    }
   }
   return undefined;
 }
@@ -377,9 +491,25 @@ function endOfJsLiteral(source: string, at: number): number | undefined {
  * literal is the safe direction — the scan reads less as comment, never more — which is why
  * {@link endOfJsLiteral} refuses anything it cannot terminate rather than guessing.
  *
- * Regular expression literals are not parsed. Telling `/` division from `/` regex needs the
- * previous token, and the only harm a regex can do here is hold a quote, which the
- * same-line rule already defuses.
+ * Three things are scanned that an earlier version of this waved at, and the claim it made
+ * — that a regex could only ever hold a quote, which the same-line rule defuses — was simply
+ * wrong. The same-line rule covers `'` and `"`. A backtick is the third quoting character
+ * and a template may span lines, so a regex holding one started a literal that ran to the
+ * next backtick in the file and left a `/*` loose behind it. So:
+ *
+ * - **regex literals are scanned**, using the previous significant token to tell a literal
+ *   from a division. Misreading a division as a literal only skips text, which reads less as
+ *   comment, never more;
+ * - **`${…}` substitutions are scanned**, because they are code and code holds quotes. Running
+ *   to the first unescaped backtick was only correct while no substitution contained one;
+ * - **an unterminated block comment is not a comment.** It is a syntax error, so reading it
+ *   as code costs nothing real, and it bounds every future mis-scan of this kind: a leaked
+ *   `/*` that is never closed can no longer blank the rest of the file.
+ *
+ * What is left, named rather than claimed away: a mis-scan that leaks a `/*` and finds a
+ * closer later in the file still blanks what lies between the two. Both trips fixtures carry
+ * such a closer on purpose — without one the third defence alone rescues them, and neither
+ * fixture could then tell whether the first two defences were doing anything at all.
  */
 export function blankJsComments(source: string): string {
   // `split('')`, deliberately not `[...source]`: every index below is a UTF-16 code unit,
@@ -387,6 +517,8 @@ export function blankJsComments(source: string): string {
   // `blankRustComments` for what that costs.
   const out = source.split('');
   let i = 0;
+  /** The last significant character of code, for telling a regex from a division. */
+  let previous: string | undefined;
 
   const blankTo = (end: number): void => {
     for (let k = i; k < end && k < source.length; k += 1) {
@@ -395,25 +527,49 @@ export function blankJsComments(source: string): string {
     i = Math.min(end, source.length);
   };
 
+  const opensRegex = (): boolean => {
+    if (previous === undefined) return true;
+    if (REGEX_MAY_FOLLOW.has(previous)) return true;
+    const word = /([A-Za-z_$]+)\s*$/.exec(source.slice(Math.max(0, i - 16), i))?.[1];
+    return word !== undefined && REGEX_MAY_FOLLOW_KEYWORD.has(word);
+  };
+
   while (i < source.length) {
     if (source.startsWith('/*', i)) {
-      // JavaScript block comments do not nest; the first `*/` ends it.
+      // JavaScript block comments do not nest; the first `*/` ends it. One that never ends
+      // is not a comment but a syntax error — the file does not compile — and blanking to
+      // end of file on it is precisely the over-blanking that hides real code while the
+      // rule reports success. Treated as ordinary characters instead.
       const close = source.indexOf('*/', i + 2);
-      blankTo(close === -1 ? source.length : close + 2);
-      continue;
-    }
-    if (source.startsWith('//', i)) {
+      if (close !== -1) {
+        blankTo(close + 2);
+        continue;
+      }
+    } else if (source.startsWith('//', i)) {
       const newline = source.indexOf('\n', i);
       blankTo(newline === -1 ? source.length : newline);
+      // A comment is not a token, so it does not change what the next `/` may be.
       continue;
     }
 
     const literalEnd = endOfJsLiteral(source, i);
     if (literalEnd !== undefined) {
       i = literalEnd;
+      previous = source[literalEnd - 1];
       continue;
     }
 
+    if (source[i] === '/' && opensRegex()) {
+      const regexEnd = endOfRegexLiteral(source, i);
+      if (regexEnd !== undefined) {
+        i = regexEnd;
+        previous = '/';
+        continue;
+      }
+    }
+
+    const character = source[i];
+    if (character !== undefined && !/\s/.test(character)) previous = character;
     i += 1;
   }
 
@@ -458,12 +614,23 @@ function callArguments(code: string, open: number): string {
 /**
  * Could a glob with this pattern return a module that holds the provider?
  *
- * False only when the pattern pins the extension to something that cannot carry commands.
- * An unrestricted pattern returns true: a glob that does not say what it matches can match
- * anything, and the rule fails closed on it.
+ * False only when the pattern itself says it cannot: a `?raw` query, which yields source
+ * text, or an extension pinned to something that cannot carry commands. Anything else
+ * returns true — a pattern that does not say what it matches can match anything, and the
+ * rule fails closed on it.
+ *
+ * A negation is judged by its extension like any other pattern, which can over-report: a
+ * `!`-prefixed glob naming a bundled extension reads as "could be a module" even though
+ * excluding a file returns nothing. Over-reporting is the safe direction and the message
+ * says how to fix it. The alternative — working out which patterns cancel which — is a glob
+ * engine, and getting that wrong is a silent exemption, which is the failure this rule is.
  */
-function globCanYieldModule(pattern: string): boolean {
-  const path = pattern.split('?')[0] ?? '';
+function globYieldsModule(pattern: string): boolean {
+  const parts = pattern.split('?');
+  const path = parts[0] ?? '';
+  // `'../x/*.ts?raw'` — the per-pattern spelling of the query. The options-object spelling
+  // is read at the call site, because it applies to every pattern in the call.
+  if (parts.slice(1).some((query) => query.includes('raw'))) return false;
 
   const braced = /\.\{([^}]*)\}$/.exec(path);
   if (braced !== null) {
@@ -481,9 +648,56 @@ function globCanYieldModule(pattern: string): boolean {
   return true;
 }
 
-/** The first string or template literal in a call's arguments — a glob's pattern. */
-function firstLiteral(argumentText: string): string | undefined {
-  return /(['"`])([^'"`]*)\1/.exec(argumentText)?.[2];
+/**
+ * The first argument of a call, given the text between its parentheses.
+ *
+ * Split at the first top-level comma, with brackets and braces counted and literals stepped
+ * over, so an array of patterns stays whole and the options object stays out of it. Reading
+ * the arguments as one blob is what let the options decide a pattern's fate and the reverse.
+ */
+function firstArgument(argumentText: string): string {
+  let depth = 0;
+  let i = 0;
+
+  while (i < argumentText.length) {
+    const literalEnd = endOfJsLiteral(argumentText, i);
+    if (literalEnd !== undefined) {
+      i = literalEnd;
+      continue;
+    }
+    const c = argumentText[i];
+    if (c === '(' || c === '[' || c === '{') depth += 1;
+    else if (c === ')' || c === ']' || c === '}') depth -= 1;
+    else if (c === ',' && depth === 0) return argumentText.slice(0, i);
+    i += 1;
+  }
+  return argumentText;
+}
+
+/**
+ * Every string and template literal in a stretch of code, contents only.
+ *
+ * The first version of the glob check read *one* literal out of the whole call and decided
+ * the call on it. Vite documents an array of patterns as first-class, so a stylesheet — or a
+ * negation naming one — in front of the store exempted a glob that returned the provider
+ * anyway. A rule written to close "narrower than its words" was narrower than its words, and
+ * its proof never noticed because it only ever passed a single-literal call. Every pattern
+ * is read now, and one that could return a module is enough to report the call.
+ */
+function literalsIn(text: string): string[] {
+  const found: string[] = [];
+  let i = 0;
+
+  while (i < text.length) {
+    const literalEnd = endOfJsLiteral(text, i);
+    if (literalEnd !== undefined) {
+      found.push(text.slice(i + 1, literalEnd - 1));
+      i = literalEnd;
+      continue;
+    }
+    i += 1;
+  }
+  return found;
 }
 
 /** 1-indexed line of a byte offset. */
@@ -648,10 +862,16 @@ export function noStoreContextOutsideStore(root: string, files: readonly string[
     for (const match of code.matchAll(TS_GLOB_IMPORT)) {
       if (match.index === undefined) continue;
       const args = callArguments(code, match.index + match[0].length - 1);
-      // Source text rather than modules: nothing it returns has a command on it.
-      if (args.includes('?raw')) continue;
-      const pattern = firstLiteral(args);
-      if (pattern !== undefined && !globCanYieldModule(pattern)) continue;
+      const patterns = firstArgument(args);
+      // `{ query: '?raw' }` applies to every pattern in the call, so it is read from the
+      // options rather than from the patterns — and only from the options, so a `?raw`
+      // written inside one pattern cannot exempt the others beside it.
+      if (args.slice(patterns.length).includes('?raw')) continue;
+
+      const literals = literalsIn(patterns);
+      // No literal at all is a pattern built at runtime, which says nothing about what it
+      // can return; one literal that could return a module is enough to report the call.
+      if (literals.length > 0 && !literals.some(globYieldsModule)) continue;
 
       report(
         match.index,

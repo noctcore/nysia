@@ -37,8 +37,11 @@
  *   written as "lint-meta owns dynamic `import()`" with no qualification while the rule
  *   matched only a single-line quoted literal, which over-claimed four spellings that
  *   passed every gate (#19); the rule now reads whole files with comments blanked, and
- *   `import.meta.glob` — which need not name the file at all — is reported unless the call
- *   shows it cannot return a module.
+ *   `import.meta.glob` — which need not name the file at all — is reported unless **every**
+ *   pattern in the call shows it cannot return a module. "Every" is load-bearing and was
+ *   learned the same way: reading one pattern out of an array let a stylesheet in front of
+ *   the store exempt a glob that returned the provider, inside the change that fixed the
+ *   same shape one rule over.
  * - **A file ESLint's `ignores` excludes is covered only by rule (a)'s line scan**, which is
  *   weaker than ESLint's AST.
  *
