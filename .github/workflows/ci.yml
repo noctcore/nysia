@@ -164,14 +164,11 @@ jobs:
       - name: Build the app bundle
         run: pnpm --filter @nysia/desktop run build --bundles ${{ matrix.bundles }}
 
-      # Beside the window cargo built, which is where `tauri_build` copies the sidecar during
-      # a bundle build. A first check, and the weaker one: it says the copy happened, not that
-      # the bundle carries it.
-      - name: The runtime ships beside the window
-        run: node scripts/sidecar.ts verify target/release
-
-      # And inside the bundle a user actually receives. Globbed rather than spelled, so a
-      # change to `productName` renames the check's subject instead of silently skipping it.
+      # **Inside what a user receives, and nowhere else.** A check of `target/release` would
+      # be worse than none: this job builds the runtime into that directory itself, two steps
+      # up, so it passes whether or not anything bundled it — which is exactly the hole the
+      # Windows half of this job used to have. Globbed rather than spelled, so a change to
+      # `productName` renames the check's subject instead of silently skipping it.
       - name: The runtime ships inside the macOS app
         if: matrix.os == 'macos-latest'
         shell: bash
@@ -180,11 +177,27 @@ jobs:
           echo "checking $app"
           node scripts/sidecar.ts verify "$app/Contents/MacOS"
 
-      - name: The Windows installer was produced
+      # **The installer's payload, which is the only thing a Windows user receives.** Listing
+      # the installer proved nothing: it says a file was produced, not what is inside it. So
+      # this runs it to a prefix of its own and checks there — the same question the macOS
+      # step asks of the `.app`, on the platform this project is primary on.
+      #
+      # `/S` is NSIS silent and `/D=` sets the directory; `/D` must come last and unquoted,
+      # which is why the prefix has no spaces in it.
+      - name: The runtime ships inside the Windows installer
         if: matrix.os == 'windows-latest'
-        shell: bash
+        shell: pwsh
         run: |
-          ls -l target/release/bundle/nsis/*.exe
+          $installer = (Get-ChildItem target/release/bundle/nsis/*.exe | Select-Object -First 1).FullName
+          $prefix = 'C:\nysia-install-check'
+          Write-Host "installing $installer to $prefix"
+          Start-Process -FilePath $installer -ArgumentList '/S', "/D=$prefix" -Wait
+          if (-not (Test-Path $prefix)) { throw "the installer wrote nothing to $prefix" }
+          Get-ChildItem -Recurse $prefix | ForEach-Object { Write-Host $_.FullName }
+          node scripts/sidecar.ts verify $prefix
+          if ($LASTEXITCODE -ne 0) { throw 'the installed app does not carry its runtime' }
+          # The installer may launch what it installed; nothing after this needs it running.
+          Get-Process Nysia, nysiad -ErrorAction SilentlyContinue | Stop-Process -Force
 
       - name: prove the sidecar check trips
         run: pnpm prove:sidecar
