@@ -517,7 +517,15 @@ impl Daemon {
                 } else {
                     // The client will never learn the id, so nothing may be routed to it. A
                     // sink left open here can never be acked and would stall its session.
+                    let request = pending.request.clone();
                     pending.abandon(&self.streams);
+                    // And the receipt goes with it. An attach's whole effect is the id in its
+                    // answer, so a receipt kept here would replay that id to a retry after the
+                    // sink behind it has been given up — an attach into nothing, reported as a
+                    // success. Narrow to the attach on purpose: every other mutation has a
+                    // durable effect that survives the failed write, and forgetting those
+                    // would have a retry do the work twice.
+                    lock(&self.receipts).forget(&caller.fingerprint, &request);
                 }
             }
             self.in_flight.fetch_sub(1, Ordering::AcqRel);
@@ -559,7 +567,7 @@ impl Daemon {
             });
         }
 
-        let payload = self.run(request.payload, caller, deferred).await;
+        let payload = self.run(request.payload, caller, &incoming, deferred).await;
         if is_mutation && payload.error().is_none() {
             lock(&self.receipts).put(&caller.fingerprint, &incoming, payload.clone());
         }
@@ -579,6 +587,7 @@ impl Daemon {
         self: &Arc<Self>,
         payload: RequestPayload,
         caller: &Caller,
+        request_id: &RequestId,
         deferred: &mut Option<PendingReplay>,
     ) -> ResponsePayload {
         let sessions = Arc::clone(&self.sessions);
@@ -640,7 +649,9 @@ impl Daemon {
                 }
                 Err(err) => ResponsePayload::Error(err.into_envelope()),
             },
-            RequestPayload::StreamAttach(request) => self.attach(&request.handle, caller, deferred),
+            RequestPayload::StreamAttach(request) => {
+                self.attach(&request.handle, caller, request_id, deferred)
+            }
             RequestPayload::StreamDetach(request) => {
                 // Detaching a stream that has already gone is not an error. Proto is explicit
                 // that an id naming nothing live is the routine detach race rather than a
@@ -662,6 +673,7 @@ impl Daemon {
         &self,
         handle: &nysia_proto::SessionHandle,
         caller: &Caller,
+        request_id: &RequestId,
         deferred: &mut Option<PendingReplay>,
     ) -> ResponsePayload {
         let session = match self.sessions.get(handle) {
@@ -689,6 +701,7 @@ impl Daemon {
             connection: attached.connection,
             sink: attached.sink,
             stream_id,
+            request: request_id.clone(),
         });
         ResponsePayload::StreamAttach(StreamAttached {
             handle: handle.clone(),
@@ -826,6 +839,8 @@ struct PendingReplay {
     sink: Arc<StreamSink>,
     /// The id that was reserved.
     stream_id: StreamId,
+    /// The request whose answer names that id, so a failed write can forget its receipt.
+    request: RequestId,
 }
 
 impl PendingReplay {
@@ -913,6 +928,20 @@ impl Receipts {
         self.stored
             .get(&(fingerprint.to_owned(), request.to_string()))
             .cloned()
+    }
+
+    /// Forget one receipt, for work whose answer never reached the caller.
+    ///
+    /// Only for a mutation whose durable effect is the answer itself. A `session create` that
+    /// was not answered still spawned a shell, and a retry that re-ran it would spawn a
+    /// second — which is the whole reason receipts exist. An *attach* is the other shape: its
+    /// effect is an id the client never learned, so a receipt for one is a promise to replay
+    /// an answer routing output to a sink that has already been given up.
+    fn forget(&mut self, fingerprint: &str, request: &RequestId) {
+        let key = (fingerprint.to_owned(), request.to_string());
+        if self.stored.remove(&key).is_some() {
+            self.order.retain(|stored| stored != &key);
+        }
     }
 
     fn put(&mut self, fingerprint: &str, request: &RequestId, payload: ResponsePayload) {
@@ -1068,6 +1097,31 @@ mod tests {
         daemon.shutdown();
         drop(listener);
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    #[test]
+    fn a_receipt_can_be_forgotten_when_its_answer_never_left() {
+        // Only for work whose whole effect is the answer. An attach that was never written
+        // leaves an id the client cannot know and a sink that has been given up, so replaying
+        // that answer to a retry routes output into nothing and calls it success. Every other
+        // mutation has a durable effect that survives the failed write — a `session create`
+        // spawned a shell either way — and forgetting one of those would have the retry do
+        // the work twice, which is the thing receipts exist to prevent.
+        let mut receipts = Receipts::default();
+        let attach = RequestId::generate();
+        let created = RequestId::generate();
+        receipts.put("me", &attach, ResponsePayload::StreamDetach);
+        receipts.put("me", &created, ResponsePayload::SessionClose);
+
+        receipts.forget("me", &attach);
+        assert!(receipts.get("me", &attach).is_none());
+        assert!(
+            receipts.get("me", &created).is_some(),
+            "forgetting one receipt must not disturb another"
+        );
+        // Idempotent: a write can fail once, and a second forget is not an error.
+        receipts.forget("me", &attach);
+        assert_eq!(receipts.order.len(), receipts.stored.len());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
