@@ -4,6 +4,17 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
+import {
+  DESKTOP,
+  STORE_CONTEXT_ALLOWED,
+  TAURI_ALLOWED,
+  TRANSPORT,
+  WEBVIEW,
+  describe,
+  eslintFile,
+  eslintFiles,
+} from './tools/lint-meta/src/boundaries.ts';
+
 /*
  * Trap 10, which has already cost someone a day: ESLint flat-config
  * `no-restricted-imports` does **not** merge across blocks. When two blocks both match a
@@ -16,29 +27,32 @@ import tseslint from 'typescript-eslint';
  * inherited in spirit. `pnpm prove:eslint-bans` lints virtual files through this config and
  * fails if a carve-out block has dropped a ban.
  *
- * Every block matches the same deliberate extension set, repeated verbatim in
- * `tools/lint-meta/src/rules.ts` (`SOURCE_EXTENSIONS`), which cannot import from here:
+ * Every `files` glob below is rendered from `tools/lint-meta/src/boundaries.ts`, which is
+ * where the boundaries and the bundled extension set are written — once. It used to be two
+ * hand-written copies, one here and one in `rules.ts`, described as mirrored so they could
+ * not disagree silently; nothing cross-checked them and they already disagreed (#20). Node
+ * strips the types on the way in, so a plain `.js` config can read a `.ts` module.
  *
- *   In:  ts tsx mts cts js jsx mjs cjs
- *   Out: json, css, html, svg — none of them can import anything.
- *
- * `.mts` and `.cts` are in the list because Vite 8's default `resolve.extensions` includes
- * `.mts`, so such a file bundles; leaving them out left a file covered by neither layer.
+ * `scripts/prove-eslint-bans.ts` lints a set of edge paths through both this config and the
+ * lint-meta rules and fails if the two give different answers, which is what keeps the
+ * single source single.
  *
  * One thing this rule cannot see: `no-restricted-imports` does not cover `require()`, and
  * `no-restricted-modules` was removed in ESLint 9. The split is deliberate — ESLint owns
- * `import` and `export … from`, lint-meta owns `require()` and dynamic `import()`.
+ * `import` and `export … from`; lint-meta owns `require()`, dynamic `import()` **with a
+ * literal specifier**, and `import.meta.glob`. A specifier built from a variable or a
+ * concatenation is beyond both layers, and `rules.ts` says so at the rule (#19).
  */
 
 /**
- * The Tauri boundary. This allowlist is duplicated in `tools/lint-meta/src/rules.ts`
- * (`TAURI_ALLOWLIST`) and the two must agree: lint-meta covers Rust and the files ESLint
- * does not lint, ESLint gives the error at the import site.
+ * The Tauri boundary. The allowlist itself lives in `boundaries.ts` and is read by both
+ * layers: lint-meta covers Rust and the files ESLint does not lint, ESLint gives the error
+ * at the import site.
  */
 const BAN_TAURI = {
   group: ['@tauri-apps', '@tauri-apps/**'],
   message:
-    'Only apps/desktop/** and apps/web/src/transport/** may import Tauri (D-1, D-2). ' +
+    `Only ${describe(TAURI_ALLOWED)} may import Tauri (D-1, D-2). ` +
     'Everything else reaches the daemon through the transport module.',
 };
 
@@ -61,9 +75,11 @@ const BAN_NODE_BUILTINS = {
  * `store/commands.ts` says the door "cannot be locked from here" because the lint config
  * lives outside that package. This is that lock, from here.
  *
- * Two carve-outs, and only two: `store/**` is the module itself, and `main.tsx` composes
- * the provider — the one line wave 2 changes when the mock store becomes the daemon-backed
- * one. Everything else goes through `useCommands()`.
+ * Two carve-outs, and only two: `store/**` is the module itself, and `main.*` composes the
+ * provider — the one line wave 2 changes when the mock store becomes the daemon-backed one.
+ * Everything else goes through `useCommands()`, `apps/web/src/main.helper.tsx` included:
+ * the carve-out is that file in whichever extension it carries, never everything whose name
+ * begins with it. Both layers read that from `STORE_CONTEXT_ALLOWED`.
  */
 const BAN_STORE_CONTEXT = {
   // `**/StoreContext` as well as `**/store/StoreContext`, because the longer pattern needs
@@ -128,7 +144,7 @@ export default tseslint.config(
   // apps/web — the browser bundle. Full ban set.
   // ---------------------------------------------------------------------------------
   {
-    files: ['apps/web/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    files: [eslintFile(WEBVIEW)],
     languageOptions: {
       globals: globals.browser,
       parserOptions: { ecmaFeatures: { jsx: true } },
@@ -156,7 +172,7 @@ export default tseslint.config(
   // that could still reach the raw provider. The transport is not a store carve-out.
   // ---------------------------------------------------------------------------------
   {
-    files: ['apps/web/src/transport/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    files: [eslintFile(TRANSPORT)],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -175,10 +191,7 @@ export default tseslint.config(
   // and the generated barrel for `store/**` — the full set is repeated for that reason.
   // ---------------------------------------------------------------------------------
   {
-    files: [
-      'apps/web/src/store/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}',
-      'apps/web/src/main.{ts,tsx,mts,cts,js,jsx,mjs,cjs}',
-    ],
+    files: eslintFiles(STORE_CONTEXT_ALLOWED),
     rules: {
       'no-restricted-imports': [
         'error',
@@ -211,7 +224,7 @@ export default tseslint.config(
   // apps/desktop — the shell itself. Tauri is its whole job, so no import ban applies.
   // ---------------------------------------------------------------------------------
   {
-    files: ['apps/desktop/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    files: [eslintFile(DESKTOP)],
     languageOptions: {
       globals: globals.browser,
     },

@@ -7,11 +7,19 @@
  * is that it silently drops every other ban unless it repeats them.
  *
  * Each case below is linted as a virtual file through the real `eslint.config.js` — no
- * fixtures on disk, so nothing here can drift out of the config it is testing.
+ * fixtures on disk, so nothing here can drift out of the config it is testing. The
+ * cross-layer section at the end needs a real file for lint-meta to walk, and writes one
+ * into a throwaway directory outside the repository, removed in a `finally` — CI checks the
+ * working tree is clean after every proof, and that check has to stay honest.
  */
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import process from 'node:process';
 
 import { ESLint } from 'eslint';
+
+import { runSourceRules } from '../tools/lint-meta/src/rules.ts';
 
 interface Case {
   readonly what: string;
@@ -229,6 +237,90 @@ for (const testCase of CASES) {
     );
   } else {
     process.stdout.write(`  ${testCase.expect === 'error' ? 'trips ' : 'allows'}: ${testCase.what}\n`);
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// The two layers answer the same question the same way (#20).
+//
+// `eslint.config.js` and `tools/lint-meta/src/rules.ts` used to hold two hand-written copies
+// of the store carve-out, described as mirrored so they could not disagree silently. Nothing
+// cross-checked them and they already disagreed: lint-meta allowlisted by the prefix
+// `apps/web/src/main.`, ESLint carved out `main.{ts,tsx,…}`. `apps/web/src/main.helper.tsx`
+// was therefore allowlisted by one layer and banned by the other, so a dynamic import of the
+// provider from it passed both — ESLint cannot see `import()`, and lint-meta thought the file
+// was the entry point.
+//
+// They now read one list, and this is what says so: for each path, ask ESLint whether a
+// static import of the provider is banned there, ask lint-meta whether a dynamic one is, and
+// require the same answer. A case that only lints through ESLint could not have caught the
+// defect — ESLint's half was already right.
+// ---------------------------------------------------------------------------------------
+const MIRROR_PATHS: readonly string[] = [
+  // The carve-out, in the extension it has and one it could grow into.
+  'apps/web/src/main.tsx',
+  'apps/web/src/main.mts',
+  // The store module, at the top and nested.
+  'apps/web/src/store/hooks.ts',
+  'apps/web/src/store/deep/nested.ts',
+  // The disagreement. A file whose name merely begins with the entry point's.
+  'apps/web/src/main.helper.tsx',
+  'apps/web/src/main.config.ts',
+  // A directory that begins with it, which neither layer has ever carved out.
+  'apps/web/src/main/index.ts',
+  // Ordinary webview files, one of them the transport — which is not a store carve-out.
+  'apps/web/src/mainly.ts',
+  'apps/web/src/chrome/TabStrip.tsx',
+  'apps/web/src/transport/bridge.ts',
+  // Outside the webview entirely, where neither layer bans anything.
+  'apps/desktop/src/bridge.ts',
+];
+
+/** Does ESLint ban a static import of the provider from this path? */
+async function eslintBansProvider(filePath: string): Promise<boolean> {
+  const results = await eslint.lintText(
+    "import { StoreContext } from '../store/StoreContext';\nexport const c = StoreContext;\n",
+    { filePath },
+  );
+  return results.flatMap((r) => r.messages).some((m) => m.ruleId === RULE);
+}
+
+/**
+ * Does lint-meta ban a dynamic import of the provider from this path?
+ *
+ * Written into a throwaway tree and run through the real rule rather than asked of the
+ * allowlist directly: a proof that consults the same constant the rule consults can only
+ * ever agree with itself. CI checks the working tree is clean afterwards, so nothing here
+ * may touch the repository.
+ */
+function lintMetaBansProvider(filePath: string): boolean {
+  const root = mkdtempSync(join(tmpdir(), 'nysia-mirror-'));
+  try {
+    const absolute = join(root, filePath);
+    mkdirSync(dirname(absolute), { recursive: true });
+    writeFileSync(
+      absolute,
+      "const store = await import('../store/StoreContext');\nexport const c = store;\n",
+    );
+    return runSourceRules(root).some((v) => v.rule === 'no-store-context-outside-store');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+for (const filePath of MIRROR_PATHS) {
+  const byEslint = await eslintBansProvider(filePath);
+  const byLintMeta = lintMetaBansProvider(filePath);
+
+  if (byEslint !== byLintMeta) {
+    failures.push(
+      `the two layers disagree about ${filePath}: eslint ` +
+        `${byEslint ? 'bans' : 'allows'} it, lint-meta ${byLintMeta ? 'bans' : 'allows'} it`,
+    );
+  } else {
+    process.stdout.write(
+      `  agree (${byEslint ? 'ban ' : 'allow'}): ${filePath} reaching the store provider\n`,
+    );
   }
 }
 
