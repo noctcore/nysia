@@ -16,15 +16,62 @@
 # no error preference: both belong to the script that sources it, and quietly changing them
 # under an interactive shell is a surprise nobody asked for.
 
-# The lease the daemon writes beside its endpoint. §12 question 5: its presence is never
-# proof of life, but it is how a tool that did not spawn the daemon finds its pid.
-#
-# The version in the name is §3.1's mechanism, not decoration: it moves when the wire changes
-# shape, and a daemon of the old version goes on serving its own endpoint beside the new one.
-# It is spelled out here because PowerShell cannot read the Rust constant — keep it in step
-# with `PROTOCOL_VERSION` in `crates/nysia-proto/src/version.rs`, which is what names the
-# socket, the lease, the lock and the log.
-$script:LeaseFile = 'nysiad-v2.pid.json'
+<#
+.SYNOPSIS
+    The lease the daemon wrote beside its endpoint, or '' when there is none.
+
+.DESCRIPTION
+    §12 question 5: the file's presence is never proof of life, but it is how a tool that did
+    not spawn the daemon finds its pid.
+
+    **Found rather than spelled out.** The protocol version is part of the name — §3.1's
+    mechanism, not decoration: it moves when the wire changes shape, and a daemon of the old
+    version goes on serving its own endpoint beside the new one. A literal `nysiad-v2.pid.json`
+    here was a second copy of `PROTOCOL_VERSION`, in a language that cannot read the Rust one,
+    and the next bump would have left this script hunting a file nothing writes. Asking the
+    directory what is in it has no copy to rot.
+
+    Every script here runs a daemon of its own under a directory it created, so more than one
+    match means two protocol versions in a directory that should hold one. That is reported
+    rather than resolved by picking: guessing which daemon the caller meant is how a test
+    reports on a session that is not the one it set up.
+#>
+function Get-NysiaLeasePath {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $RuntimeDir)
+
+    if (-not (Test-Path $RuntimeDir)) { return '' }
+    $leases = @(Get-ChildItem -Path $RuntimeDir -Filter 'nysiad-v*.pid.json' -File -ErrorAction SilentlyContinue)
+    if ($leases.Count -eq 0) { return '' }
+    if ($leases.Count -gt 1) {
+        throw "two daemons left leases under ${RuntimeDir}: $(($leases | ForEach-Object { $_.Name }) -join ', ')"
+    }
+    return $leases[0].FullName
+}
+
+<#
+.SYNOPSIS
+    One argument, quoted the way `CreateProcess` will read it back.
+
+.DESCRIPTION
+    Windows PowerShell 5.1 joins `-ArgumentList` with spaces and quotes **nothing**, so a
+    single argument containing a space arrives at the child as two. Measured, not assumed:
+    `terminal send <handle> --text 'echo HELLO WORLD'` came back as
+    `error: unexpected argument 'HELLO' found`.
+
+    The rules are `CreateProcess`'s, not the shell's: backslashes are literal except in front
+    of a quote, where each one must be doubled and the quote escaped — which includes the run
+    of them that would otherwise meet the closing quote this adds.
+#>
+function Format-NysiaArgument {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Value)
+
+    if ($Value -ne '' -and $Value -notmatch '[\s"]') { return $Value }
+    $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    return '"' + $escaped + '"'
+}
 
 <#
 .SYNOPSIS
@@ -37,10 +84,11 @@ function Invoke-Nysia {
         [Parameter(Mandatory)] [string[]] $Arguments
     )
 
+    $commandLine = ($Arguments | ForEach-Object { Format-NysiaArgument -Value $_ }) -join ' '
     $outFile = [System.IO.Path]::GetTempFileName()
     $errFile = [System.IO.Path]::GetTempFileName()
     try {
-        $process = Start-Process -FilePath $Nysia -ArgumentList $Arguments `
+        $process = Start-Process -FilePath $Nysia -ArgumentList $commandLine `
             -NoNewWindow -Wait -PassThru `
             -RedirectStandardOutput $outFile -RedirectStandardError $errFile
         $out = Get-Content $outFile -Raw
@@ -119,8 +167,8 @@ function Get-NysiaDaemonPid {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [string] $RuntimeDir)
 
-    $lease = Join-Path $RuntimeDir $script:LeaseFile
-    if (-not (Test-Path $lease)) { return 0 }
+    $lease = Get-NysiaLeasePath -RuntimeDir $RuntimeDir
+    if ($lease -eq '') { return 0 }
     return [int] ((Get-Content $lease -Raw | ConvertFrom-Json).pid)
 }
 
