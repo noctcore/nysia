@@ -238,9 +238,18 @@ const SET_PROPERTY_CALL =
  * Three shapes: bare property then colon or equals, which covers an object literal, a JSX
  * attribute and an assignment; quoted property then colon or equals, which covers a quoted
  * key; and the DOM call below.
+ *
+ * One equals sign, not two. A comparison reads a colour rather than writing one, and the
+ * rule used to match the first of the three characters in a strict one — so the positive
+ * form fired and the negated form, whose first character is not an equals sign, did not.
+ * An asymmetry like that is worse than either answer on its own, because which way a
+ * condition happens to be written is not a property of the code's correctness. It cost an
+ * accidental catch: a ternary headed by a comparison against a name that was itself in the
+ * list used to be found, and that never generalised — the negated spelling of the same
+ * condition was always missed, and a colour reached through a variable is in the residue.
  */
 const PROPERTY_INTRO =
-  `(?:(?<![\\w-])(?:${COLOUR_INTRODUCER})(?:\\s*[:=]|['"\`]\\s*[:=])|${SET_PROPERTY_CALL})`;
+  `(?:(?<![\\w-])(?:${COLOUR_INTRODUCER})(?:\\s*(?::|=(?!=))|['"\`]\\s*(?::|=(?!=)))|${SET_PROPERTY_CALL})`;
 
 /**
  * Whatever sits between the separator and the literal — a ternary head, a call, nothing.

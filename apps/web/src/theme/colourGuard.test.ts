@@ -266,6 +266,22 @@ describe('findColourLiterals', () => {
     expect(findColourLiterals('className="bg-[url(/img/red.png)]"')).toEqual([]);
   });
 
+  it('does not fire on a comparison against a colour, either way round', () => {
+    // Reading a colour is not writing one. The positive form fired and the negated one did
+    // not, which is the tell: the rule was matching the first of the three equals signs as
+    // its separator, so what it caught depended on which way the condition happened to be
+    // written. Both are quiet now, and an assignment - one equals sign - still fires.
+    for (const compared of [
+      "if (color === 'red') return;",
+      "if (borderColor == 'red') return;",
+      "if (color !== 'red') return;",
+      `if (background === "navy") return;`,
+      "const dark = foreground === 'white';",
+    ]) {
+      expect(findColourLiterals(compared), compared).toEqual([]);
+    }
+  });
+
   it('does not fire on a call whose arguments are a property name and a colour', () => {
     // The comma separator exists for `setProperty`, and it used to accept any call at all
     // — or no call, since a two-element array is the same three characters. Neither writes
