@@ -1108,19 +1108,32 @@ mod tests {
         // asserts only the job's pid, and a leader that ignores SIGTERM was left alive when
         // the poll stopped including it. Restore the `jobs`-only poll and this goes red.
         //
-        // `exec sh -c` so the leader ignores SIGTERM *and* never reads stdin — otherwise the
-        // newline and VEOF that `portable-pty` writes when it drops the master half would
-        // end the shell on their own and the kill would not be what proved anything.
+        // Both `exec`s are load-bearing, for different reasons.
+        //
+        // The outer one makes the leader itself the process that ignores SIGTERM, and one
+        // that never reads stdin — otherwise the newline and VEOF that `portable-pty` writes
+        // when it drops the master half would end the shell on their own and the kill would
+        // not be what proved anything.
+        //
+        // The inner one leaves the leader with **no children**, which is what makes this a
+        // guard rather than a coin flip. The jobs-only poll fails when the list it polls is
+        // empty, so the leader has to be the only thing in the tree. A `while :; do sleep 1;
+        // done` loop here instead — the shape this test used to have — puts a child in that
+        // list, and `trap "" TERM` is SIG_IGN, which survives `exec`, so the child ignores
+        // the signal too and only its own timeout ends it. Whether that lands inside the
+        // 500ms grace is a race the test does not control: against the jobs-only poll the
+        // loop form failed about half the time on the macOS runner, and on Linux it never
+        // failed at all — 14 runs, 14 passes, a guard for a bug that was present the whole
+        // time. Lengthening the loop's sleep makes that worse rather than better, because
+        // the child then reliably outlives the grace and the SIGKILL phase always runs. One
+        // long `exec sleep`, with no child to poll, is the shape that fails every time.
         let (session, output, mut state) = spawn_ready(
             SessionSpec::new(ShellProfile::Posix).with_size(TerminalSize::new(120, 30)),
         );
         let leader = session.pid().expect("a spawned session has a pid");
 
         session
-            .write(
-                b"exec sh -c 'trap \"\" TERM; echo nysia-notrap-$((6*7)); \
-                  while :; do sleep 1; done'\n",
-            )
+            .write(b"exec sh -c 'trap \"\" TERM; echo nysia-notrap-$((6*7)); exec sleep 300'\n")
             .expect("write");
         assert!(
             pump_until(&session, &output, &mut state, |screen| screen
