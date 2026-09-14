@@ -112,8 +112,15 @@ const PALETTE_CLASS = new RegExp(
  * inside a braced ternary the quoted first branch read as a key introducing the second,
  * so the rule fired when the first branch was one of eight words and stayed quiet
  * otherwise — the same which-way-was-it-written asymmetry the equality separator had,
- * reappearing in the one shape no case covered. Admitting the brace is what removes it:
- * both spellings now match on the container rather than on the accident.
+ * reappearing in the one shape no case covered. Admitting the brace removes that one:
+ * both spellings match on the container rather than on the accident.
+ *
+ * It did not remove the general fault, and the round that said it had was reading its own
+ * fix rather than the rule. A ternary was still read by whichever literal the greedy
+ * quantifier reached last, so which branch held the colour still decided the answer — a
+ * third spelling of the same asymmetry, in the container that had just been admitted and
+ * in the object literal that had always been there. That one is closed where the span is
+ * defined, by looking at every literal instead of the last.
  *
  * ## What it cannot see
  *
@@ -136,10 +143,6 @@ const PALETTE_CLASS = new RegExp(
  *    the other way round: the word is there but nothing says it paints. Loosening this is
  *    what the rule was narrowed away from, because it made the guard shout at modules that
  *    paint nothing.
- *  - a value whose own quote character appears inside it escaped, when the colour word
- *    sits before the escape. After it the colour is caught, but by accident rather than by
- *    understanding — the span treats the escaped quote as a boundary and the tail happens
- *    to become the captured value. Needs a parser to be right either way.
  *  - an expression between the property and the literal that contains a semicolon, a comma
  *    or a brace, or that runs past the length cap. Those are what stop the span crossing
  *    out of the value it belongs to, and the price is a call with more than one argument.
@@ -203,6 +206,11 @@ const PALETTE_CLASS = new RegExp(
  *    first branch reads as a quoted key introducing the second. Inside a JSX container that
  *    reading lands on the right answer for the wrong reason; on its own it is a false
  *    positive, and it is the residue of the same accident the brace fix stopped relying on.
+ *  - a comparison operand that spells a colour, since every literal in the span is now read
+ *    and nothing in the text distinguishes an operand from a branch. Half of this was here
+ *    before: when the operand happened to be the last literal in range it was taken as the
+ *    value outright. Telling them apart is a question about syntax, which is the argument
+ *    at the end of this comment.
  *  - a statement that ends without a semicolon followed by an unrelated string on the next
  *    line, since the span crosses line ends and only punctuation stops it. This tree is
  *    semicolon-terminated throughout and nothing enforces that, so it is a live trap rather
@@ -214,6 +222,7 @@ const PALETTE_CLASS = new RegExp(
  *    comment — this module has one carrying a backtick — and fall silent over everything
  *    after it. That failure is quiet and this one is not, so this one stays. Marking a
  *    property up in prose is safe; putting a separator after it is what fires.
+
  */
 const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
 
@@ -342,11 +351,26 @@ const PROPERTY_INTRO =
  * wrong but backwards. A quoted string in the expression, which is what a comparison like
  * `status === 'failed' ? …` is made of, was taken as the value: the rule read the first
  * literal after the separator, found no colour word in it, and skipped past the real one.
- * So the span swallows a complete quoted string as a unit and the greedy quantifier hands
- * back the *last* literal in range, which is the one the property is actually set to. The
- * alternation is ordered quote-first so a literal is consumed whole rather than a character
- * at a time; both branches are anchored on different characters, so there is no ambiguity
- * for the engine to backtrack through.
+ * So the span swallows a complete quoted string as a unit. The alternation is ordered
+ * quote-first so a literal is consumed whole rather than a character at a time; both
+ * branches are anchored on different characters, so there is no ambiguity for the engine to
+ * backtrack through.
+ *
+ * The span is then handed to the caller entire, and **every** literal in it is checked.
+ * That is the correction to the version before this one, which took the greedy quantifier's
+ * answer — the *last* literal in range — and called it the value. In a ternary that is the
+ * right one only half the time. A fill written as a colour on one condition and `none` on
+ * the other, which is SVG's own spelling for not painting, was silent; the same fill with
+ * the branches swapped was loud. `inherit`, `transparent`, `currentcolor` and the empty
+ * string all behaved the same way, and they are precisely the words the named set leaves
+ * out on purpose, so they are precisely what a component writes as the other branch. It
+ * was the third which-way-did-you-write-it asymmetry this rule has had, and the first two
+ * were closed by spelling one more position correctly, which is why this one is not.
+ *
+ * Reading every literal is also what closed the escaped-quote entry that sat in the residue
+ * for three rounds: the split at an escaped quote is still wrong, but no colour falls in
+ * the half nobody looked at any more. It costs a false positive, below — an operand and a
+ * branch are both literals in the same span, and which is which is a question about syntax.
  */
 const QUOTED_CHUNK = `'[^'\\n]*'|"[^"\\n]*"`;
 const BEFORE_VALUE = `(?:${QUOTED_CHUNK}|[^'"\`;,{}]){0,120}`;
@@ -357,10 +381,19 @@ const BEFORE_VALUE = `(?:${QUOTED_CHUNK}|[^'"\`;,{}]){0,120}`;
  * the only way the template pattern can see through an interpolation that contains quotes.
  */
 const STYLE_VALUES: readonly RegExp[] = [
-  new RegExp(`${PROPERTY_INTRO}${BEFORE_VALUE}'([^'\\n]*)'`, 'g'),
-  new RegExp(`${PROPERTY_INTRO}${BEFORE_VALUE}"([^"\\n]*)"`, 'g'),
-  new RegExp(`${PROPERTY_INTRO}${BEFORE_VALUE}\`([^\`]*)\``, 'g'),
+  new RegExp(`${PROPERTY_INTRO}(${BEFORE_VALUE}'[^'\\n]*')`, 'g'),
+  new RegExp(`${PROPERTY_INTRO}(${BEFORE_VALUE}"[^"\\n]*")`, 'g'),
+  new RegExp(`${PROPERTY_INTRO}(${BEFORE_VALUE}\`[^\`]*\`)`, 'g'),
 ];
+
+/**
+ * Every quoted literal inside the matched span, in the order they were written.
+ *
+ * The same alternation the span itself uses, so a literal is taken whole and the same way:
+ * leftmost wins, which is what stops the inner quotes of a value being read as delimiters
+ * of their own.
+ */
+const CANDIDATE_VALUE = /'[^'\n]*'|"[^"\n]*"|`[^`]*`/g;
 const NAMED_COLOURS = new Set(
   ('aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue ' +
     'blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue ' +
@@ -395,6 +428,16 @@ const NAMED_COLOURS = new Set(
  * one is a colour, which is the whole reason the custom-property spelling is in the intro.
  */
 const URL_ARGUMENT = /url\(\s*(?:'[^']*'|"[^"]*"|[^)'"]*)\)/g;
+
+/** Whether any literal the property could be set to spells a colour. */
+function someCandidateNamesAColour(span: string): boolean {
+  for (const candidate of span.matchAll(CANDIDATE_VALUE)) {
+    if (namesAColour(candidate[0].slice(1, -1))) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /** Whether a captured value spells a colour once its image paths are set aside. */
 function namesAColour(value: string): boolean {
@@ -432,7 +475,7 @@ export function findColourLiterals(source: string): readonly ColourLiteral[] {
   }
   for (const pattern of STYLE_VALUES) {
     for (const match of source.matchAll(pattern)) {
-      if (namesAColour(match[1] ?? '')) {
+      if (someCandidateNamesAColour(match[1] ?? '')) {
         found.push({ kind: 'named-colour', text: match[0] });
       }
     }
