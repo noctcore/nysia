@@ -33,17 +33,24 @@
 //!
 //! # Credit, and which direction it flows
 //!
-//! `nysia-proto` names the two credit frames from the reader's and the writer's point of
-//! view, which is worth pinning down here because the daemon is the reader of the *pty* and
-//! the writer of the *socket*, and the two readings point opposite ways.
+//! **The producer grants and the consumer acks.** The daemon produces terminal output and
+//! owns the window; the client consumes it and acknowledges what it has rendered. Naming the
+//! two ends "reader" and "writer" is what made this ambiguous — the daemon is the reader of
+//! the *pty* and the writer of the *socket*, and the two readings point opposite ways — so
+//! nothing in this codebase describes credit in those terms.
 //!
 //! What this implementation does, and what §7.3's sentence requires:
 //!
 //! 1. On attach the daemon sends a [`nysia_proto::CreditGrant`] carrying the window
-//!    constants and the opening allowance. It is the daemon that holds
-//!    [`nysia_proto::CreditWindow::DEFAULT`], so it is the daemon that announces it — the
-//!    client is never expected to have its own copy.
-//! 2. The daemon spends that allowance byte for byte as it writes output frames.
+//!    constants and the opening allowance. It is the daemon that holds the window, so it is
+//!    the daemon that announces it — the client is never expected to have its own copy. A
+//!    grant arriving *from* a client is ignored: a consumer able to hand itself an allowance
+//!    could turn the backpressure off from the outside.
+//! 2. The daemon spends that allowance as it writes output frames, charged in **payload
+//!    bytes**. Not the encoded length: the nine-byte frame header is transport overhead the
+//!    consumer never receives as content, and the ack is emitted by the code that has just
+//!    written a payload into a terminal. Two units here is a window that drains nine bytes
+//!    per frame until a long-lived session stalls for good.
 //! 3. The client sends a [`nysia_proto::CreditAck`] *after* xterm's `write()` callback, not
 //!    on arrival, because the window tracks what has been rendered. Each ack replenishes the
 //!    allowance, capped at [`nysia_proto::CreditWindow::per_stream_max`].
@@ -52,6 +59,15 @@
 //!    buffer fills, and the child blocks. That is the complete answer to a `yes` flood: the
 //!    backpressure reaches the process producing the output rather than being absorbed by a
 //!    buffer somewhere in between.
+//!
+//! # Attaching, and why the answer goes first
+//!
+//! A stream id is minted on the control connection and used on the stream connection, and
+//! **nothing orders those two sockets**. A client can only record an id by parsing the attach
+//! response, and proto's routing rule says a frame naming an id at or beyond the next one to
+//! assign is a desync that costs the whole connection. So the daemon writes the response
+//! before it enqueues one byte of the opening grant or the replay ring: the side that can
+//! supply the ordering is the side that has to.
 
 pub mod client;
 pub mod control;
@@ -75,5 +91,7 @@ pub use lease::{LeaseError, PidRecordFile};
 pub use peer::{CallerSession, PeerCredentials, PeerError, ancestry, parent_of};
 pub use server::{Daemon, DaemonConfig, ServerError};
 pub use session::{OwnedSession, SessionError, SessionRegistry};
-pub use stream::{SendOutcome, StreamRegistry, StreamSink};
+pub use stream::{
+    AttachedStream, BoundStream, ConnectionKey, SendOutcome, StreamRegistry, StreamSink,
+};
 pub use transport::{Connection, ConnectionReader, ConnectionWriter, Listener, TransportError};
