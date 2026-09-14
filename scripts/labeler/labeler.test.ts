@@ -403,6 +403,7 @@ describe('the shapes a per-label invariant cannot see', () => {
       'area:web': [{ 'changed-files': [live, { 'any-glob-to-all-files': [] }] }],
     };
     expect(deadComponents(config, WEB)).toContain('area:web > changed-files[1]');
+    expect(deadComponents({ 'area:web': [{ 'changed-files': [live] }] }, WEB)).toEqual([]);
   });
 
   it('finds a second glob whose path is misspelled', () => {
@@ -412,6 +413,12 @@ describe('the shapes a per-label invariant cannot see', () => {
     expect(deadComponents(config, WEB)).toContain(
       'area:web > any-glob-to-any-file > "apps/wbe/**"',
     );
+    expect(
+      deadComponents(
+        { 'area:web': [{ 'changed-files': [{ 'any-glob-to-any-file': ['apps/web/**'] }] }] },
+        WEB,
+      ),
+    ).toEqual([]);
   });
 });
 

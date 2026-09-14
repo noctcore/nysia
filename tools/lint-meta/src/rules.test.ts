@@ -353,3 +353,94 @@ describe('rule (d) and glob imports', () => {
     expect(scan('apps/web/src/main.tsx', "export const m = import.meta.glob('./store/*.ts');")).toEqual([]);
   });
 });
+
+/*
+ * The three ways a `/*` got loose in the scan, and the one thing that bounds the damage
+ * when a fourth turns up. Each is asserted here directly rather than only through a fixture,
+ * because the fixtures overlap: the two that leak a comment opener are caught by the
+ * scanners *and* by the unterminated-comment guard, so neither could tell on its own which
+ * of the two was doing the work.
+ */
+describe('blankJsComments and the quoting characters a comment can hide behind', () => {
+  const CALL = "const s = await import('../store/StoreContext');";
+
+  it('treats an unterminated block comment as code rather than as one to end of file', () => {
+    // The guard that has no fixture of its own: both leak fixtures terminate their runaway
+    // deliberately so they can prove the scanners instead. An unterminated block comment is
+    // a syntax error, so reading it as code costs nothing real and turns any future
+    // mis-scan near the end of a file from a silent miss into a report.
+    const source = `/* never closed\n${CALL}\n`;
+    expect(blankJsComments(source)).toContain("import('../store/StoreContext')");
+  });
+
+  it('scans a regex literal, which may hold any quoting character', () => {
+    const source = `const re = /[\`'"]/;\nconst opener = \`/*\`;\n${CALL}\n*/\n`;
+    expect(blankJsComments(source)).toContain("import('../store/StoreContext')");
+  });
+
+  it('scans a ${} substitution, which is code and may hold a backtick', () => {
+    const source = `const l = \`a \${JSON.stringify("\`")} b\`;\nconst opener = \`/*\`;\n${CALL}\n*/\n`;
+    expect(blankJsComments(source)).toContain("import('../store/StoreContext')");
+  });
+
+  it('does not read a division as a regex and swallow the comment after it', () => {
+    // The other direction of the regex heuristic. If `/ count; //` were taken for a literal
+    // the line comment would survive the blanking, and a rule that reads prose as code
+    // reports its own documentation.
+    const source = "const r = total / count; // await import('../store/StoreContext')\n";
+    const blanked = blankJsComments(source);
+
+    expect(blanked).toHaveLength(source.length);
+    expect(blanked).toContain('const r = total / count;');
+    expect(blanked).not.toContain('StoreContext');
+  });
+
+  it('reads a regex after a keyword, where no operator character precedes it', () => {
+    const source = `function f(s) { return /[\`]/.test(s); }\nconst opener = \`/*\`;\n${CALL}\n*/\n`;
+    expect(blankJsComments(source)).toContain("import('../store/StoreContext')");
+  });
+});
+
+/*
+ * Vite documents an array of patterns as first-class, and the first version of this rule
+ * read one literal out of the call and decided the whole call on it. Every case below puts
+ * the innocent pattern FIRST, because that is the input that got through.
+ */
+describe('rule (d) and a glob with several patterns', () => {
+  const scan = (source: string): number => {
+    const root = mkdtempSync(join(tmpdir(), 'nysia-globs-'));
+    try {
+      const absolute = join(root, 'apps/web/src/chrome/Probe.ts');
+      mkdirSync(dirname(absolute), { recursive: true });
+      writeFileSync(absolute, source);
+      return runSourceRules(root).filter((v) => v.rule === 'no-store-context-outside-store')
+        .length;
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it.each([
+    ['a stylesheet in front of the store', "['../**/*.css', '../store/*.ts']"],
+    ['a negation in front of the store', "['!../store/ignored.css', '../store/*.ts']"],
+    ['an unrestricted pattern last', "['../**/*.css', '../store/*']"],
+    ['patterns spread across lines', "[\n  '../**/*.css',\n  '../store/*.ts',\n]"],
+    // A per-pattern query says nothing about the pattern beside it.
+    ['a raw pattern beside a live one', "['../**/*.ts?raw', '../store/*.ts']"],
+  ])('reports %s', (_what, first) => {
+    expect(scan(`export const m = import.meta.glob(${first});\n`)).toBe(1);
+  });
+
+  it('reports a pattern built at runtime, which says nothing about what it returns', () => {
+    expect(scan('const p = patterns;\nexport const m = import.meta.glob(p);\n')).toBe(1);
+  });
+
+  it.each([
+    ['every pattern is a non-module extension', "['../**/*.css', '../**/*.svg']"],
+    ['the options make the whole call raw', "['../**/*.ts', '../store/*.tsx'], { query: '?raw' }"],
+  ])('allows a glob where %s', (_what, args) => {
+    // The positive control. Without these, "read every literal" could just be "report every
+    // glob" with a proof wrapped round it.
+    expect(scan(`export const m = import.meta.glob(${args});\n`)).toBe(0);
+  });
+});

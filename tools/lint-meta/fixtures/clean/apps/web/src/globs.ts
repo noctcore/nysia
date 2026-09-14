@@ -13,3 +13,12 @@ const sources = import.meta.glob('../**/*.{ts,tsx}', {
 const stylesheets = import.meta.glob('../**/*.css');
 
 export const scanned = [sources, stylesheets];
+
+// The array form, which the first version of the rule read only the first entry of. These
+// two are the positive control for the fix: every pattern is read now, and a call whose
+// patterns are all stylesheets must still be allowed, or "read every literal" would just be
+// "report every glob" wearing a proof.
+const icons = import.meta.glob(['../**/*.css', '../**/*.svg']);
+const rawSources = import.meta.glob(['../**/*.ts', '../store/*.tsx'], { query: '?raw' });
+
+export const alsoScanned = [icons, rawSources];
