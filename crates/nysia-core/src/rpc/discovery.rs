@@ -50,6 +50,14 @@ use crate::rpc::lease::PidRecordFile;
 use crate::rpc::transport::TransportError;
 
 /// How long to wait for a freshly spawned daemon to start answering.
+///
+/// **A bound on this call, not a verdict on the daemon.** Defender scanning a binary it has
+/// never seen pushes a first bind past twenty seconds on exactly the machine where that is
+/// hardest to distinguish from a failure, and the process this call started is still on its
+/// way when the deadline passes. So [`DiscoveryError::NeverReady`] is retryable, and what it
+/// asks of a caller is a continuing cadence of **probes**: the runtime is already running,
+/// and a caller that answered the timeout by starting another one every twenty seconds would
+/// be adding processes to a machine that is already struggling to start the first.
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How often to re-dial while waiting for one.
