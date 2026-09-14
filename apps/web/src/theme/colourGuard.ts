@@ -146,8 +146,8 @@ const PALETTE_CLASS = new RegExp(
  *    that call now; before it was, a tuple table was caught, but by accident — every
  *    unrelated two-argument call with a property name in front of a string was caught too.
  *  - a colour carried inside a `url()`, which is set aside as a path before the words are
- *    counted. A data URI can carry a whole stylesheet, so this is the bare-CSS entry two
- *    bullets up arriving through a different door. The trade bought the loudest false
+ *    counted. A data URI can carry a whole stylesheet, so this is the bare-CSS entry above
+ *    arriving through a different door. What it paid for was closing the loudest false
  *    positive the rule had, and a percent-encoded stylesheet is not a shape anything in
  *    this tree writes.
  *
