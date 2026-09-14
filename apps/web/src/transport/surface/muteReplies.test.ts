@@ -196,7 +196,17 @@ const QUERY = '?';
 /** `OSC 4` addresses the palette by index, so its payload is `index;spec` pairs. */
 const INDEXED_COLOUR = 4;
 
-/** A parser with every responder xterm has, and no mute. */
+/**
+ * A parser with every responder xterm has, and no mute.
+ *
+ * Two of these answer here and would not answer in the app, deliberately. `kittyKeyboardQuery`
+ * returns without writing unless `vtExtensions.kittyKeyboard` is set, and `windowOptions`'
+ * reports are refused by `paramToWindowOption` against an option xterm defaults to `{}` —
+ * `./xterm.ts` sets neither. What is under test is the mute's own answer to each sequence, and
+ * a stand-in that copied xterm's option gates would test the gates instead, then pass the
+ * moment somebody turned one on. A responder an option flip away from being live is a
+ * responder (CLAUDE.md §6).
+ */
 function wired(): ModelParser {
   const parser = new ModelParser();
   parser.builtInCsi(DA1, '\u001b[?1;2c');
@@ -293,7 +303,8 @@ describe('the renderer answers nothing', () => {
 describe('the sequences that do more than answer', () => {
   it('lets a window option that is not a report through to the built-in', () => {
     // `CSI 22 t` pushes the window title and `CSI 23 t` pops it. Muting the whole of `CSI t`
-    // would have been the smaller table and would have broken both.
+    // would have been the smaller table and would break both the moment `windowOptions` is
+    // set — which it is not today, so this pins the shape rather than a live behaviour.
     const parser = muted();
     parser.csi(WINDOW_OPTIONS, [22, 0]);
     parser.csi(WINDOW_OPTIONS, [23, 0]);
