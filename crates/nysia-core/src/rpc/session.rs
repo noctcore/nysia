@@ -379,7 +379,14 @@ impl OwnedSession {
         let stream = sink.stream_id();
         sink.send(&sink.opening_grant());
         let replay = lock(&self.vt).replay();
-        for chunk in replay.chunks(FLUSH_CEILING) {
+        // The window's chunk, not the flush ceiling. A 64 KiB frame charged against a
+        // smaller allowance drives the credit deeply negative in one go, and the stream then
+        // sends nothing until the client has acked its way back above zero — which under a
+        // tight window is a pane that sits blank after a re-attach for no reason the client
+        // can see. Chunked to the window, a replay longer than the opening allowance stops at
+        // it and says so below, which is the behaviour the rest of this function already
+        // documents.
+        for chunk in replay.chunks(sink.window().chunk as usize) {
             if sink.send(&Frame::new(FrameKind::Output, stream, chunk.to_vec()))
                 != SendOutcome::Sent
             {
@@ -921,6 +928,76 @@ mod tests {
     use super::*;
 
     use crate::rpc::testing::{DEADLINE, TOKEN, TestShell};
+
+    #[test]
+    fn a_replay_is_chunked_to_the_window_rather_than_to_the_flush_ceiling() {
+        // A frame larger than the allowance is charged in one go and drives the credit
+        // negative, after which the stream sends nothing until the client has acked its way
+        // back above zero. On a re-attach under a tight window that is a pane that sits blank
+        // with nothing to explain it.
+        let window = nysia_proto::CreditWindow {
+            per_stream_initial: 2 * 1024,
+            per_stream_max: 4 * 1024,
+            total_initial: 2 * 1024,
+            total_max: 4 * 1024,
+            pending_cap: 2 * 1024,
+            ack_batch: 512,
+            chunk: 256,
+        };
+        assert!(window.is_coherent());
+        let registry = SessionRegistry::new();
+        let created = create(&registry, None);
+        let session = registry.get(&created.handle).expect("the session is there");
+        await_prompt(&session);
+        // Enough scrollback that the replay cannot fit in one chunk, which is the only case
+        // this test is about. A fresh prompt is shorter than 256 bytes and would pass either
+        // way — the shape of a test that proves nothing.
+        session
+            .send(&TerminalSend::line(
+                created.handle.clone(),
+                TestShell::pick().flood,
+            ))
+            .expect("writes");
+        // Wait for the screen to actually fill. `Idle` alone is satisfied by the quiet
+        // *before* the shell starts producing, which is how this came to measure a replay of
+        // 194 bytes and pass whatever the chunking did.
+        until(&session, |text| text.len() > 2000);
+        let _ = session.wait(WaitFor::Idle, Some(DEADLINE));
+        let replay_len = lock(&session.vt).replay().len();
+        assert!(
+            replay_len > window.chunk as usize,
+            "the replay is {replay_len} bytes against a {} byte chunk; it has to be longer              than one chunk or this test proves nothing",
+            window.chunk
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4096);
+        let sink = Arc::new(StreamSink::new(nysia_proto::StreamId::FIRST, tx, window));
+        session.attach(&sink);
+
+        let mut frames = 0;
+        while let Ok(frame) = rx.try_recv() {
+            let (frame, _) = nysia_proto::decode(&frame)
+                .expect("decodes")
+                .expect("a whole frame");
+            if frame.kind != FrameKind::Output {
+                continue;
+            }
+            frames += 1;
+            assert!(
+                frame.payload.len() <= window.chunk as usize,
+                "a replay frame of {} bytes against a {}-byte chunk",
+                frame.payload.len(),
+                window.chunk
+            );
+        }
+        assert!(frames > 0, "the session had scrollback to replay");
+        assert!(
+            sink.credit() >= 0,
+            "a replay must stop at the allowance rather than overshoot it: {} left",
+            sink.credit()
+        );
+        registry.close(&created.handle).expect("closes");
+    }
 
     #[test]
     fn a_sink_that_stops_half_way_resumes_rather_than_being_offered_the_buffer_again() {
