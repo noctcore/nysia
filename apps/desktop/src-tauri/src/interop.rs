@@ -38,9 +38,9 @@ use nysia_proto::credit::CreditWindow;
 use nysia_proto::envelope::{RequestPayload, ResponsePayload};
 use nysia_proto::frame::{FrameDecoder, FrameKind};
 use nysia_proto::identity::{SessionHandle, SessionKind};
-use nysia_proto::session::SessionCreate;
+use nysia_proto::session::{SessionCreate, ShellProfile};
 use nysia_proto::stream::StreamId;
-use nysia_proto::terminal::TerminalSend;
+use nysia_proto::terminal::{TerminalRead, TerminalSend, TerminalWait, WaitFor};
 use nysia_proto::version::PROTOCOL_VERSION;
 
 use crate::channel::FrameSink;
@@ -48,6 +48,9 @@ use crate::state::Client;
 
 /// Every wait here is bounded; a test that can hang is a test that will.
 const DEADLINE: Duration = Duration::from_secs(30);
+
+/// The same deadline, as the wire spells one.
+const DEADLINE_MS: u64 = 30_000;
 
 /// A daemon of this test's own, serving on an endpoint nothing else uses.
 ///
@@ -244,13 +247,43 @@ impl FrameSink for Webview {
     }
 }
 
+/// The shell these tests drive, and the line that makes it write until it is stopped.
+///
+/// **One decision, returning both.** The profile and the flood line have to agree or the
+/// test types one language's loop into another shell, which produces a syntax error and no
+/// output at all — and then reads that as a credit stall, because a stall and a command that
+/// never ran look identical from the sink. An earlier version of this file picked the line
+/// by asking whether `pwsh` resolved while leaving the profile at the platform default, so
+/// on any machine with PowerShell 7 and a POSIX login shell it did exactly that.
+///
+/// `pwsh` where §9 says it will be and CI has it, the platform's own shell where it is not,
+/// so a machine without PowerShell 7 still runs this.
+fn shell() -> (Option<ShellProfile>, &'static str) {
+    if nysia_core::pty::resolve("pwsh").is_ok() {
+        return (
+            Some(ShellProfile::Pwsh),
+            r#"while ($true) { Write-Output ("x" * 120) }"#,
+        );
+    }
+    if cfg!(windows) {
+        return (
+            Some(ShellProfile::Cmd),
+            "for /l %i in (1,1,100000000) do @echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        );
+    }
+    (
+        None,
+        "yes xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    )
+}
+
 /// Create a shell session on the daemon and return its handle.
 fn open_shell(client: &Client) -> SessionHandle {
     let answer = client
         .request(RequestPayload::SessionCreate(SessionCreate {
             kind: SessionKind::Shell,
             pane_key: None,
-            profile: None,
+            profile: shell().0,
             cwd: None,
             env_overrides: BTreeMap::new(),
             cols: 100,
@@ -266,18 +299,45 @@ fn open_shell(client: &Client) -> SessionHandle {
     }
 }
 
-/// A line that makes the platform's shell write until it is stopped.
+/// Wait until the shell has drawn its prompt and gone quiet, before typing at it.
 ///
-/// The same recipe `nysia-core`'s own backpressure test uses, for the same reason: `pwsh`
-/// where §9 says it will be and CI has it, and the platform's own shell where it is not, so
-/// a machine without PowerShell 7 still runs this.
-fn flood_line() -> &'static str {
-    if nysia_core::pty::resolve("pwsh").is_ok() {
-        r#"while ($true) { Write-Output ("x" * 120) }"#
-    } else if cfg!(windows) {
-        "for /l %i in (1,1,100000000) do @echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    } else {
-        "yes xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+/// **Not a nicety.** A shell that has not finished starting echoes what is typed and then
+/// redraws the line when its line editor takes over, so the command appears on screen twice
+/// and runs zero times. That is not a flake either: on the macOS runner it lost the flood
+/// line every time, and the test read 473 bytes of prompt where it expected a megabyte —
+/// looking exactly like the credit stall it exists to catch, which is the worst way for a
+/// test to fail.
+///
+/// An empty screen means the shell has written nothing yet; quiet alone would be satisfied
+/// by the silence *before* it starts, so both conditions are needed and in this order.
+fn await_prompt(client: &Client, handle: &SessionHandle) {
+    let drew_something = eventually(|| !screen(client, handle).trim().is_empty());
+    assert!(
+        drew_something,
+        "the shell never drew a prompt within {DEADLINE:?}, so there is nothing to type at"
+    );
+    settle(client, handle);
+}
+
+/// Wait for the session to stop producing output.
+fn settle(client: &Client, handle: &SessionHandle) {
+    let _ = client.request(RequestPayload::TerminalWait(TerminalWait {
+        handle: handle.clone(),
+        wait_for: WaitFor::Idle,
+        timeout_ms: Some(DEADLINE_MS),
+    }));
+}
+
+/// The session's rendered screen, as the CLI and hooks read it.
+fn screen(client: &Client, handle: &SessionHandle) -> String {
+    match client.request(RequestPayload::TerminalRead(TerminalRead::screen(
+        handle.clone(),
+    ))) {
+        Ok(ResponsePayload::TerminalRead(read)) => read.lines.join(
+            "
+",
+        ),
+        _ => String::new(),
     }
 }
 
@@ -333,11 +393,18 @@ fn output_reaches_the_webview_on_the_id_the_daemon_assigned() {
         .attach_session(handle.clone())
         .expect("the daemon routes the session");
 
+    await_prompt(&client, &handle);
+    let prompt = webview.delivered(stream);
+
     // Not any id: the one the daemon answered with. A client that numbered streams itself
     // would pass everything above this line and paint into the wrong pane here.
+    //
+    // Measured from after the prompt, so what is asserted is output this line caused. The
+    // prompt alone would satisfy `> 0` and would have passed on a runner where the typed
+    // line was lost entirely.
     type_line(&client, &handle, "echo NYSIA-INTEROP");
     assert!(
-        eventually(|| webview.delivered(stream) > 0),
+        eventually(|| webview.delivered(stream) > prompt),
         "nothing was delivered on stream {stream:?} within {DEADLINE:?}"
     );
     assert_eq!(
@@ -368,7 +435,8 @@ fn a_flood_keeps_flowing_past_the_per_stream_ceiling() {
         .attach_session(handle.clone())
         .expect("the daemon routes the session");
 
-    type_line(&client, &handle, flood_line());
+    await_prompt(&client, &handle);
+    type_line(&client, &handle, shell().1);
 
     let ceiling = u64::from(CreditWindow::DEFAULT.per_stream_initial);
     let target = ceiling * 2;
@@ -427,6 +495,7 @@ fn a_reload_reattaches_over_a_second_stream_connection() {
         "the reload tore down a control connection that was working"
     );
 
+    await_prompt(&client, &handle);
     type_line(&client, &handle, "echo NYSIA-RELOADED");
     assert!(
         eventually(|| second.delivered(after) > 0),
