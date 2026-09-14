@@ -16,13 +16,14 @@
 //! crash and nothing in the log.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::channel::{Dispatcher, FrameSink};
 use crate::daemon::control::Control;
 use crate::daemon::stream::Stream;
 use crate::daemon::{DaemonError, endpoint};
-use nysia_core::rpc::Endpoint;
+use nysia_core::rpc::{DiscoveryError, Endpoint, EnsureError, Probed, SpawnPolicy, ensure_daemon};
 use nysia_proto::credit::CreditWindow;
 use nysia_proto::envelope::{RequestPayload, ResponsePayload};
 use nysia_proto::handshake::{ClientRole, DaemonIdentity};
@@ -38,6 +39,16 @@ const ATTACH_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(
 
 /// The pause between those attempts.
 const ATTACH_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// The file name of the runtime this window starts when nothing is listening.
+///
+/// One binary is both the daemon and the CLI, selected by argv (D-11), and Tauri ships it
+/// beside the window as a sidecar: `nysia.exe` next to `Nysia.exe` on Windows, and inside
+/// `Nysia.app/Contents/MacOS/` on macOS. `cargo build` leaves the two in the same `target/`
+/// directory, so one rule — *beside this executable* — covers a developer's build and an
+/// installed bundle alike, with nothing path-shaped baked in at compile time (traps
+/// register #9).
+const RUNTIME_BINARY: &str = if cfg!(windows) { "nysia.exe" } else { "nysia" };
 
 /// Which stream id belongs to which session, in both directions.
 ///
@@ -126,6 +137,29 @@ impl StreamTable {
 /// on both sides of the supersede and separates nothing.
 type Generation = u64;
 
+/// Where a client looks for the runtime to start when nothing is listening.
+///
+/// A three-way choice rather than an `Option<PathBuf>` because "start the one that shipped
+/// with me", "start this exact file" and "start nothing" are three different intentions, and
+/// the last two exist only for tests. §6's rule about security defaults applies to the shape:
+/// the window's own path resolves the sidecar and there is no argument on it that could name
+/// something else.
+#[derive(Debug, Clone)]
+enum RuntimeBinary {
+    /// Beside this executable — the sidecar in a bundle, the sibling in `target/`.
+    Sidecar,
+    /// A path a test pinned, so it can prove a first launch without building a bundle.
+    #[cfg(test)]
+    Pinned(PathBuf),
+    /// Do not start one.
+    ///
+    /// What [`Client::at`] selects. The interop harness binds a daemon of its own, and a
+    /// client that quietly started a second one beside it would be testing something nobody
+    /// wrote.
+    #[cfg(test)]
+    Never,
+}
+
 /// Everything one connection owns.
 struct Connected {
     control: Control,
@@ -172,12 +206,15 @@ pub struct Client {
     /// and is named so that a call site which has left the ordinary path is obvious in a
     /// diff and greppable afterwards.
     endpoint: Option<Endpoint>,
+    /// Which runtime this client may start when nothing is listening.
+    binary: RuntimeBinary,
 }
 
 impl Client {
-    /// A client holding no connection, which finds the daemon the way the window does.
+    /// A client holding no connection, which finds the daemon the way the window does —
+    /// and starts one when there is none.
     pub fn new() -> Self {
-        Self::pinned(None)
+        Self::configured(None, RuntimeBinary::Sidecar)
     }
 
     /// A client that dials `endpoint` instead of resolving one from the environment.
@@ -188,16 +225,27 @@ impl Client {
     /// parameter away from talking to a daemon nobody chose.
     #[cfg(test)]
     pub fn at(endpoint: Endpoint) -> Self {
-        Self::pinned(Some(endpoint))
+        Self::configured(Some(endpoint), RuntimeBinary::Never)
     }
 
-    fn pinned(endpoint: Option<Endpoint>) -> Self {
+    /// A client that dials `endpoint` and may start `program` when nothing answers there.
+    ///
+    /// The proof of a first launch, and nothing else: a test has no bundle, so the sidecar
+    /// rule below cannot find the binary `cargo` built two directories up. Named apart from
+    /// [`Self::at`] so that a call site able to start a process is obvious in a diff.
+    #[cfg(test)]
+    pub fn at_with_runtime(endpoint: Endpoint, program: PathBuf) -> Self {
+        Self::configured(Some(endpoint), RuntimeBinary::Pinned(program))
+    }
+
+    fn configured(endpoint: Option<Endpoint>, binary: RuntimeBinary) -> Self {
         Self {
             inner: Arc::new(Mutex::new(None)),
             table: Arc::new(Mutex::new(StreamTable::new())),
             next_generation: Arc::new(Mutex::new(1)),
             edges: Arc::new((Mutex::new(0), Condvar::new())),
             endpoint,
+            binary,
         }
     }
 
@@ -209,19 +257,95 @@ impl Client {
         }
     }
 
-    /// Connect, or return the identity of the daemon already attached.
+    /// What this client may start when nothing is listening.
+    fn spawn_policy(&self) -> Result<SpawnPolicy, DaemonError> {
+        match &self.binary {
+            RuntimeBinary::Sidecar => Ok(SpawnPolicy::IfAbsent {
+                program: sidecar()?,
+            }),
+            #[cfg(test)]
+            RuntimeBinary::Pinned(program) => Ok(SpawnPolicy::IfAbsent {
+                program: program.clone(),
+            }),
+            #[cfg(test)]
+            RuntimeBinary::Never => Ok(SpawnPolicy::Never),
+        }
+    }
+
+    /// Connect, starting a daemon if none is listening, or return the identity of the one
+    /// already attached.
+    ///
+    /// **This is where a first launch stops being an instruction to open a terminal.** The
+    /// window does not reimplement spawn-if-absent: it calls
+    /// [`nysia_core::rpc::ensure_daemon`], the same seam `nysia <verb>` reaches through
+    /// [`nysia_core::rpc::discover`], so the spawn lock that settles two clients racing and
+    /// the lease that separates a live daemon from a stale record have exactly one
+    /// implementation between the two front ends (§12 q5).
+    ///
+    /// ## Nothing here is done under the client lock
+    ///
+    /// Starting a daemon and waiting for it to answer takes seconds, and this module's one
+    /// rule is that nothing waits on another thread while holding that lock. A connect that
+    /// held it across the spawn would park every command, every disconnect watcher and every
+    /// reconnect behind it — indistinguishable, from the webview, from the freeze the
+    /// blocking-command discipline exists to prevent. So the seam runs outside the lock and
+    /// the connection is installed after it, and a connect that lost a race to another
+    /// command in the meantime drops its own and answers with the one that is already there.
     ///
     /// # Errors
     ///
-    /// Whatever the handshake produced.
+    /// Whatever the handshake produced, or [`DaemonError::Spawn`] when there was no daemon
+    /// and none could be started.
     pub fn connect(&self) -> Result<DaemonIdentity, DaemonError> {
-        let mut held = self.lock()?;
-        if let Some(connected) = held.as_ref() {
-            return Ok(connected.identity.clone());
+        if let Some(identity) = self.identity() {
+            return Ok(identity);
         }
 
-        let control = Control::connect(self.dial()?.listening())?;
+        let endpoint = self.dial()?;
+        let policy = self.spawn_policy()?;
+        let ensured = ensure_daemon(&endpoint, &policy, || {
+            match Control::connect(endpoint.listening()) {
+                Ok(control) => {
+                    let identity = control.identity().clone();
+                    Ok(Probed::Answering {
+                        connection: control,
+                        identity,
+                    })
+                }
+                // The **only** answer that may lead to a spawn. A refused handshake means
+                // something is listening, and starting a second daemon beside it is the
+                // failure the seam's two-valued answer exists to prevent.
+                Err(DaemonError::Unreachable { .. }) => Ok(Probed::Absent),
+                Err(other) => Err(other),
+            }
+        })
+        .map_err(|error| spawn_failure(&endpoint, &policy, error))?;
+
+        if ensured.spawned {
+            tracing::info!(
+                endpoint = %endpoint.listening(),
+                "no daemon was listening, so the window started the one it ships with"
+            );
+        }
+        if !ensured.lease_matches {
+            tracing::warn!(
+                endpoint = %endpoint.listening(),
+                "the daemon answering does not match the lease beside it; the record is stale"
+            );
+        }
+
+        let control = ensured.connection;
         let identity = control.identity().clone();
+        let mut held = self.lock()?;
+        if let Some(connected) = held.as_ref() {
+            // Another command connected while this one was starting a daemon. The window
+            // holds one connection, so this one is dropped — outside the lock, per the rule
+            // above, which is why the guard goes first.
+            let settled = connected.identity.clone();
+            drop(held);
+            drop(control);
+            return Ok(settled);
+        }
         *held = Some(Connected {
             control,
             stream: None,
@@ -640,6 +764,118 @@ impl Default for Client {
     }
 }
 
+/// The `nysia` runtime that ships beside the window.
+///
+/// **Beside this executable, and nowhere else.** Not `PATH`: the window would then start
+/// whichever `nysia` a shell happened to put first, which is a daemon nobody chose and, at
+/// best, a different version of the protocol this build speaks. The bundle ships one; that is
+/// the one to run.
+///
+/// The path is checked here rather than left to `CreateProcess`, which reports a missing
+/// program as a bare `NotFound` (traps register #8) — and "the app is missing the binary it
+/// ships with" is worth saying in those words, because reinstalling is the fix and no amount
+/// of reconnecting is.
+///
+/// # Errors
+///
+/// [`DaemonError::Spawn`], which is not retryable: a bundle that is missing its runtime will
+/// still be missing it on the next attempt.
+fn sidecar() -> Result<PathBuf, DaemonError> {
+    let exe = std::env::current_exe().map_err(|error| DaemonError::Spawn {
+        message: format!("Nysia could not find its own program file: {error}"),
+        next_step: RUN_ONE_BY_HAND.to_owned(),
+    })?;
+    let beside = exe
+        .parent()
+        .map(|dir| dir.join(RUNTIME_BINARY))
+        .ok_or_else(|| DaemonError::Spawn {
+            message: format!(
+                "Nysia is installed at {}, which has no directory to hold the runtime it starts",
+                exe.display()
+            ),
+            next_step: RUN_ONE_BY_HAND.to_owned(),
+        })?;
+    if !beside.is_file() {
+        return Err(DaemonError::Spawn {
+            message: format!(
+                "the Nysia runtime is not installed beside the app: {} does not exist",
+                beside.display()
+            ),
+            next_step: format!(
+                "Reinstall Nysia — this copy shipped without the `nysia` runtime it starts. {RUN_ONE_BY_HAND}"
+            ),
+        });
+    }
+    Ok(beside)
+}
+
+/// The step every spawn failure ends with: there is a way through that does not need a fix.
+const RUN_ONE_BY_HAND: &str = "Until then, start one yourself with `nysia --daemon`.";
+
+/// What the user is told when no daemon could be reached or started.
+///
+/// `policy` is here for one sentence: a spawn that failed has to name the program it tried to
+/// run, and only the policy holds it.
+///
+/// Each arm settles the sentence **and** whether the window keeps trying, and the two have to
+/// agree. The store reconnects on a retryable failure and stops on one that is not, so a
+/// permanent fault reported as retryable is a window that says *Reconnecting* for ever
+/// without once saying why — which is the defect this whole path exists to close, reappearing
+/// one layer up.
+fn spawn_failure(
+    endpoint: &Endpoint,
+    policy: &SpawnPolicy,
+    error: EnsureError<DaemonError>,
+) -> DaemonError {
+    let discovery = match error {
+        // The probe is this module's own dial, so its failure already carries the window's
+        // phrasing and its own verdict on retrying. Passed through untouched.
+        EnsureError::Probe(failure) => return failure,
+        EnsureError::Discovery(discovery) => discovery,
+    };
+    match discovery {
+        DiscoveryError::Absent { endpoint } => DaemonError::Unreachable {
+            endpoint,
+            cause: "nothing is listening, and this client may not start one".to_owned(),
+        },
+        // The bundle's runtime exists and still would not run: a refused execute, a binary
+        // for another architecture, an antivirus holding the file. Waiting does not fix any
+        // of them.
+        DiscoveryError::Spawn(cause) => DaemonError::Spawn {
+            message: format!("Nysia could not start its runtime: {cause}"),
+            // The program, not the runtime directory. A next step that named the wrong file
+            // sends the reader to look at something that was never the problem.
+            next_step: match policy {
+                SpawnPolicy::IfAbsent { program } => format!(
+                    "Check that {} can be run on this machine. {RUN_ONE_BY_HAND}",
+                    program.display()
+                ),
+                SpawnPolicy::Never => RUN_ONE_BY_HAND.to_owned(),
+            },
+        },
+        // It started and died, or started and never bound. The daemon writes why to its log
+        // before it goes, so the next step is the path rather than a shrug.
+        DiscoveryError::NeverReady { seconds, .. } => DaemonError::Spawn {
+            message: format!(
+                "Nysia started its runtime but it did not answer within {seconds} seconds"
+            ),
+            next_step: format!(
+                "The daemon wrote why to {}. {RUN_ONE_BY_HAND}",
+                endpoint.log_path().display()
+            ),
+        },
+        // Somebody else is mid-spawn. Retryable, and the window's reconnect is exactly the
+        // right response: the daemon they are starting is the one this window wants.
+        DiscoveryError::LockTimeout { seconds } => DaemonError::Io(format!(
+            "another process has been starting a daemon for {seconds} seconds"
+        )),
+        // Unreachable through this seam — the probe above is the only dial, and it never
+        // produces a `nysia_core` client error — but reported rather than panicked on,
+        // because §6 keeps panics out of a path a person can reach.
+        DiscoveryError::Client(cause) => DaemonError::Io(cause.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -908,5 +1144,235 @@ mod tests {
             Some(StreamId(2)),
             "closing one session must not disturb another"
         );
+    }
+
+    /// **The first-launch proof.** No daemon anywhere, and the window reaches a live session.
+    ///
+    /// This is §12 q6 as a test: before the seam below existed, a machine with nothing
+    /// listening gave the user a window stuck on *Reconnecting* and a `+` menu that failed
+    /// with "Start the Nysia daemon, then try again". `Client::connect` dialled once and gave
+    /// up; there was no second step.
+    ///
+    /// It goes through the window's own path — [`Client::connect`], the same call
+    /// `daemon_connect` makes — rather than a harness of its own, because "the window starts
+    /// a daemon" is the claim and any other entry point would be proving somebody else's.
+    /// What it substitutes for production is only *which* binary may be started: a test has no
+    /// bundle, so it pins the `nysia` that `cargo` has just built. The sidecar rule that
+    /// production uses instead is proved separately, below.
+    ///
+    /// Run against the code before the fix it fails at the first line that matters, with
+    /// `Unreachable` from a connect that never tried to start anything.
+    #[test]
+    fn a_window_with_no_daemon_anywhere_starts_one_and_reaches_a_working_session() {
+        let endpoint = crate::interop::scratch("launch");
+        let runtime = runtime_binary();
+        assert!(
+            runtime.is_file(),
+            "{} was not built; `cargo test --workspace` builds it before running this",
+            runtime.display()
+        );
+        // Nothing is listening: the endpoint is scratch, and no daemon has ever bound it.
+        let client = Client::at_with_runtime(endpoint.clone(), runtime);
+
+        let identity = client
+            .connect()
+            .expect("the window must start a daemon when there is none");
+        assert!(
+            identity.pid != std::process::id(),
+            "the daemon must be a process of its own, not this one"
+        );
+
+        // A daemon that answered `hello` is not yet a *working* session, which is what a user
+        // gets nothing from the app without. So: create one, type at it, and read back
+        // something the shell had to compute rather than echo.
+        let handle = open_shell(&client);
+        assert!(
+            eventually(|| !screen(&client, &handle).trim().is_empty()),
+            "the shell never drew a prompt, so there is nothing to type at"
+        );
+        for line in token_lines() {
+            type_line(&client, &handle, line);
+        }
+        assert!(
+            eventually(|| screen(&client, &handle).contains("NYSIA-42")),
+            "the session never ran what was typed at it; the screen was {:?}",
+            screen(&client, &handle)
+        );
+
+        let _ = client.request(RequestPayload::SessionClose(
+            nysia_proto::session::SessionClose {
+                handle: handle.clone(),
+            },
+        ));
+        client.disconnect();
+        stop_daemon(&endpoint);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// The production rule, which the proof above deliberately does not use.
+    ///
+    /// Asserted rather than driven, because driving it would mean putting a `nysia` beside
+    /// the test runner — and the value here is the *rule*: beside this executable, never
+    /// `PATH`. A window that searched `PATH` would start whichever `nysia` a shell happened to
+    /// put first, which is a daemon nobody chose.
+    #[test]
+    fn the_window_starts_the_runtime_that_ships_beside_it_and_never_one_off_the_path() {
+        let exe = std::env::current_exe().expect("a test runner knows its own path");
+        let beside = exe
+            .parent()
+            .expect("it is in a directory")
+            .join(RUNTIME_BINARY);
+        match sidecar() {
+            Ok(found) => assert_eq!(
+                found, beside,
+                "the window resolved a runtime that is not the one beside it"
+            ),
+            // The ordinary case for a test runner: `target/debug/deps` holds no `nysia`. What
+            // matters is that it said so in a sentence a person can act on, and that it did
+            // not fall back to something it found elsewhere.
+            Err(error) => {
+                assert!(matches!(error, DaemonError::Spawn { .. }), "got {error:?}");
+                assert!(
+                    !error.retryable(),
+                    "reinstalling is the fix; waiting is not"
+                );
+                assert!(
+                    error.to_string().contains(&beside.display().to_string()),
+                    "the message must name the path that was tried, got {error}"
+                );
+                assert!(
+                    error.next_steps().iter().all(|step| !step.is_empty()),
+                    "a spawn failure with no next step is the notice users dismiss unread"
+                );
+            }
+        }
+    }
+
+    /// The `nysia` that `cargo` built for this run.
+    ///
+    /// Derived from the test runner's own path — `target/<profile>/deps/<test>.exe` — rather
+    /// than from `CARGO_MANIFEST_DIR`, which must never be baked into anything path-shaped
+    /// (traps register #9) and would in any case name the source tree rather than the build.
+    fn runtime_binary() -> PathBuf {
+        let exe = std::env::current_exe().expect("a test runner knows its own path");
+        exe.parent()
+            .and_then(std::path::Path::parent)
+            .expect("the runner lives in target/<profile>/deps")
+            .join(RUNTIME_BINARY)
+    }
+
+    /// Stop the daemon the lease beside `endpoint` describes.
+    ///
+    /// A daemon this process did not spawn as a child — it is detached, which is the whole
+    /// point — so it is found the way any other tool would find it. Left to retire on its own
+    /// it would hold its log file open for minutes, and on Windows a `remove_dir_all` against
+    /// an open file fails silently, which is how a later run inherits a directory it believed
+    /// was fresh.
+    fn stop_daemon(endpoint: &Endpoint) {
+        let Ok(Some(record)) =
+            nysia_core::rpc::PidRecordFile::at(endpoint.pid_record_path()).read()
+        else {
+            return;
+        };
+        let pid = record.pid.to_string();
+        let stopped = if cfg!(windows) {
+            std::process::Command::new("taskkill")
+                .args(["/PID", &pid, "/T", "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+        } else {
+            std::process::Command::new("kill")
+                .args(["-TERM", &pid])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+        };
+        let _ = stopped;
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+
+    /// A shell on the daemon, and its handle.
+    fn open_shell(client: &Client) -> SessionHandle {
+        let answer = client
+            .request(RequestPayload::SessionCreate(
+                nysia_proto::session::SessionCreate {
+                    kind: nysia_proto::identity::SessionKind::Shell,
+                    pane_key: None,
+                    profile: shell_profile(),
+                    cwd: None,
+                    env_overrides: std::collections::BTreeMap::new(),
+                    cols: 100,
+                    rows: 30,
+                },
+            ))
+            .expect("the daemon the window started creates a session");
+        match answer {
+            ResponsePayload::SessionCreate(created) => created.handle,
+            other => panic!(
+                "session_create was answered with a {} payload",
+                other.verb()
+            ),
+        }
+    }
+
+    /// `cmd` on Windows, the platform's own shell elsewhere.
+    ///
+    /// Neither needs PowerShell 7 to be installed, which a machine running this may not have.
+    fn shell_profile() -> Option<nysia_proto::session::ShellProfile> {
+        if cfg!(windows) {
+            Some(nysia_proto::session::ShellProfile::Cmd)
+        } else {
+            None
+        }
+    }
+
+    /// Lines that make the shell **compute** `NYSIA-42`.
+    ///
+    /// Computed, never typed: a token that also appears in the line as typed is satisfied by
+    /// the kernel's echo, with the shell having run nothing at all.
+    fn token_lines() -> Vec<&'static str> {
+        if cfg!(windows) {
+            // `cmd` expands `%NYS%` as it parses the line, so the assignment is its own
+            // command — which also keeps `42` out of everything that is typed.
+            vec!["set /a NYS=6*7", "echo NYSIA-%NYS%"]
+        } else {
+            vec![r#"echo "NYSIA-$((6*7))""#]
+        }
+    }
+
+    fn type_line(client: &Client, handle: &SessionHandle, text: &str) {
+        client
+            .request(RequestPayload::TerminalSend(
+                nysia_proto::terminal::TerminalSend {
+                    handle: handle.clone(),
+                    text: text.to_owned(),
+                    enter: true,
+                    interrupt: false,
+                },
+            ))
+            .expect("the daemon accepts input");
+    }
+
+    /// The session's rendered screen, as the CLI and the hooks read it.
+    fn screen(client: &Client, handle: &SessionHandle) -> String {
+        match client.request(RequestPayload::TerminalRead(
+            nysia_proto::terminal::TerminalRead::screen(handle.clone()),
+        )) {
+            Ok(ResponsePayload::TerminalRead(read)) => read.lines.join("\n"),
+            _ => String::new(),
+        }
+    }
+
+    /// Poll `check` until it holds or half a minute passes. `true` if it held.
+    fn eventually(mut check: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if check() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        check()
     }
 }
