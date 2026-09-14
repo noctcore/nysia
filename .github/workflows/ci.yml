@@ -116,3 +116,82 @@ jobs:
             git diff
             exit 1
           fi
+
+  # The app as it is shipped, which is the only place the sidecar can be checked for.
+  # `cargo test` proves the window *starts* a runtime; nothing in the gates above proves the
+  # bundle **contains** one, and an app that builds cleanly and ships none is invisible until
+  # somebody launches it on a machine with no daemon (§12 q6).
+  bundle:
+    name: bundle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # One bundle target per platform, deliberately the cheap one: `targets: "all"` on
+          # macOS also builds a dmg, which needs a mounted disk image the runner sometimes
+          # refuses, and this job is asking a question about file layout rather than about
+          # installers.
+          - os: windows-latest
+            bundles: nsis
+          - os: macos-latest
+            bundles: app
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install the pinned rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Its own key: this job builds `--release` and the gates build `debug`, and sharing
+          # a key would have each evict the other's artifacts on every run.
+          key: bundle-${{ matrix.os }}
+
+      - name: Install node dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The same binary the CLI ships (D-11), built for the profile that is bundled.
+      - name: Build the nysia runtime
+        working-directory: crates/nysia
+        run: cargo build --release -p nysia
+
+      - name: Stage the nysia sidecar
+        run: node scripts/sidecar.ts stage --profile release
+
+      # `tauri build` runs the web build itself through `beforeBuildCommand`.
+      - name: Build the app bundle
+        run: pnpm --filter @nysia/desktop exec tauri build --bundles ${{ matrix.bundles }}
+
+      # Beside the window cargo built, which is where `tauri_build` copies the sidecar.
+      - name: The runtime ships beside the window
+        run: node scripts/sidecar.ts verify target/release
+
+      # And inside the bundle a user actually receives. Globbed rather than spelled, so a
+      # change to `productName` renames the check's subject instead of silently skipping it.
+      - name: The runtime ships inside the macOS app
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          app=$(ls -d target/release/bundle/macos/*.app | head -n 1)
+          echo "checking $app"
+          node scripts/sidecar.ts verify "$app/Contents/MacOS"
+
+      - name: The Windows installer was produced
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          ls -l target/release/bundle/nsis/*.exe
+
+      - name: prove the sidecar check trips
+        run: pnpm prove:sidecar
