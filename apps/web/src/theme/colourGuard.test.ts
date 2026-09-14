@@ -1046,6 +1046,169 @@ const tier = 'gold'`;
 });
 
 /*
+ * The corpus, which is the claim.
+ *
+ * Round two's commit message said a sweep "reports zero remaining shapes the old rule caught
+ * and this one does not". The sweep was a local script, so nobody could audit it — only
+ * contradict it, which is what happened in the next review. The rule that came out of that
+ * is worth more than the sweep was: **no completeness claim survives unless the check that
+ * produces it is committed and runnable.**
+ *
+ * So the corpus is here. It is a cross-product, and it is deliberately two matrices rather
+ * than one, because the two axes fail independently:
+ *
+ *  - a **site** is a place a name is bound to a value. Every site below is checked with one
+ *    ordinary colour, so removing a site kind turns this red.
+ *  - a **value spelling** is a way of writing the thing bound. Every spelling below is
+ *    checked at one ordinary site, and the ones the walk does not follow are listed by name
+ *    next to the residue entry that explains each, so narrowing the value walk turns this
+ *    red and widening it turns the *miss* list red.
+ *
+ * Both matrices run every cell through the same `findColourLiterals` a reviewer can call.
+ * What this cannot do is compare against the rule this replaced — that implementation is
+ * gone once this merges — so the comparison that found `await` and the four shapes in the
+ * span-coincidence residue entry is recorded in those entries rather than claimed here.
+ */
+describe('the corpus', () => {
+  /** Every place the guard treats as a site, one ordinary colour in each. */
+  const SITES = [
+    `const s = { color: {V} };`,
+    `const s = { 'color': {V} };`,
+    `const s = { ['color']: {V} };`,
+    `const s = { '--color-acc': {V} };`,
+    `<div style={{ color: {V} }} />`,
+    `<path fill={{V}} />`,
+    `<path fill="red" />`,
+    `el.style.color = {V};`,
+    `el.style['color'] = {V};`,
+    `color = {V};`,
+    `this.#color = {V};`,
+    `const color = {V};`,
+    `class A { color = {V}; }`,
+    `class A { #color = {V}; }`,
+    `function f(fill = {V}) {}`,
+    `function f({ color = {V} }) {}`,
+    `const g = ({ color = {V} }) => null;`,
+    `const { color = {V} } = props;`,
+    `const { color: c = {V} } = props;`,
+    `const { tier: color = {V} } = props;`,
+    `const [{ color = {V} }] = list;`,
+    `function f([color] = [{V}]) {}`,
+    `const [color, setColor] = useState({V});`,
+    `enum E { color = {V} }`,
+    `let color; ({ color = {V} } = props);`,
+    `({ color: c = {V} } = props);`,
+    `el.style.setProperty('color', {V});`,
+    `el.setAttribute('fill', {V});`,
+    `el.setAttributeNS(null, 'fill', {V});`,
+    `el.attributeStyleMap.set('fill', {V});`,
+    `setProperty('--color-acc', {V});`,
+  ] as const;
+
+  /** Every way of writing a value that the walk follows. */
+  const READ = [
+    `'red'`,
+    `"red"`,
+    '`red`',
+    '`${width}px solid red`',
+    `'1px solid red'`,
+    `('red')`,
+    `'red' as string`,
+    `'red' satisfies string`,
+    `(fallback ?? 'red')!`,
+    `on ? 'red' : 'gray'`,
+    `on ? 'gray' : 'red'`,
+    `on ? 'red' : undefined`,
+    `status === 'failed' ? 'red' : undefined`,
+    `pick() ?? 'red'`,
+    `chosen || 'red'`,
+    `on && 'red'`,
+    `width + 'px solid red'`,
+    `token('--c', 'red')`,
+    `String('red')`,
+    `new Shade('red')`,
+    `(c = 'red')`,
+    `mix(a, b) ?? 'red'`,
+  ] as const;
+
+  /**
+   * Every way of writing a value the walk does **not** follow, against the residue entry
+   * that explains it. A cell that starts firing means the walk widened and an entry is now
+   * fiction; a cell that stops being listed means it was closed and the entry should go.
+   */
+  const NOT_READ = [
+    { value: `chosen`, entry: 'a colour that arrives through a variable' },
+    { value: `(() => 'red')()`, entry: 'produced by running something' },
+    { value: `(() => { const c = 'red'; return c; })()`, entry: 'produced by running something' },
+    { value: 'css`red`', entry: 'produced by running something' },
+    { value: `['red', 'gray'][+on]`, entry: 'matched by span coincidence' },
+    { value: `palette('red').hex()`, entry: 'matched by span coincidence' },
+    { value: `f('red')(x)`, entry: 'matched by span coincidence' },
+    { value: `new X('red').y`, entry: 'matched by span coincidence' },
+    { value: `tier === 'gold' ? a : b`, entry: 'a comparison is not a value' },
+    { value: `palette['gold']`, entry: 'an index is a lookup, not a value' },
+    { value: `'url(/img/red.png)'`, entry: 'a colour carried inside a url' },
+  ] as const;
+
+  /**
+   * A body to sit in, so a statement-shaped site is legal where an expression-shaped one is.
+   *
+   * `await` and `yield` are deliberately absent from the matrices above: they are legal in
+   * an expression position and not in a class-field initializer, an enum member or a
+   * parameter default, so putting them in the cross-product would mean asserting over cells
+   * that do not parse. They have their own case, which covers them at three sites.
+   */
+  function wrap(source: string): string {
+    return `function _() { ${source} }`;
+  }
+
+  /**
+   * The sites with somewhere to put an arbitrary expression.
+   *
+   * A plain-string JSX attribute is the one site that is not one: `fill="red"` takes a
+   * string and nothing else, and a conditional written there is a syntax error rather than
+   * a shape the guard could read. It is a real site with its own code path — the attribute's
+   * initializer is a literal rather than a braced container — so it stays in the site matrix
+   * and sits out the value matrices, which is what the placeholder marks.
+   */
+  const EXPRESSION_SITES = SITES.filter((site) => site.includes('{V}'));
+
+  it('is a real cross-product and not a handful of cases', () => {
+    expect(SITES).not.toEqual(EXPRESSION_SITES);
+    expect(EXPRESSION_SITES.length * (READ.length + NOT_READ.length)).toBeGreaterThan(900);
+  });
+
+  it('catches an ordinary colour at every site it claims to read', () => {
+    const quiet = SITES.map((site) => wrap(site.replace('{V}', `'red'`))).filter(
+      (source) => findColourLiterals(source).length === 0,
+    );
+    expect(quiet).toEqual([]);
+  });
+
+  it('catches every value spelling it claims to follow, at every site', () => {
+    const quiet: string[] = [];
+    for (const site of EXPRESSION_SITES) {
+      for (const value of READ) {
+        const source = wrap(site.replace('{V}', value));
+        if (findColourLiterals(source).length === 0) quiet.push(source);
+      }
+    }
+    expect(quiet).toEqual([]);
+  });
+
+  it('stays quiet on every value spelling it does not follow, at every site', () => {
+    const loud: string[] = [];
+    for (const site of EXPRESSION_SITES) {
+      for (const { value, entry } of NOT_READ) {
+        const source = wrap(site.replace('{V}', value));
+        if (findColourLiterals(source).length > 0) loud.push(`${entry}: ${source}`);
+      }
+    }
+    expect(loud).toEqual([]);
+  });
+});
+
+/*
  * The residue list from `colourGuard.ts`, one case per entry.
  *
  * These prove that each *listed* miss is real, and that is the whole of what they prove.
