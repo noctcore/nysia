@@ -165,7 +165,20 @@
           - 'scripts/prove-*'
           - 'tools/lint-meta/**'
 
+# Narrowed from 'docs/design/**' to the spec itself (#52). The label means *design spec
+# adoption*, and the directory it used to match holds three other things: the architecture
+# document, the design sources README, and the Claude Design mock the spec was extracted
+# from. PR #38 was a daemon-launch change that edited the architecture, and it came out
+# labelled as adopting a spec it had never read. That is the argument the header above makes
+# about `documentation` — a pull request that happens to touch a doc file is not a pull
+# request about that doc — one directory further down, so it gets the same answer.
+#
+# What survives the narrowing is a fact about the diff, which is the bar an Extra has to
+# clear: the spec changed. What cannot be a fact about a path is adoption — a change to
+# `apps/web/src/theme/tokens.css` is a theme change whether or not it follows the spec — so
+# a code pull request that adopts the spec is labelled by its author, as CLAUDE.md asks. The
+# labeler is add-only, so the two never fight; this rule just stops guessing.
 'design-system':
   - changed-files:
       - any-glob-to-any-file:
-          - 'docs/design/**'
+          - 'docs/design/design-spec.md'
