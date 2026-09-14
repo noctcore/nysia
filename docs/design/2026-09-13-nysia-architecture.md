@@ -545,8 +545,46 @@ Each of these cost someone a day already.
      cannot: a shell's process state is not in SQLite and never will be.
 5. **How does the GUI discover and start the daemon?** ~~Spawn-if-absent on app launch is
    obvious, but two clients racing to spawn needs a lock…~~
-   **Answered in wave 2 (W4)**, and it is the same code path for the GUI and for `nysia
-   <verb>` — `nysia_core::rpc::discovery`, which the window links like everyone else.
+   **Answered in wave 2 (W4), and true of the window since wave 4.** One implementation of the
+   race, in `nysia_core::rpc::discovery`, with both front ends inside it — but *how* they are
+   inside it is worth stating exactly, because an earlier version of this answer said "the
+   window links it like everyone else" and the shipped window did not (q6 below, now closed).
+
+   **The seam is synchronous and the caller supplies the dial.** `discovery::ensure_daemon`
+   holds the policy: probe, take the spawn lock, probe again, spawn `program --daemon`, then
+   probe until it answers or twenty seconds pass. It is generic over a caller-supplied probe
+   because the two front ends cannot share a dial: `nysia <verb>` is `async` over this crate's
+   tokio transport, and the window's transport is blocking by construction — every Tauri
+   command is `spawn_blocking`, and a runtime inside one is how a panic becomes `abort()`.
+
+   - `nysia <verb>` calls `discovery::discover`, which dials once itself — a daemon that is
+     already listening is the common case and costs one round trip — and then runs
+     `ensure_daemon` on a blocking thread with its async dial bridged in.
+   - The window calls `ensure_daemon` directly from `state::Client::connect`, with
+     `daemon::control::Control::connect` as the probe. Outside the client lock, because
+     starting a daemon takes seconds and this module's one rule is that nothing waits on
+     another thread while holding it.
+
+   The probe answers two things and never three: *something answered* — with the identity the
+   lease is then checked against — or *nothing is listening*. A refusal is an error, because
+   "the daemon refused my version" and "there is no daemon" want opposite responses, and
+   folding them together is how a client starts a second daemon beside one that was perfectly
+   willing to talk to somebody else.
+
+   **What the window spawns is a file it ships.** `tauri.conf.json` declares the `nysia`
+   binary as an `externalBin`, so the bundle carries the same artefact the CLI installs
+   (D-11) and the window resolves it *beside its own executable* — `Contents/MacOS/nysia` in
+   the app, `nysia.exe` next to `Nysia.exe` on Windows, and the sibling in `target/` during
+   development. Never `PATH`: a window that started whichever `nysia` a shell happened to put
+   first would be running a daemon nobody chose. Because `tauri_build` resolves `externalBin`
+   at *compile* time, `pnpm sidecar` has to have staged it before any `cargo` command that
+   touches the desktop crate — CI does that in both jobs, and a developer whose build says
+   `resource path binaries/nysia-<triple> doesn't exist` is being told to run it.
+
+   **When it cannot spawn, the window says so and stops.** A missing sidecar, a file that will
+   not execute, a daemon that starts and never binds — none of them improve by waiting, so
+   each becomes a non-retryable `DaemonError::Spawn` carrying the path that was tried or the
+   log that says why, and the store shows it once instead of reconnecting for ever.
 
    **Liveness is three steps, and never the pid.** A pid that still exists says nothing: pids
    are reused, and attaching to whatever now holds an old number is the failure the launch
@@ -587,34 +625,39 @@ Each of these cost someone a day already.
    `crates/nysia/tests/survival.rs` has a regression test that reports the hang rather than
    hanging on it.
 
-6. **The window cannot start a daemon, and no build of the app ships one.** Found in wave 3 by
-   launching the app on a machine with no `nysiad` running, which is what every first launch is.
-   The window comes up, the status bar says *Reconnecting*, and the `+` menu fails with the
-   daemon's own sentence: *no daemon is listening on `\.\pipe\nysiad-v1-…` — Start the Nysia
-   daemon, then try again.* For a product whose premise is "launch the app", that is an
-   instruction to go and open a terminal first.
+6. **The window could not start a daemon, and no build of the app shipped one.**
+   ~~Found in wave 3 by launching the app on a machine with no `nysiad` running, which is what
+   every first launch is.~~ **Fixed in wave 4.** The window comes up on a machine with nothing
+   listening, starts the runtime it ships with, and opens a tab.
 
-   Question 5 above says the opposite — *"it is the same code path for the GUI and for `nysia
-   <verb>` — `nysia_core::rpc::discovery`, which the window links like everyone else"* — and
-   that claim is **not true of the shipped code**. It is left standing above rather than
-   quietly edited, because the answer is right about the *design* and what is wrong is the
-   build:
+   What was wrong, recorded because the shape of it is the lesson:
 
-   - `Client::connect` in `apps/desktop/src-tauri/src/state.rs` calls `Control::connect` on the
-     resolved endpoint and stops there. It never reaches `discovery::discover`, which is where
-     the spawn lock, the re-probe and the readiness wait live. `discover` is `async` and hands
-     back a `nysia_core` client, and the window's transport is synchronous by construction
-     (every command is `spawn_blocking`, traps register #2), so it cannot call it as it stands.
-   - Even with the code, there would be nothing to spawn: `tauri.conf.json` declares no
-     `externalBin` and no `resources`, so a bundled `Nysia.exe` / `Nysia.app` contains no
-     `nysia` binary. Today it works on a developer machine only because `cargo build` leaves
-     both binaries in the same `target/` directory.
+   - `Client::connect` in `apps/desktop/src-tauri/src/state.rs` called `Control::connect` on
+     the resolved endpoint and stopped there. It never reached `discovery`, where the spawn
+     lock, the re-probe and the readiness wait live — and it could not, because `discover` is
+     `async` and hands back a `nysia_core` client while the window's transport is synchronous.
+   - Even with the code there would have been nothing to spawn: `tauri.conf.json` declared no
+     `externalBin` and no `resources`, so a bundled `Nysia.exe` / `Nysia.app` contained no
+     `nysia` binary. It worked on a developer machine only because `cargo build` leaves both
+     binaries in one `target/` directory.
+   - And question 5 **claimed the opposite was already true**, which was the expensive part:
+     the next person reads the answer, believes the window links discovery like everyone else,
+     and does not look. A doc that is wrong about the shipped code is worse than a gap it
+     admits to.
 
-   **Open**, and deliberately not patched in wave 3: the fix wants a synchronous spawn seam in
-   `nysia_core::rpc::discovery` — which must stay *one* implementation, or the race the lock
-   exists to settle gets a second, differently-shaped answer — plus a sidecar entry in
-   `tauri.conf.json` and the bundle step that goes with it. That is W1/W4 code and
-   coordinator-owned shared config, not a small diff.
+   Both halves are closed by the synchronous seam and the sidecar described in question 5.
+   What proves it, at three levels:
+
+   - `state::tests::a_window_with_no_daemon_anywhere_starts_one_and_reaches_a_working_session`
+     — the window's own client, from nothing listening to a shell that has run what was typed
+     at it. Run against the code before the fix it fails on the first line that matters, with
+     the `Unreachable` a user saw as *Reconnecting*.
+   - the `bundle` job in CI, which builds the app on both runners and asserts the runtime is
+     beside the window and inside the macOS `.app` — with `pnpm prove:sidecar` proving that
+     check trips on a bundle missing it (traps register #12).
+   - `scripts/e2e/first-launch.ps1`, for the two things neither can do: launching the
+     *installed* app so the sidecar is found where Tauri put it rather than where cargo did,
+     and reading the notice a window shows when its runtime has been taken away.
 
 7. **Re-attaching replays queries as well as output, and the shell reads the answers as
    input.** Deterministic, and it is in D-1's flagship path. On every `stream_attach` the window

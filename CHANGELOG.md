@@ -7,6 +7,23 @@ addition that matters more here than the categories do: every entry says what wa
 **deliberately not** built, because a scope ladder only means something if each rung is
 honest about where it stops.
 
+## [Unreleased]
+
+### Fixed
+
+- **A first launch works.** The window starts the daemon it ships with, so an app launched on a
+  machine with nothing listening reaches a working tab instead of *Reconnecting* (§12 q5/q6).
+  Two halves: `nysia_core::rpc::ensure_daemon` is a synchronous seam over the *existing* spawn
+  lock, re-probe, readiness wait and lease check — the window supplies its own blocking dial
+  and `nysia <verb>` keeps its async one, so two front ends share one implementation of the
+  race rather than two answers to it — and `tauri.conf.json` now ships the `nysia` binary as a
+  sidecar, with a CI job that builds the bundle on both runners and asserts the runtime is
+  inside it.
+- **A window that cannot start a daemon says why.** A missing sidecar, a runtime that will not
+  execute and one that starts without binding are each a non-retryable failure carrying the
+  path that was tried or the log that explains it, so the notice appears once instead of the
+  status bar cycling *Reconnecting* against something waiting cannot fix.
+
 ## [0.1.0] — 2026-09-14
 
 **The walking skeleton.** One acceptance criterion, and it holds: *close the window and the
@@ -84,6 +101,8 @@ evidence in §12:
 - **The window cannot start a daemon, and no build of the app ships one** (§12 q6). On a machine
   with nothing listening, the app launches into *Reconnecting* and the `+` menu fails with
   "Start the Nysia daemon, then try again". Start one first; the README says how.
+  **Fixed after 0.1.0** — see Unreleased above. Left standing here because it is what 0.1.0
+  shipped, and a changelog that edits a defect out of a released version is not a record.
 - **Re-attaching injects input into the shell** (§12 q7). The replay contains the terminal
   queries the child once wrote, xterm answers them, and ConPTY reads a cursor-position report as
   F3 — so after a relaunch the pane shows a phantom command line and the next thing you type is
