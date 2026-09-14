@@ -27,11 +27,12 @@
 //! by this thread and no other, so anything that only happened on the render report that
 //! filled a batch would never happen at all for a burst that fell short of one.
 
+use std::collections::VecDeque;
 use std::io::{BufReader, Read};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nysia_proto::credit::{CreditAck, CreditFrame, CreditWindow};
 use nysia_proto::frame::{Frame, FrameDecoder, FrameKind};
@@ -54,6 +55,44 @@ use crate::state::StreamTable;
 /// Not every platform can honour it: see [`Socket::set_read_timeout`].
 const READ_POLL: Duration = Duration::from_millis(250);
 
+/// How long a frame may wait for the control response that names its id.
+///
+/// Orders of magnitude of headroom, and still bounded. What it waits for is not a round
+/// trip: the daemon flushed that response *before* it enqueued the frame, so by the time
+/// this thread is holding one the answer is already on the wire and all that remains is
+/// this process parsing it. Two seconds is therefore a very long time for it to be late,
+/// and a short time for a pane to be silent when the answer is never coming at all.
+///
+/// It exists so that a genuine desync is still reported rather than waited on forever. The
+/// drop proto asks for is deferred by one deadline, not cancelled.
+const PENDING_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Frames for the one id the daemon has assigned and this client has not yet been told.
+///
+/// The two planes are separate sockets with independent readers, so even though the daemon
+/// flushes the `stream_attach` response before it enqueues a single replay frame, *this*
+/// thread can reach a replay frame before the control worker has parsed the response and
+/// written the id into the shared table. The id then sits at the watermark, and proto's
+/// rules say an id at or beyond the watermark was never assigned — which drops the whole
+/// connection over the flagship re-attach path.
+///
+/// The daemon's flush guarantee is what makes holding the frame correct rather than
+/// hopeful: the response is already on the wire, so the table is about to say yes.
+struct Pending {
+    /// The id being waited on — always the watermark as it stood when the first frame came.
+    stream: StreamId,
+    /// Held in arrival order. A replay that arrived out of order would repaint wrongly.
+    frames: VecDeque<Frame>,
+    /// Payload bytes held, for the log that reports giving up.
+    ///
+    /// Not a cap: nothing is read while a frame is held, so this cannot grow past the
+    /// frames one `read` had already decoded — a much tighter bound than any number
+    /// written here, and one that holds by construction rather than by arithmetic.
+    bytes: u32,
+    /// When the first frame was held, for [`PENDING_DEADLINE`].
+    since: Instant,
+}
+
 /// What the reader thread is told from outside.
 enum Signal {
     /// The webview rendered `bytes` of `stream` — after xterm's `write()` callback, never
@@ -61,6 +100,14 @@ enum Signal {
     Rendered { stream: StreamId, bytes: u32 },
     /// A pane closed.
     Detach(StreamId),
+    /// The control plane has recorded an id, so a frame held for it can be released.
+    ///
+    /// Carries nothing, deliberately: it is a **wake**, and the shared table already carries
+    /// everything this thread needs — an id here would be a second copy able to disagree
+    /// with it. Without the wake a reader blocked on this channel, because no attached
+    /// stream can take another chunk, would hold an attach's opening frames until something
+    /// else happened to rouse it.
+    Attached,
     /// Stop.
     Stop,
 }
@@ -128,6 +175,12 @@ impl Stream {
     pub fn detach(&self, stream: StreamId) -> bool {
         self.signals.send(Signal::Detach(stream)).is_ok()
     }
+
+    /// Report that the control plane has recorded an id, waking the reader if it is holding
+    /// frames for one. See [`Signal::Attached`].
+    pub fn attached(&self) -> bool {
+        self.signals.send(Signal::Attached).is_ok()
+    }
 }
 
 impl Drop for Stream {
@@ -156,6 +209,9 @@ fn apply(
 ) -> bool {
     match signal {
         Signal::Stop => false,
+        // Nothing to do here beyond having woken: the loop settles anything held for an id
+        // against the table on its next pass, and the table is what decides.
+        Signal::Attached => true,
         Signal::Detach(stream) => {
             ledger.detach(stream);
             true
@@ -226,6 +282,7 @@ fn read(
     let mut ledger = CreditLedger::new(window);
     let mut decoder = FrameDecoder::new();
     let mut buffer = vec![0u8; window.chunk as usize];
+    let mut pending: Option<Pending> = None;
 
     // Best effort: where the platform supports it the read wakes periodically so a stop
     // signal is honoured even against a peer that has gone silent without closing.
@@ -237,6 +294,17 @@ fn read(
                 return;
             }
         }
+
+        // Before the acks, not after. Settling opens the stream in the ledger and spends
+        // what was held against it, and an ack pass that ran first would be reporting
+        // renders for a stream the ledger has not opened.
+        if matches!(
+            settle_pending(&mut pending, table, &mut ledger, dispatcher),
+            Routed::DropConnection
+        ) {
+            return;
+        }
+
         if !flush_acks(&mut ledger, &mut socket) {
             return;
         }
@@ -254,6 +322,31 @@ fn read(
                         return;
                     }
                 }
+            }
+            continue;
+        }
+
+        // **Nothing is read while a frame is held.** What releases it comes from the *other*
+        // socket — the control worker recording the id — so a reader that went back into
+        // `read` would be waiting on the wrong thing entirely, and on a platform where a
+        // pipe cannot be given a read deadline (see `Socket::set_read_timeout`) it would
+        // wait there forever. A session whose replay is its whole screen and which then goes
+        // quiet is the *ordinary* re-attach, so that is not a corner.
+        //
+        // `Signal::Attached` ends this on the first pass in practice; the timeout is only
+        // what keeps `PENDING_DEADLINE` enforceable when no signal ever comes. Not reading
+        // meanwhile is backpressure on the daemon for the length of one control round trip
+        // it has already flushed, and it cannot delay the response itself: that travels on
+        // the connection this thread does not own.
+        if pending.is_some() {
+            match signals.recv_timeout(READ_POLL) {
+                Ok(signal) => {
+                    if !apply(signal, &mut ledger, table, &mut socket) {
+                        return;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
             continue;
         }
@@ -286,6 +379,20 @@ fn read(
             match route(frame, table, &mut ledger, dispatcher) {
                 Routed::Continue => {}
                 Routed::DropConnection => return,
+                Routed::Await(frame) => {
+                    if matches!(hold(&mut pending, *frame), Routed::DropConnection) {
+                        return;
+                    }
+                    // Again straight away: the control worker can record the id in the
+                    // moment between `route` reading the table and this line, and the next
+                    // pass may not come until the daemon sends something else.
+                    if matches!(
+                        settle_pending(&mut pending, table, &mut ledger, dispatcher),
+                        Routed::DropConnection
+                    ) {
+                        return;
+                    }
+                }
             }
         }
     }
@@ -295,6 +402,9 @@ fn read(
 enum Routed {
     /// Keep reading.
     Continue,
+    /// The frame names the id this client is about to be told about. Hold it. See
+    /// [`Pending`].
+    Await(Box<Frame>),
     /// The peer and this client disagree about what is on the wire.
     DropConnection,
 }
@@ -308,7 +418,21 @@ fn route(
 ) -> Routed {
     if frame.kind == FrameKind::Credit {
         adopt_window(ledger, &frame.payload);
-        return Routed::Continue;
+
+        // **Forwarded, not consumed.** The webview keeps a ledger of its own — it is what
+        // decides when a render is worth acknowledging — and it has no other way to learn
+        // the window. Returning here left `CreditLedger.adopt` in `apps/web` with no callers
+        // at all, so the browser side ran on the compiled-in defaults for ever, and D-13's
+        // "the daemon announces the window" held in Rust only. Harmless while the ack batch
+        // sits below the opening allowance; a deadlock the first time it does not.
+        //
+        // Sent without spending credit: a credit frame is the daemon telling this client
+        // what it may have, and charging the mirror for it would bill the window for
+        // describing itself.
+        if dispatcher.send(frame) {
+            return Routed::Continue;
+        }
+        return Routed::DropConnection;
     }
 
     if !ledger.is_attached(frame.stream) {
@@ -341,9 +465,18 @@ fn route(
                 tracing::debug!(stream = %frame.stream, "discarding a frame for a detached stream");
                 Routed::Continue
             }
+            // **The watermark itself is the one id worth waiting for.** It is the id the
+            // daemon assigns next, so a frame carrying it is the opening of an attach whose
+            // response this client has not finished parsing — the expected case on every
+            // re-attach, not a desync. Anything *beyond* the watermark is still one the
+            // daemon could not have assigned, and still drops the connection.
+            UnattachedFrame::DropConnection if frame.stream == next => {
+                Routed::Await(Box::new(frame))
+            }
             UnattachedFrame::DropConnection => {
                 tracing::error!(
                     stream = %frame.stream,
+                    next_to_assign = %next,
                     "the daemon sent a frame for a stream it never assigned"
                 );
                 Routed::DropConnection
@@ -352,6 +485,87 @@ fn route(
     }
 
     deliver(frame, ledger, dispatcher)
+}
+
+/// Release or give up on anything held for an id the control plane had not yet recorded.
+///
+/// Called at the top of every pass and again the moment a frame is held, because the
+/// response can land between `route`'s table lookup and the frame reaching the buffer.
+///
+/// Bounded by [`PENDING_DEADLINE`]. Past it the response is not coming, which is the desync
+/// proto describes — reported then rather than never. Memory is bounded separately and more
+/// tightly, by the loop refusing to read anything more while a frame is held.
+fn settle_pending(
+    pending: &mut Option<Pending>,
+    table: &Arc<Mutex<StreamTable>>,
+    ledger: &mut CreditLedger,
+    dispatcher: &Dispatcher,
+) -> Routed {
+    let Some(held) = pending.as_mut() else {
+        return Routed::Continue;
+    };
+
+    let routed = table
+        .lock()
+        .map(|table| table.is_routed(held.stream))
+        .unwrap_or(false);
+    if !routed {
+        if held.since.elapsed() > PENDING_DEADLINE {
+            tracing::error!(
+                stream = %held.stream,
+                bytes = held.bytes,
+                "no attach ever named the stream these frames were held for"
+            );
+            return Routed::DropConnection;
+        }
+        return Routed::Continue;
+    }
+
+    // Opened once, before any of the held frames spends against it: `receive` is only
+    // defined for a stream the ledger has attached, and the `known` branch of `route` does
+    // exactly the same thing for a frame that did not have to wait.
+    let Some(held) = pending.take() else {
+        return Routed::Continue;
+    };
+    ledger.attach(held.stream);
+    for frame in held.frames {
+        if matches!(deliver(frame, ledger, dispatcher), Routed::DropConnection) {
+            return Routed::DropConnection;
+        }
+    }
+    Routed::Continue
+}
+
+/// Hold `frame` for the id it names, or refuse to grow the buffer past one stream.
+fn hold(pending: &mut Option<Pending>, frame: Frame) -> Routed {
+    let size = u32::try_from(frame.payload.len()).unwrap_or(u32::MAX);
+    match pending {
+        Some(held) if held.stream == frame.stream => {
+            held.bytes = held.bytes.saturating_add(size);
+            held.frames.push_back(frame);
+            Routed::Continue
+        }
+        // Only one id can sit at the watermark, so a second is not a race this client can
+        // be in the middle of — the daemon has moved its counter twice without answering
+        // once, which is the desync the watermark exists to catch.
+        Some(held) => {
+            tracing::error!(
+                holding = %held.stream,
+                arrived = %frame.stream,
+                "two unassigned streams at the watermark at once"
+            );
+            Routed::DropConnection
+        }
+        None => {
+            *pending = Some(Pending {
+                stream: frame.stream,
+                bytes: size,
+                frames: VecDeque::from([frame]),
+                since: Instant::now(),
+            });
+            Routed::Continue
+        }
+    }
 }
 
 /// Spend the frame's credit and hand it to the webview.
@@ -571,19 +785,103 @@ mod tests {
     }
 
     /// Wait for `predicate`, so a test never races the reader thread.
-    fn eventually(mut predicate: impl FnMut() -> bool) -> bool {
-        for _ in 0..400 {
+    fn eventually(predicate: impl FnMut() -> bool) -> bool {
+        eventually_within(Duration::from_secs(2), predicate)
+    }
+
+    /// The same, for a condition that is meant to take a known while.
+    fn eventually_within(budget: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        while std::time::Instant::now() < deadline {
             if predicate() {
                 return true;
             }
             thread::sleep(Duration::from_millis(5));
         }
-        false
+        predicate()
     }
 
     fn output(stream: StreamId, len: usize) -> Vec<u8> {
         nysia_proto::frame::encode(&Frame::new(FrameKind::Output, stream, vec![b'x'; len]))
             .expect("a frame under the ceiling")
+    }
+
+    /// The flagship re-attach path: a frame that beats the response that names its id.
+    ///
+    /// The two planes are separate sockets with independent readers, so even though the
+    /// daemon flushes the `stream_attach` response before it enqueues one replay frame, this
+    /// thread can reach the frame first. The id then sits exactly at the watermark, and
+    /// proto says an id at or beyond the watermark was never assigned — which used to drop
+    /// the whole connection every time a window re-attached.
+    #[test]
+    fn a_frame_that_arrives_before_its_attach_response_is_held_and_then_delivered() {
+        // Nothing attached, so `next_to_assign` is FIRST — the id the daemon is handing out
+        // in the response this client has not parsed yet.
+        let harness = start(output(StreamId::FIRST, 4096), true, &[]);
+
+        // It must not be delivered, and it must not have cost the connection.
+        assert!(
+            !eventually(|| harness.delivered.load(Ordering::SeqCst) > 0),
+            "a frame was delivered for a stream the ledger had not opened"
+        );
+        assert_eq!(
+            harness.closed.load(Ordering::SeqCst),
+            0,
+            "holding the frame is the whole point; dropping the connection is what this fixes"
+        );
+
+        // The control worker records the id and wakes the reader, exactly as
+        // `Client::attach_session` does.
+        harness
+            .table
+            .lock()
+            .expect("fresh")
+            .remember(StreamId::FIRST, handle(1));
+        assert!(harness.stream.attached());
+
+        assert!(
+            eventually(|| harness.delivered.load(Ordering::SeqCst) > 0),
+            "the held frame was never released once the attach named its id"
+        );
+        assert_eq!(harness.closed.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_frame_beyond_the_watermark_still_drops_the_connection() {
+        // One past the id the daemon is about to assign. No attach in flight can explain
+        // it, so it is the desync the watermark exists to catch and the tolerance above
+        // must not have widened into it.
+        let beyond = StreamId::FIRST.next().expect("an id after the first");
+        let harness = start(output(beyond, 64), true, &[]);
+
+        assert!(
+            eventually(|| harness.closed.load(Ordering::SeqCst) > 0),
+            "an id the daemon could not have assigned was tolerated"
+        );
+        assert_eq!(harness.delivered.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn frames_held_for_an_attach_that_never_arrives_are_eventually_a_desync() {
+        // The "and what if the response never comes" case. Holding is a tolerance for one
+        // race the protocol creates, not a licence to wait forever: past the deadline the
+        // id really was never assigned, and proto says that drops the connection. Deferred
+        // by one deadline, not cancelled.
+        let harness = start(output(StreamId::FIRST, 4096), true, &[]);
+
+        assert_eq!(
+            harness.closed.load(Ordering::SeqCst),
+            0,
+            "it must hold first, or it is not tolerating the race at all"
+        );
+        assert!(
+            eventually_within(PENDING_DEADLINE * 3, || harness
+                .closed
+                .load(Ordering::SeqCst)
+                > 0),
+            "an id no attach ever named was held forever instead of reported"
+        );
+        assert_eq!(harness.delivered.load(Ordering::SeqCst), 0);
     }
 
     /// HIGH 3, at the level the bug actually lived: the loop, not the ledger.
