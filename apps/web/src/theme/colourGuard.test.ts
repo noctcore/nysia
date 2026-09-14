@@ -604,13 +604,28 @@ describe('hardcoded colour guard', () => {
     );
   });
 
-  it('names every stylesheet the package pulls in from a dependency', () => {
+  it('names every dependency stylesheet a module pulls in for its side effect', () => {
     // The glob above is rooted at this file, so it proves something about `src` and nothing
     // about the bundle. Reading the built CSS is what showed the difference: a dependency
     // stylesheet imported by package name lands in it carrying a hex background, a hex
     // foreground, a colour function and a data URI painting a path, and no rule in this
     // module has ever seen any of them.
     expect(findDependencyStylesheets(scanned)).toEqual([...DEPENDENCY_STYLESHEETS].sort());
+  });
+
+  it('does not see a stylesheet that arrives any other way', () => {
+    // The residue for the list above, and the reason its sentence carries a qualifier. A
+    // binding import and a dynamic one are not how a stylesheet is pulled in for its side
+    // effect; an `@import` inside `index.css` is, and it is how Tailwind and five font
+    // stylesheets actually arrive here. None of the three is visible to a pattern run over
+    // TypeScript source, and the last one shows up in the built CSS as the generated
+    // `--tw-*` colour fallbacks.
+    const elsewhere = [
+      { path: 'src/a.ts', source: "import styles from 'some-lib/a.css';" },
+      { path: 'src/b.ts', source: "await import('some-lib/b.css');" },
+      { path: 'src/c.ts', source: "const href = 'some-lib/c.css';" },
+    ];
+    expect(findDependencyStylesheets(elsewhere)).toEqual([]);
   });
 
   it('trips when a module pulls in a stylesheet the list does not name', () => {
