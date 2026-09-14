@@ -105,11 +105,16 @@ impl StreamTable {
     }
 }
 
-/// Which connection a message is about.
+/// Which **stream** connection a message is about.
 ///
 /// Handed to a reader thread so that when it finally ends — possibly long after it was
 /// superseded, because a parked read cannot be interrupted on Windows — it can say *which*
 /// connection died rather than tearing down whatever happens to be live.
+///
+/// Per stream connection rather than per control connection, and the distinction is the
+/// whole value of the type: a webview reload opens a second *stream* socket over the control
+/// socket it already holds, so a number minted alongside the control connection is the same
+/// on both sides of the supersede and separates nothing.
 type Generation = u64;
 
 /// Everything one connection owns.
@@ -118,8 +123,12 @@ struct Connected {
     /// `None` until the webview has handed over its `Channel`.
     stream: Option<Stream>,
     identity: DaemonIdentity,
-    /// Which connection this is, counting from one for the life of the window.
-    generation: Generation,
+    /// Which stream connection the live reader belongs to.
+    ///
+    /// `None` between [`Client::connect`] and the first [`Client::attach_channel`]: the
+    /// control socket is held but nothing is reading output over it yet, so no reader may
+    /// claim this connection as its own.
+    stream_generation: Option<Generation>,
 }
 
 /// The managed state every Tauri command reaches through `try_state`.
@@ -135,7 +144,8 @@ pub struct Client {
     /// while the webview's view of which pane is which did not, and the two would disagree
     /// about the same session.
     table: Arc<Mutex<StreamTable>>,
-    /// The generation of the next connection, so a superseded reader can be recognised.
+    /// The generation of the next stream connection, so a superseded reader can be
+    /// recognised. Outside `Connected` because it has to outlive every connection it numbers.
     next_generation: Arc<Mutex<Generation>>,
     /// Signalled whenever the connection is torn down, so [`Self::wait_for_disconnect`] can
     /// block instead of polling. A condvar rather than a channel because there may be more
@@ -167,12 +177,13 @@ impl Client {
 
         let control = Control::connect()?;
         let identity = control.identity().clone();
-        let generation = self.take_generation();
         *held = Some(Connected {
             control,
             stream: None,
             identity: identity.clone(),
-            generation,
+            // No generation yet, deliberately. Generations number *stream* connections, and
+            // this has opened none — see [`Self::supersede_stream`].
+            stream_generation: None,
         });
         Ok(identity)
     }
@@ -238,6 +249,17 @@ impl Client {
         let mut reader = std::io::BufReader::new(socket);
         endpoint::handshake(&mut reader, ClientRole::Stream, &endpoint::client_id()?)?;
 
+        // Claim this stream connection and take the reader it supersedes, **before** the
+        // table below is emptied. Dropping the superseded `Stream` signals it to stop — it
+        // does not join it, see `Stream`'s `Drop` — and doing that first is what keeps an
+        // ordinary supersede out of the log: the old reader resolves every frame's id
+        // against the shared table, so resetting the table under it makes the frame it is
+        // holding look like one the daemon never assigned, and it reports a desync for a
+        // reload that went perfectly. A reader already parked inside a `read` can still
+        // surface one such frame; the signal cannot reach it until the read returns.
+        let (generation, superseded) = self.supersede_stream()?;
+        drop(superseded);
+
         // **Every id this window held is void.** Proto scopes a `StreamId` to one stream
         // connection — "neither id means anything on the other's connection" — so ids
         // learned over the connection being replaced describe nothing here. Keeping them
@@ -248,11 +270,6 @@ impl Client {
             *table = StreamTable::new();
         }
 
-        let generation = {
-            let held = self.lock()?;
-            held.as_ref().ok_or(DaemonError::Disconnected)?.generation
-        };
-
         let notify = self.clone();
         let stream = Stream::spawn(
             reader,
@@ -262,8 +279,7 @@ impl Client {
             Box::new(move || notify.disconnect_generation(generation)),
         )?;
 
-        // Replacing the old reader drops it, which signals it and returns — see `Stream`'s
-        // `Drop`. Nothing here waits for that thread.
+        // The reader this replaces was signalled above, so this only installs the new one.
         let mut held = self.lock()?;
         let connected = held.as_mut().ok_or(DaemonError::Disconnected)?;
         connected.stream = Some(stream);
@@ -374,16 +390,23 @@ impl Client {
         self.announce_disconnect();
     }
 
-    /// Tear the connection down **only if** it is still the one `generation` names.
+    /// Tear the connection down **only if** `generation` still names its live stream.
     ///
     /// What a dying reader calls. A reader superseded by a webview reload keeps its socket
     /// until the next byte or EOF — a parked read cannot be interrupted on Windows — so it
     /// can run this long after the window has moved on. Without the check it would take
     /// whichever connection was live, and a reload followed by one frame on the old pipe was
     /// enough to knock out a healthy one with no daemon fault anywhere.
+    ///
+    /// The comparison is against the *stream* generation for the reason
+    /// [`Self::supersede_stream`] gives: a reload leaves the control connection alone, so
+    /// anything numbered per control connection matches on both sides of the supersede and
+    /// lets exactly the reader this guard exists to stop through.
     pub fn disconnect_generation(&self, generation: Generation) {
         let taken = self.lock().ok().and_then(|mut held| {
-            let live = held.as_ref().is_some_and(|c| c.generation == generation);
+            let live = held
+                .as_ref()
+                .is_some_and(|c| c.stream_generation == Some(generation));
             if live { held.take() } else { None }
         });
 
@@ -405,12 +428,13 @@ impl Client {
         signal.notify_all();
     }
 
-    /// Pretend a connection of `generation` is live, for tests that have no daemon.
+    /// Pretend a control connection is live, for tests that have no daemon.
     ///
-    /// Only the generation is real; there is no control plane behind it. That is enough for
-    /// the one thing these tests ask — whether a dying reader is allowed to tear this down.
+    /// It holds no stream, exactly as it would between [`Self::connect`] and the first
+    /// [`Self::attach_channel`]. Nothing behind it is real; that is enough for the one thing
+    /// these tests ask — whether a dying reader is allowed to tear this down.
     #[cfg(test)]
-    fn pretend_connected(&self, generation: Generation) {
+    fn pretend_connected(&self) {
         if let Ok(mut held) = self.lock() {
             *held = Some(Connected {
                 control: Control::detached(),
@@ -423,7 +447,7 @@ impl Client {
                         .expect("a well-formed nonce"),
                     app_version: "0.1.0".to_owned(),
                 },
-                generation,
+                stream_generation: None,
             });
         }
     }
@@ -435,7 +459,32 @@ impl Client {
         count.lock().map(|held| *held).unwrap_or_default()
     }
 
-    /// The generation for a connection being opened now.
+    /// Claim the generation for a stream connection replacing the one held, and hand back
+    /// the reader it supersedes so the caller can drop it outside the lock.
+    ///
+    /// **The mint belongs here, not in [`Self::connect`].** A webview reload is a `connect`
+    /// that returns early — the control socket is already held — followed by an
+    /// [`Self::attach_channel`] that opens a second *stream* socket over it. A generation
+    /// taken alongside the control connection is therefore the same number for the reader a
+    /// reload abandons and for the reader that replaces it, [`Self::disconnect_generation`]
+    /// matches, and the abandoned reader tears down a healthy connection when it finally
+    /// wakes — which, against a daemon that leaves the superseded socket open, is minutes
+    /// later with nothing to point at.
+    ///
+    /// The generation is recorded **before** the reader is spawned, so a reader that dies in
+    /// the gap between its spawn and its installation can still say which connection died.
+    /// Recording it afterwards left that reader's callback unmatched and the connection
+    /// standing with nothing reading it.
+    fn supersede_stream(&self) -> Result<(Generation, Option<Stream>), DaemonError> {
+        // Outside the client lock: `take_generation` takes a lock of its own.
+        let generation = self.take_generation();
+        let mut held = self.lock()?;
+        let connected = held.as_mut().ok_or(DaemonError::Disconnected)?;
+        connected.stream_generation = Some(generation);
+        Ok((generation, connected.stream.take()))
+    }
+
+    /// The generation for a stream connection being opened now.
     fn take_generation(&self) -> Generation {
         let Ok(mut next) = self.next_generation.lock() else {
             // A poisoned counter can only make generations collide, which costs a
@@ -507,30 +556,46 @@ mod tests {
         client.detach_session(&handle(1));
     }
 
-    /// HIGH 3: a reader that dies after being superseded must not take the live connection.
+    /// A reader superseded by a **webview reload** must not take the live connection.
     ///
-    /// Constructed the way it actually happens — a webview reload replaces the reader, the
-    /// old one keeps its socket because a parked read cannot be interrupted on Windows, and
-    /// it finally runs its callback when the abandoned pipe sees a byte or an EOF. The
-    /// generation it was given belongs to a connection that is already gone.
+    /// Built the way the reload actually happens, which is the whole point: *one* control
+    /// connection — `connect` returns early when it already holds one — and two stream
+    /// connections opened over it, because a reload re-runs `attach_channel` and nothing
+    /// else. A generation minted alongside the control connection gives both readers the
+    /// same number, so the guard in `disconnect_generation` matches and the abandoned reader
+    /// tears down its own replacement when the superseded pipe finally sees a byte or an EOF
+    /// — against a daemon that leaves that socket open, minutes later and with no cause
+    /// anyone can see.
+    ///
+    /// A version of this test that took a fresh generation twice by hand passed on that
+    /// broken code: two generations is what the *daemon-fault* path produces, and that path
+    /// was never the one in question.
     #[test]
-    fn a_superseded_reader_cannot_tear_down_the_connection_that_replaced_it() {
+    fn a_reader_superseded_by_a_reload_cannot_tear_down_its_replacement() {
         let client = Client::new();
+        client.pretend_connected();
 
-        // Two connections' worth of generations, as `connect` would hand out.
-        let superseded = client.take_generation();
-        let live = client.take_generation();
-        assert_ne!(superseded, live);
+        // The first `attach_channel` over that control connection. It supersedes nothing.
+        let (superseded, none) = client.supersede_stream().expect("a connection is held");
+        assert!(none.is_none(), "there was no reader to supersede yet");
 
-        // Stand the live one up. The disconnect counter is what `daemon_watch` waits on, so
-        // it is also the proof that nothing woke the store.
-        client.pretend_connected(live);
+        // The reload: the same control connection, a second stream connection over it.
+        let (live, _) = client
+            .supersede_stream()
+            .expect("the control connection is untouched by a reload");
+        assert_ne!(
+            superseded, live,
+            "a reload took the same generation twice, so the reader it abandoned is \
+             indistinguishable from the one that replaced it"
+        );
+
+        // The disconnect counter is what `daemon_watch` waits on, so it is also the proof
+        // that nothing woke the store.
         let quiet = client.disconnect_count();
-
         client.disconnect_generation(superseded);
         assert!(
             client.identity().is_some(),
-            "a dying reader from an earlier connection took the live one down with it"
+            "the reader a reload abandoned took the connection that replaced it down with it"
         );
         assert_eq!(
             client.disconnect_count(),
@@ -538,14 +603,30 @@ mod tests {
             "nothing may wake the reconnect loop away from a connection that is working"
         );
 
-        // The reader that does belong to it still works.
+        // The reader that does own the live stream connection still tears it down: this is
+        // the daemon-fault path, and the guard must not have cost it.
         client.disconnect_generation(live);
         assert!(client.identity().is_none());
         assert!(client.disconnect_count() > quiet);
     }
 
     #[test]
-    fn generations_are_distinct_for_each_connection() {
+    fn a_connection_with_no_reader_yet_cannot_be_torn_down_by_an_earlier_one() {
+        // The gap between `connect` and the first `attach_channel`: the control socket is
+        // held and no stream connection has been opened over it, so no reader may claim it.
+        let client = Client::new();
+        let stale = client.take_generation();
+        client.pretend_connected();
+
+        client.disconnect_generation(stale);
+        assert!(
+            client.identity().is_some(),
+            "a reader from an earlier connection claimed one that has opened no stream yet"
+        );
+    }
+
+    #[test]
+    fn generations_are_distinct_for_each_stream_connection() {
         // They are the only thing separating a superseded reader from a live one.
         let client = Client::new();
         let mut seen = std::collections::HashSet::new();
