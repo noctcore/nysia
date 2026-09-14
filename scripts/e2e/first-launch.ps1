@@ -253,10 +253,24 @@ switch ($Step) {
         Save-State $state
         Assert-NoFailures
 
+        # Spelled from the notice the code emits, never from what it ought to say. These are
+        # `state::beside`'s Spawn error and the `THEN_REOPEN` every permanent failure ends
+        # with, and `a_permanent_failure_says_what_to_fix_and_that_the_window_has_stopped`
+        # holds them there — including the absence of the last one. A step that asked for
+        # advice the code deliberately removed fails an operator against correct code, which
+        # is worse than not scripting the step at all.
         Write-Host ''
         Write-Host 'LOOK AT THE WINDOW. It must say all of this:' -ForegroundColor Yellow
-        Write-Host '  - that the Nysia runtime is not installed beside the app, naming the path;'
-        Write-Host '  - a next step: reinstall, or run `nysia --daemon` yourself;'
+        Write-Host '  - that the Nysia runtime is not installed beside the app, naming'
+        Write-Host "    $sidecar;"
+        Write-Host '  - one next step, and it is to reinstall: this copy shipped without the'
+        Write-Host '    runtime it starts, and the notice names where that runtime belongs;'
+        Write-Host '  - then to reopen Nysia, because the window stops trying once starting a'
+        Write-Host '    daemon cannot work, so fixing the cause outside it is only half of it;'
+        Write-Host '  - and nothing about running `nysia --daemon`. An installed app puts its'
+        Write-Host '    runtime beside itself and nothing of the sort on PATH, so that advice'
+        Write-Host '    answers the user with "command not found" on top of the failure they'
+        Write-Host '    already had. It went in c262f9f; seeing it again is the regression.'
         Write-Host '  - and it must settle there. A status bar still cycling Reconnecting a'
         Write-Host '    minute later is the defect, not the fix.'
         Write-Host '  Then run: -Step finish'
