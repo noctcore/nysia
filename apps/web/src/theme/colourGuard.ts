@@ -311,6 +311,66 @@ const TERMINAL_THEME_KEYS = new Set(
     'brightWhite').split(' '),
 );
 
+/**
+ * Which declaration kinds bind a name to an initializer — asked of TypeScript, not listed
+ * from memory.
+ *
+ * This list is **not** what the rule matches on. `findPaintedValues` calls
+ * `ts.hasOnlyExpressionInitializer`, so a kind TypeScript adds to the family is read the day
+ * the compiler is upgraded, with no edit here. The list exists so that addition cannot
+ * happen *silently*: `colourGuard.test.ts` walks every member of `ts.SyntaxKind`, asks the
+ * predicate about each, and fails if the answer is not exactly this. A changed answer is
+ * then a red test and a decision, rather than a shape found in review two rounds later.
+ *
+ * That distinction is the whole lesson of this file. Three rounds of review each found a
+ * declaration kind the rule did not know about — a parameter default, a destructured
+ * default, an enum member, a shorthand assignment default, a private field — and every one
+ * of them is "a declaration binds a name to an initializer" wearing a different node kind.
+ * Hand-listing the kinds was the same defect as the character pattern it replaced, one level
+ * up: a list of the positions somebody had already thought of. The regex caught all five by
+ * accident, because `=` is `=` and it never had to know what kind of node it was in.
+ *
+ * `tools/lint-meta` made this move first, and the shape of the fix is the same: stop
+ * modelling what the tool does and ask the tool.
+ */
+export const INITIALIZED_DECLARATIONS: readonly string[] = [
+  'BindingElement',
+  'EnumMember',
+  'Parameter',
+  'PropertyAssignment',
+  'PropertyDeclaration',
+  'VariableDeclaration',
+];
+
+/**
+ * The nodes that carry an initializer and that the predicate above deliberately excludes.
+ *
+ * Read this as the closed complement of {@link INITIALIZED_DECLARATIONS}: between the two,
+ * every interface in TypeScript's public typings with a field called `initializer` or
+ * `objectAssignmentInitializer` is accounted for. That is the claim, and it is the one the
+ * test can re-run rather than take on trust.
+ *
+ *  - `ShorthandPropertyAssignment` spells its initializer `objectAssignmentInitializer`, and
+ *    the predicate keys on the field name, so it falls outside. It is the only member of the
+ *    family that does, and it is named explicitly at its site. `({ color = 'red' } = props)`
+ *    is what it looks like: a default in a destructuring *assignment* rather than a
+ *    declaration.
+ *  - `JsxAttribute` has an initializer that is not an expression — a string or a braced
+ *    container — so it is outside by construction rather than by oversight. Named at its
+ *    site.
+ *  - the three loop heads take a `ForInitializer`, which is a declaration list or an
+ *    expression and not a value bound to a name. A declaration written inside one is an
+ *    ordinary `VariableDeclaration` and is read by the predicate; what a `for…of` iterates
+ *    is its `expression`, and that is in the residue.
+ */
+export const INITIALIZERS_HANDLED_BY_HAND: readonly string[] = [
+  'ForInStatement',
+  'ForOfStatement',
+  'ForStatement',
+  'JsxAttribute',
+  'ShorthandPropertyAssignment',
+];
+
 /** Every name that can introduce a colour value: CSS's painting properties, and xterm's. */
 function paints(name: string): boolean {
   return PAINTING_PROPERTY.test(name) || TERMINAL_THEME_KEYS.has(name);
@@ -409,34 +469,48 @@ function literalText(node: ts.Node | undefined): string | undefined {
 }
 
 /**
- * The name a member is declared under, however it is written.
+ * The name a declaration is written under, whichever way it is spelled.
  *
- * `color`, `'color'` and `['color']` are one node kind with three spellings of `name`, and
- * the quote or the bracket between the name and the colon is what used to break the match.
- * A computed name assembled at run time — a template with a substitution — has no name to
- * return, which is the residue entry it belongs to.
+ * `color`, `'color'`, `['color']` and `#color` are four spellings of one idea, and the quote,
+ * the bracket and the hash between the name and what follows it are what kept breaking the
+ * match one spelling at a time. A computed name assembled at run time — a template with a
+ * substitution — has no name to return, which is the residue entry it belongs to.
+ *
+ * The hash comes off a private name because a field called `#color` paints exactly what a
+ * field called `color` paints; the hash is part of how the language spells privacy, not part
+ * of the name. `PrivateIdentifier.text` keeps it, so this is where it goes.
  */
 function declaredName(name: ts.Node): string | undefined {
+  if (ts.isPrivateIdentifier(name)) return name.text.replace(/^#/, '');
   if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text;
   if (ts.isComputedPropertyName(name)) return literalText(name.expression);
   return undefined;
 }
 
 /**
- * Whether a parameter, a destructured binding or an enum member names something that
- * paints.
+ * Whether a declaration binds a painting name to its initializer.
  *
- * A binding element carries two names when it renames — `{ color: c }` reads `color` and
- * binds `c` — and a default written on it is the value of both. Either one is enough:
- * `{ color: c = 'red' }` fixes what the property `color` resolves to, and
- * `{ tier: color = 'red' }` fixes what the name `color` holds. The pattern this replaced
- * caught both, because it matched on the equals sign and did not care which name was in
- * front of it.
+ * This is the whole declaration family at once, and asking that question in one place is the
+ * point of {@link DECLARATION_SITE_KINDS}. The name comes from `ts.getNameOfDeclaration`
+ * rather than from a per-kind field, which is what makes a private name and a computed name
+ * ordinary rather than two more spellings to discover.
+ *
+ * Two cases the name alone does not answer:
+ *
+ *  - a destructuring pattern binds several names and is not one, so the question passes to
+ *    {@link patternPaints} and the value read is the thing being taken apart.
+ *  - a binding element carries two names when it renames — `{ color: c }` reads `color` and
+ *    binds `c` — and a default written on it is the value of both. Either painting is
+ *    enough: `{ color: c = 'red' }` fixes what the property `color` resolves to, and
+ *    `{ tier: color = 'red' }` fixes what the name `color` holds.
  */
-function bindingPaints(
-  node: ts.ParameterDeclaration | ts.BindingElement | ts.EnumMember,
-): boolean {
-  const bound = declaredName(node.name);
+function declarationPaints(node: ts.HasExpressionInitializer): boolean {
+  const name = ts.getNameOfDeclaration(node);
+  if (name === undefined) return false;
+  if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
+    return patternPaints(name);
+  }
+  const bound = declaredName(name);
   if (bound !== undefined && paints(bound)) return true;
   if (!ts.isBindingElement(node) || node.propertyName === undefined) return false;
   const source = declaredName(node.propertyName);
@@ -458,15 +532,21 @@ function bindingPaints(
  */
 function patternPaints(pattern: ts.BindingPattern): boolean {
   return pattern.elements.some(
-    (element) => ts.isBindingElement(element) && bindingPaints(element),
+    (element) => ts.isBindingElement(element) && declarationPaints(element),
   );
 }
 
-/** The name an assignment writes to, through a member, an index or a bare identifier. */
+/**
+ * The name an assignment writes to, through a member, an index or a bare identifier.
+ *
+ * The member name goes through {@link declaredName} rather than straight to `.text`, which
+ * is what makes `this.#color = 'red'` a paint: a private name carries its hash in the text
+ * and the vocabulary is written without one.
+ */
 function assignedName(target: ts.Expression): string | undefined {
   const inner = unwrap(target);
   if (ts.isIdentifier(inner)) return inner.text;
-  if (ts.isPropertyAccessExpression(inner)) return inner.name.text;
+  if (ts.isPropertyAccessExpression(inner)) return declaredName(inner.name);
   if (ts.isElementAccessExpression(inner)) return literalText(inner.argumentExpression);
   return undefined;
 }
@@ -566,7 +646,15 @@ function valueStrings(node: ts.Node | undefined, into: string[]): void {
     valueStrings(node.whenTrue, into);
     valueStrings(node.whenFalse, into);
   } else if (ts.isBinaryExpression(node)) {
-    if (VALUE_OPERATORS.has(node.operatorToken.kind)) {
+    if (node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      // An assignment evaluates to what was assigned, and only to that: the right side is
+      // the value, the left is where it went. This is what reads the default in a
+      // destructuring *assignment* — `({ color: c = 'red' } = props)` puts `c = 'red'` in
+      // the initializer of the property named `color` — and it reads a chained
+      // `el.style.color = fallback = 'red'` and an argument written as `f(x = 'red')` with
+      // it, all three for the same reason.
+      valueStrings(node.right, into);
+    } else if (VALUE_OPERATORS.has(node.operatorToken.kind)) {
       valueStrings(node.left, into);
       valueStrings(node.right, into);
     }
@@ -576,14 +664,16 @@ function valueStrings(node: ts.Node | undefined, into: string[]): void {
     for (const argument of node.arguments ?? []) valueStrings(argument, into);
   } else if (ts.isJsxExpression(node)) {
     valueStrings(node.expression, into);
-  } else if (ts.isAwaitExpression(node)) {
-    // `await x` hands back whatever `x` produces, so it passes a value through the way a
-    // parenthesis does. It cannot invent a literal — a colour behind a real promise is a
-    // colour behind a variable, which is the first residue entry — so following it only
-    // finds literals that were written down. Found by running this walk and the pattern it
-    // replaced over a cross-product of every context, name and value spelling and diffing
-    // the answers; it was the last shape the pattern caught and the walk did not, and no
-    // reviewer or author had thought of it.
+  } else if (ts.isAwaitExpression(node) || ts.isYieldExpression(node)) {
+    // `await x` and `yield x` both hand back whatever `x` produces, so they pass a value
+    // through the way a parenthesis does. Neither can invent a literal — a colour behind a
+    // real promise is a colour behind a variable, which is the first residue entry — so
+    // following them only finds literals that were written down.
+    //
+    // They are one branch because they are one idea. `await` was found by diffing this walk
+    // against the pattern it replaced over a generated corpus; `yield` was found by a
+    // reviewer afterwards, and handling the first without the second would leave exactly the
+    // which-way-did-you-write-it asymmetry this rule has been held for three times.
     valueStrings(node.expression, into);
   } else if (ts.isExpression(node)) {
     const inner = unwrap(node);
@@ -626,23 +716,14 @@ function findPaintedValues(file: string, source: string): string[] {
   };
 
   const visit = (node: ts.Node): void => {
-    if (ts.isJsxAttribute(node)) {
+    if (ts.hasOnlyExpressionInitializer(node)) {
+      if (declarationPaints(node)) report(node, node.initializer);
+    } else if (ts.isShorthandPropertyAssignment(node)) {
+      // The one member of the declaration family that sits outside the predicate above,
+      // because its initializer is a different field. See {@link DECLARATION_SITE_KINDS}.
+      if (paints(node.name.text)) report(node, node.objectAssignmentInitializer);
+    } else if (ts.isJsxAttribute(node)) {
       if (paints(attributeName(node))) report(node, node.initializer);
-    } else if (ts.isPropertyAssignment(node) || ts.isPropertyDeclaration(node)) {
-      const name = declaredName(node.name);
-      if (name !== undefined && paints(name)) report(node, node.initializer);
-    } else if (ts.isVariableDeclaration(node)) {
-      if (ts.isIdentifier(node.name)) {
-        if (paints(node.name.text)) report(node, node.initializer);
-      } else if (patternPaints(node.name)) {
-        report(node, node.initializer);
-      }
-    } else if (
-      ts.isParameter(node) ||
-      ts.isBindingElement(node) ||
-      ts.isEnumMember(node)
-    ) {
-      if (bindingPaints(node)) report(node, node.initializer);
     } else if (
       ts.isBinaryExpression(node) &&
       node.operatorToken.kind === ts.SyntaxKind.EqualsToken
