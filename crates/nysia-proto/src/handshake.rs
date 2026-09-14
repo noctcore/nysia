@@ -539,7 +539,7 @@ mod tests {
             serde_json::to_value(&hello).unwrap(),
             serde_json::json!({
                 "type": "hello",
-                "version": 1,
+                "version": PROTOCOL_VERSION.get(),
                 "role": "control",
                 "clientId": "nysia-window",
             })

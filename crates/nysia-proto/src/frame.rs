@@ -33,6 +33,7 @@
 //! | 3 | [`FrameKind::Bell`] | Empty. |
 //! | 4 | [`FrameKind::Osc133`] | The shell-integration event, as JSON. |
 //! | 5 | [`FrameKind::Credit`] | A credit grant or ack, as JSON. |
+//! | 6 | [`FrameKind::ReplayEnd`] | Empty. The replay is over; live output starts here. |
 //!
 //! Zero is deliberately not a kind, and [`StreamId::RESERVED`] is deliberately not a stream,
 //! so a zero-filled buffer is rejected twice over rather than read as a run of empty frames.
@@ -105,16 +106,34 @@ pub enum FrameKind {
     Osc133 = 4,
     /// Flow control: a credit grant from the reader, or an ack from the writer (§7.3).
     Credit = 5,
+    /// The replay a `stream_attach` owes is over; everything after this is live. Empty
+    /// payload.
+    ///
+    /// **Why a frame and not a number.** The alternative was a byte count on
+    /// [`StreamAttached`](crate::StreamAttached), and it is the same trap this wire has
+    /// already sprung once: the credit window is specified in *payload* bytes and one end
+    /// counted *encoded* ones, which no unit test on either side could see and a real-daemon
+    /// interop test had to find. A count is a number two implementations must derive
+    /// identically forever. A marker is a byte that arrives, and there is nothing in it to
+    /// disagree about.
+    ///
+    /// It is what lets a client hold its outbound input until the replayed bytes have been
+    /// consumed. A replay carries every `ESC[6n` and `ESC[c` the child ever wrote, a
+    /// terminal emulator cannot tell a replayed query from a live one, and its answers go
+    /// back out as keystrokes — which ConPTY reads as function keys. See
+    /// [`crate::stream`] for what a client owes this frame.
+    ReplayEnd = 6,
 }
 
 impl FrameKind {
     /// Every kind, in wire-byte order. The table the module docs describe.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Output,
         Self::Exit,
         Self::Bell,
         Self::Osc133,
         Self::Credit,
+        Self::ReplayEnd,
     ];
 
     /// The byte that names this kind in a header.
@@ -136,6 +155,7 @@ impl FrameKind {
             Self::Bell => "bell",
             Self::Osc133 => "osc133",
             Self::Credit => "credit",
+            Self::ReplayEnd => "replay_end",
         }
     }
 
@@ -148,6 +168,7 @@ impl FrameKind {
             3 => Some(Self::Bell),
             4 => Some(Self::Osc133),
             5 => Some(Self::Credit),
+            6 => Some(Self::ReplayEnd),
             _ => None,
         }
     }
@@ -212,7 +233,7 @@ impl Frame {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FrameError {
     /// The first byte named no kind.
-    #[error("frame kind {0} is not one of 1..=5")]
+    #[error("frame kind {0} is not one of 1..=6")]
     UnknownKind(u8),
     /// The header carried [`StreamId::RESERVED`], which the daemon never assigns.
     #[error("stream id {0} is reserved and is never assigned to a session")]
@@ -461,6 +482,7 @@ mod tests {
                 br#"{"outcome":"exited","code":0}"#.as_slice(),
             ),
             Frame::new(FrameKind::Credit, SHELL, br#"{"bytes":196608}"#.as_slice()),
+            Frame::empty(FrameKind::ReplayEnd, SHELL),
         ]
     }
 
@@ -488,7 +510,7 @@ mod tests {
         // Zero is not a kind, so a zero-filled buffer is rejected rather than read as a
         // run of empty frames.
         assert_eq!(FrameKind::from_byte(0), None);
-        assert_eq!(FrameKind::from_byte(6), None);
+        assert_eq!(FrameKind::from_byte(7), None);
         assert_eq!(FrameKind::from_byte(u8::MAX), None);
     }
 
@@ -646,7 +668,7 @@ mod tests {
         // Interleaved, not grouped: a router that assumed a run belonged to one session
         // would send the bell to the shell.
         let streams: Vec<StreamId> = decoded.iter().map(|frame| frame.stream).collect();
-        assert_eq!(streams, [SHELL, AGENT, SHELL, AGENT, SHELL]);
+        assert_eq!(streams, [SHELL, AGENT, SHELL, AGENT, SHELL, SHELL]);
     }
 
     #[test]

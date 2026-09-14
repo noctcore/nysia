@@ -254,10 +254,13 @@ mod tests {
                 "{kind:?} is missing from FRAME_KIND_BY_BYTE"
             );
         }
-        // The byte values are 1..=5 and zero is not a kind. A generator that emitted a
+        // The byte values are 1..=6 and zero is not a kind. A generator that emitted a
         // zero-based table would compile, typecheck, and misroute every frame.
         assert!(!generated.contains("\"output\": 0,"));
         assert!(generated.contains("\"output\": 1,"));
+        // The marker specifically: a client that cannot name this byte cannot tell a
+        // replayed query from a live one, which is the defect the kind exists to close.
+        assert!(generated.contains("\"replay_end\": 6,"));
     }
 
     #[test]
@@ -284,8 +287,8 @@ mod tests {
     #[test]
     fn the_generated_module_carries_the_numbers_a_client_cannot_derive() {
         let generated = typescript_constants();
-        assert!(generated.contains("export const PROTOCOL_VERSION = 1;"));
-        assert!(generated.contains("export const MIN_ATTACHABLE_PROTOCOL_VERSION = 1;"));
+        assert!(generated.contains("export const PROTOCOL_VERSION = 2;"));
+        assert!(generated.contains("export const MIN_ATTACHABLE_PROTOCOL_VERSION = 2;"));
         assert!(generated.contains("export const FRAME_HEADER_BYTES = 9;"));
         assert!(generated.contains("export const MAX_FRAME_PAYLOAD_BYTES = 1048576;"));
         assert!(generated.contains("  ackBatch: 196608,"));

@@ -40,16 +40,29 @@ impl fmt::Display for ProtocolVersion {
 }
 
 /// The protocol version this build speaks and advertises in the handshake.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(1);
+///
+/// Two, because v2 added [`FrameKind::ReplayEnd`](crate::FrameKind::ReplayEnd). A new frame
+/// kind is a **breaking** change in this direction and only this one: a v1 reader's decoder
+/// refuses a kind it does not know and drops the connection, by design, so a v2 daemon that
+/// served a v1 client would kill every session on that client's stream connection the first
+/// time anything attached.
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(2);
 
 /// The oldest daemon protocol this build will attach to.
 ///
 /// Orca is on `daemon-v36` and still advertises `attachableDaemonProtocolVersions: [1..36]`,
-/// so a newer app adopts an older daemon rather than orphaning its sessions (§3.1). Nysia
-/// starts the same way with a one-element range; widening it is what makes an in-place
-/// upgrade non-disruptive, and narrowing it is what abandons old sessions deliberately
-/// rather than by accident.
-pub const MIN_ATTACHABLE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(1);
+/// so a newer app adopts an older daemon rather than orphaning its sessions (§3.1). Widening
+/// this range is what makes an in-place upgrade non-disruptive, and narrowing it is what
+/// abandons old sessions **deliberately** rather than by accident.
+///
+/// This is a narrowing, and it is deliberate. §3.1 already keeps the two apart by *name* —
+/// a v1 client dials `nysiad-v1` and cannot find a v2 daemon at all — so the only way a v1
+/// hello reaches a v2 daemon is an explicit endpoint override. Serving it would mean sending
+/// [`FrameKind::ReplayEnd`](crate::FrameKind::ReplayEnd) to a decoder that treats an unknown
+/// kind as fatal, so the daemon refuses the handshake instead, and the client is told which
+/// versions it could have spoken. A v0.1 daemon's sessions are orphaned by a v0.2 window;
+/// the alternative was leaving every re-attach corrupting.
+pub const MIN_ATTACHABLE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(2);
 
 /// An inclusive range of protocol versions a client will attach to.
 ///
@@ -174,7 +187,7 @@ mod tests {
         let range = ProtocolRange::attachable();
         assert!(range.contains(PROTOCOL_VERSION));
         assert!(range.contains(MIN_ATTACHABLE_PROTOCOL_VERSION));
-        assert_eq!(range.to_string(), "1..=1");
+        assert_eq!(range.to_string(), "2..=2");
     }
 
     #[test]
@@ -202,14 +215,20 @@ mod tests {
 
     #[test]
     fn endpoint_names_carry_the_version() {
-        assert_eq!(endpoint_stem(PROTOCOL_VERSION), "nysiad-v1");
-        assert_eq!(unix_socket_file_name(PROTOCOL_VERSION), "nysiad-v1.sock");
+        assert_eq!(endpoint_stem(ProtocolVersion(1)), "nysiad-v1");
+        assert_eq!(unix_socket_file_name(ProtocolVersion(1)), "nysiad-v1.sock");
         assert_eq!(
-            windows_pipe_name(PROTOCOL_VERSION, "kacpe").unwrap(),
+            windows_pipe_name(ProtocolVersion(1), "kacpe").unwrap(),
             r"\\.\pipe\nysiad-v1-kacpe"
         );
-        // A bump changes the name, which is the whole mechanism.
-        assert_eq!(unix_socket_file_name(ProtocolVersion(2)), "nysiad-v2.sock");
+        // A bump changes the name, which is the whole mechanism — and it is the mechanism
+        // `FrameKind::ReplayEnd` leans on, because a v1 decoder drops the connection over a
+        // kind byte it does not know. Asserted against the shipped version rather than a
+        // literal, so the next bump moves this with it rather than rotting.
+        assert_eq!(
+            unix_socket_file_name(PROTOCOL_VERSION),
+            format!("nysiad-v{PROTOCOL_VERSION}.sock")
+        );
         assert_ne!(
             windows_pipe_name(ProtocolVersion(2), "kacpe").unwrap(),
             windows_pipe_name(ProtocolVersion(1), "kacpe").unwrap()
@@ -240,21 +259,24 @@ mod tests {
             windows_pipe_name(PROTOCOL_VERSION, &long),
             Err(EndpointError::PipeNameTooLong {
                 max: WINDOWS_PIPE_NAME_MAX,
-                actual: WINDOWS_PIPE_PREFIX.len() + "nysiad-v1-".len() + long.len(),
+                actual: WINDOWS_PIPE_PREFIX.len()
+                    + endpoint_stem(PROTOCOL_VERSION).len()
+                    + "-".len()
+                    + long.len(),
             })
         );
     }
 
     #[test]
     fn a_version_is_a_bare_number_on_the_wire() {
-        assert_eq!(serde_json::to_string(&PROTOCOL_VERSION).unwrap(), "1");
+        assert_eq!(serde_json::to_string(&PROTOCOL_VERSION).unwrap(), "2");
         assert_eq!(
             serde_json::from_str::<ProtocolVersion>("7").unwrap(),
             ProtocolVersion(7)
         );
         assert_eq!(
             serde_json::to_string(&ProtocolRange::attachable()).unwrap(),
-            "{\"min\":1,\"max\":1}"
+            "{\"min\":2,\"max\":2}"
         );
     }
 }
