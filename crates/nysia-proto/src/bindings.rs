@@ -106,7 +106,9 @@ pub const CONSTANTS_FILE_NAME: &str = "wireConstants.ts";
 ///   behave exactly like the bare `string & {}` that ships.
 /// - Spelling the tail `string` is not the fix that narrowing makes it look like. The tail
 ///   constituent survives every arm, so a handled arm still cannot reach `detail` and
-///   `assertNever` still does not clear — only the four literal constituents go.
+///   `assertNever` still does not clear. A handled arm loses only the four constituents
+///   whose `kind` is a different literal; the `default` arm keeps the union entire, which
+///   is why `assertNever` there still names `unsupported_version`.
 /// - A pattern-literal tail (`` `x-${string}` ``) does narrow, which is what isolates the
 ///   cause — and is also why there is no sixth approach. "Any string except these five"
 ///   needs a negated type, which TypeScript does not have, and no pattern literal denotes
@@ -224,13 +226,16 @@ export const CREDIT_WINDOW_DEFAULT = {{
  * default stays a type error after all five cases are written out rather than clearing
  * once they are. The cause is the `string & {{}}` tail: a union collapses string literals
  * into a plain `string`, and the intersection is the spelling that resists that, so
- * `reason.kind` stays a union that still carries the tail and every constituent stays
- * comparable with the literal it is compared to. Spelling the tail `string` is not the fix
- * that narrowing makes it look like — it drops the other four constituents, but the tail
- * survives every arm, so `detail` stays unreachable and `assertNever` still does not
- * clear. \"Any string but these five\" is not a type TypeScript can express. Measured on
- * 5.9.3; `nysia-proto`'s `bindings` module records the branded and pattern-literal tails
- * that were tried on the way to that conclusion.
+ * `reason.kind` stays a union that still carries the tail. Narrowing that property with
+ * `=== \"unauthorized\"` leaves `\"unauthorized\" | (string & {{}})`, not the bare
+ * literal, and every constituent stays comparable with that narrowed `kind` — so none is
+ * filtered out. Spelling the tail `string` is not the fix that narrowing makes it look
+ * like: there the same step leaves just `\"unauthorized\"`, which the other four have no
+ * overlap with, so they drop — but the tail survives every arm, so `detail` stays
+ * unreachable and `assertNever` still does not clear. \"Any string but these five\" is not
+ * a type TypeScript can express. Measured on 5.9.3; `nysia-proto`'s `bindings` module
+ * records the branded and pattern-literal tails that were tried on the way to that
+ * conclusion.
  *
  * So read a reason that arrived from a peer like this:
  *
