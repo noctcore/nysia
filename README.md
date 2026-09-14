@@ -14,8 +14,13 @@ the Rust VT state, the multiplexed output channel and the app chrome are built a
 The acceptance criterion holds: close the window and the shell survives; relaunch and the tab
 comes back with its scrollback replayed and the session still taking input. What v0.1
 deliberately does **not** have is agent sessions — Claude, hooks and status detection are
-v0.2. See [CHANGELOG.md](CHANGELOG.md) for what shipped, and §12 of the architecture for the
-two defects this milestone found and left open.
+v0.2. See [CHANGELOG.md](CHANGELOG.md) for what shipped and the
+[issue backlog](https://github.com/noctcore/nysia/issues) for what is still wrong.
+
+The one to know before you lean on it: scrollback lives in the daemon's memory and nothing is
+written to SQLite yet, so it survives a closed window but not a restarted daemon — a real
+regression against Orca's history checkpoints, and §12 question 2 of the architecture is the
+honest write-up of it.
 
 - [Architecture and founding decisions](docs/design/2026-09-13-nysia-architecture.md)
 - [Design system spec](docs/design/design-spec.md)
@@ -69,8 +74,10 @@ supervisor wants.
 
 #### Running the app against a daemon
 
-**The window does not start a daemon yet** — see §12 question 6 of the architecture. Start one
-first, or the `+` menu will tell you to:
+**The window starts its own.** The app ships the `nysia` runtime beside itself as a Tauri
+sidecar and spawns it when nothing is listening, so a first launch needs nothing from you —
+§12 question 6 of the architecture records how that was wrong until wave 4 and what proves it
+now. Start one by hand when you want it to outlive the app, or to watch what it logs:
 
 ```
 cargo build --release -p nysia          # target/release/nysia[.exe]
@@ -81,9 +88,10 @@ Start-Process target\release\nysia.exe -ArgumentList '--daemon' -WindowStyle Hid
 target/release/nysia --daemon &
 ```
 
-Then launch the app. `pnpm dev` and `pnpm build:app` both produce a window that finds that
-daemon through `NYSIA_RUNTIME_DIR` (or the platform default), so the CLI above and the window
-are looking at the same sessions — which is the quickest way to see D-1 working.
+Launch the app and it attaches to that one rather than starting a second. `pnpm dev` and
+`pnpm build:app` both produce a window that finds a daemon through `NYSIA_RUNTIME_DIR` (or the
+platform default), so the CLI above and the window are looking at the same sessions — which is
+the quickest way to see D-1 working.
 
 > **Building the window with plain cargo?** Pass `--features custom-protocol`:
 >
