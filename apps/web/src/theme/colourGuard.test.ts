@@ -1221,19 +1221,21 @@ describe('the corpus', () => {
  * Both directions have already happened here — a gap closing, and an example quietly
  * ceasing to demonstrate its own entry.
  *
- * Eight of the ten are the vocabulary and value questions that survived the rewrite,
+ * Eight of the twelve are the vocabulary and value questions that survived the rewrite,
  * because a syntax tree fixes where you look and not what you are looking for. Two of those
  * eight moved rather than staying put — the computed key narrowed to a name assembled at
  * run time, and the library key kept its shape while its reason changed — and the guard's
- * own comment says which. The ninth is the walk's own narrowness and is new with it. The
- * tenth, a logical assignment, is older than either implementation and new only to the
- * list: both miss it, and nobody had written it down.
+ * own comment says which. The other four arrived a different way each: the walk's own
+ * narrowness, a logical assignment that both implementations miss and nobody had written
+ * down, the four shapes the old rule matched by span coincidence, and what a `for…of`
+ * iterates.
  *
- * A miss that is *not* here is the one this round was held for. A default — a parameter's,
- * a destructured binding's, an enum member's — was caught by the pattern and dropped by the
- * first version of the walk, and it is a site kind rather than a residue entry: the fix
- * restores coverage rather than documenting its absence, so the count above moved for the
- * logical assignment alone.
+ * The misses that are *not* here are the ones each round was held for, and they are absent
+ * on purpose. A default — a parameter's, a destructured binding's, an enum member's, a
+ * shorthand assignment's — and a private field were all caught by the pattern and dropped by
+ * a walk that hand-listed declaration kinds. Those are a **site kind**, not a residue entry:
+ * the fix restores coverage rather than documenting its absence, and asking TypeScript which
+ * declarations have an initializer is what closed the class rather than the instances.
  */
 describe('the documented residue', () => {
   it('misses a colour that arrives through a variable', () => {
@@ -1324,6 +1326,44 @@ describe('the documented residue', () => {
     expect(
       findColourLiterals(`const s = { color: (() => { const c = 'red'; return c; })() };`),
     ).toEqual([]);
+  });
+
+  it('misses what the old rule matched by span coincidence', () => {
+    // A span of characters running from a painting property to the end of an expression
+    // contains every literal in between, whatever part each one plays. The rule this
+    // replaced reported all four of these, and it had no reading of any of them: following
+    // them means deciding that an argument reaches the value through a return, a call and a
+    // property access, which is a claim about what a function does rather than about syntax.
+    //
+    // The same coincidence reported a comparison operand and a lookup key as violations, and
+    // those were closed as false positives in the same move. This is that trade seen from
+    // the other side — a documented trade, not a silent regression.
+    for (const coincidence of [
+      `const s = { color: ['red', 'gray'][+on] };`,
+      `const s = { color: palette('red').hex() };`,
+      `const s = { color: f('red')(x) };`,
+      `const s = { color: new X('red').y };`,
+    ]) {
+      expect(findColourLiterals(coincidence), coincidence).toEqual([]);
+    }
+    // The argument of a call whose result *is* the value is still read, which is the line
+    // this entry draws: one more step of indirection is where the reading stops.
+    expect(
+      findColourLiterals(`const s = { color: palette('red') };`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
+  });
+
+  it('misses what a for-of iterates', () => {
+    // The loop head takes a declaration list, so `color` is an ordinary VariableDeclaration
+    // with no initializer and the colours sit in the statement's `expression` — a different
+    // field, holding a collection rather than a value. Missed by the pattern this replaced
+    // as well, so nothing regressed; it is listed because the guard now claims the whole
+    // initializer family and this is the member it does not read.
+    expect(findColourLiterals(`for (const color of ['red']) {}`)).toEqual([]);
+    // The neighbouring loop shape, where the name does have an initializer, is read.
+    expect(
+      findColourLiterals(`for (let color = 'red'; ; ) {}`).map((c) => c.kind),
+    ).toEqual(['named-colour']);
   });
 
   it('misses an assignment whose operator is not a plain equals sign', () => {
