@@ -560,6 +560,12 @@ impl PtySession {
             // Capture the tree while the shell is still holding it together: once the leader
             // dies its children reparent away and there is nothing left to enumerate.
             let tree = teardown::collect_tree(leader);
+            let leader_pid = i32::try_from(leader).unwrap_or(-1);
+            let jobs: Vec<i32> = tree
+                .iter()
+                .copied()
+                .filter(|pid| *pid != leader_pid)
+                .collect();
 
             if let Err(err) = teardown::signal_group(leader, teardown::SIGTERM) {
                 tracing::warn!(%err, leader, "SIGTERM to the process group failed");
@@ -576,7 +582,7 @@ impl PtySession {
             // `wait()`, so the leader is reaped the instant it dies and stops answering
             // `kill(pid, 0)`; and `shutdown` waits out the same grace on the exit slot
             // either way.
-            if !teardown::wait_for(grace, || teardown::all_gone(&tree)) {
+            if !teardown::wait_for(grace, || teardown::all_gone(&jobs)) {
                 if let Err(err) = teardown::signal_group(leader, teardown::SIGKILL) {
                     tracing::warn!(%err, leader, "SIGKILL to the process group failed");
                 }
