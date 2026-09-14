@@ -380,6 +380,42 @@ describe('the connection', () => {
     ).not.toThrow();
   });
 
+  it('gives the pane a new connection token when a reconnect reissues its id', async () => {
+    // The pair `TerminalView` keys its effect on, and the id alone is not enough. A stream
+    // connection carries its own id counter, so a single-session window is handed id 1 again
+    // after a reconnect: the pane's id is unchanged while `resetStreams` has disposed the
+    // surface behind it. Keyed on the id alone the effect never reran — the pane kept a dead
+    // surface, the output went to a fresh one the delivery path built lazily and nothing had
+    // ever shown, and it buffered as hidden while the status bar said ready.
+    const { store, daemon } = build(1);
+    await ready(store);
+
+    const pane = store.getSnapshot().tabs[0]?.paneKey ?? '';
+    const before = store.surfaceStream(pane);
+    const connection = store.streamEpoch;
+    expect(before).not.toBeNull();
+
+    // The surface the mounted pane is holding right now.
+    const mounted = store.terminals.surface(before ?? 0);
+
+    daemon.drop();
+    await until(() => store.getSnapshot().status === 'ready' && daemon.connects > 1);
+    await until(() => daemon.attachCalls >= 2);
+
+    expect(
+      store.surfaceStream(pane),
+      'the daemon must reissue the same id here, or this test proves nothing',
+    ).toBe(before);
+    expect(
+      store.streamEpoch,
+      'a pane whose id came back unchanged has nothing else to remount on',
+    ).not.toBe(connection);
+    expect(
+      store.terminals.surface(before ?? 0),
+      'the surface behind that id was disposed, so the pane must be handed a new one',
+    ).not.toBe(mounted);
+  });
+
   it('forgets a session the daemon no longer holds', async () => {
     // The map is what decides whether a session still needs attaching, so an entry for a
     // handle closed in another window is a pane that never gets reattached.
