@@ -186,3 +186,37 @@ describe('acknowledging a batch that never fills', () => {
     expect(acks).toHaveLength(0);
   });
 });
+
+describe('the replay boundary reaches the pane it belongs to', () => {
+  /** A stand-in for the pane element. The stub terminal never touches it. */
+  const host = (): HTMLElement => ({}) as HTMLElement;
+
+  it('opens the gate on the stream the marker names, and no other', () => {
+    // Routing, which is the mistake this file exists to catch: a boundary delivered to the
+    // wrong pane opens one that is still replaying and leaves the right one shut until its
+    // deadline. Two streams in one delivery is the ordinary case, not an edge one.
+    const { router } = build();
+    const replaying = router.surface(1);
+    const other = router.surface(2);
+    replaying.show(host());
+    other.show(host());
+
+    expect(router.deliver(encodeFrame('replay_end', 1, new Uint8Array(0)))).toBeNull();
+
+    expect(replaying.acceptsInput).toBe(true);
+    expect(other.acceptsInput).toBe(false);
+  });
+
+  it('builds the pane the marker names rather than dropping it', () => {
+    // A session with no scrollback replays nothing, so the boundary can be the first frame
+    // its stream ever carries. Looked up instead of built, it would fall on the floor — and
+    // the pane the delivery path builds on the next byte would sit shut for its whole
+    // deadline, on a brand-new session where there was never anything to hold it for.
+    const { router } = build();
+    expect(router.deliver(encodeFrame('replay_end', 9, new Uint8Array(0)))).toBeNull();
+
+    const surface = router.surface(9);
+    surface.show(host());
+    expect(surface.acceptsInput).toBe(true);
+  });
+});

@@ -18,6 +18,7 @@ import {
 } from '../store/types';
 import { describeFailure, isRetryable, type DaemonBridge } from './bridge';
 import type { StreamId } from './frames';
+import { REPLAY_BOUNDARY_DEADLINE_MS } from './surface/TerminalSurface';
 import type { TerminalRouter } from './terminals';
 
 /**
@@ -111,6 +112,22 @@ export class DaemonStore implements Store {
     this.#bridge = options.bridge;
     this.#router = options.router;
     this.#retryDelaysMs = options.retryDelaysMs ?? [250, 500, 1000, 2000, 5000];
+    // The one place the replay gate becomes visible to a person. A surface holds input shut
+    // until the daemon's replay boundary has been parsed; if that frame never arrives the
+    // deadline opens it anyway, and the keystrokes typed in the meantime are gone. Opening in
+    // silence would leave "the first few seconds of typing did nothing after a relaunch" with
+    // nothing to read anywhere, which is exactly how the defect this gate closes was lived
+    // with for a wave before anybody wrote it down.
+    this.#router.on({
+      replayTimeout: (stream, dropped) => {
+        this.#recordOnce(
+          'selectTab',
+          `The daemon never marked the end of its replay for stream ${stream}, so this pane ` +
+            `ignored ${dropped} characters of input for ${REPLAY_BOUNDARY_DEADLINE_MS / 1000}s ` +
+            `before accepting any. Typing works now; anything typed in that window was lost.`,
+        );
+      },
+    });
   }
 
   getSnapshot = (): StoreSnapshot => this.#snapshot;
