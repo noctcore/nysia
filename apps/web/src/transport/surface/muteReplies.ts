@@ -90,11 +90,15 @@
  * DA2, DSR 5/6, DECRQM and `CSI 18 t` — `alacritty_terminal`'s `identify_terminal`,
  * `device_status`, `report_mode`/`report_private_mode` and `text_area_size_chars`, all of
  * which reach the pty through the reply sink. It does **not** answer XTVERSION, DECRQSS,
- * the kitty keyboard query, `CSI 14/16 t` or an OSC colour query: alacritty either has no
- * handler or raises an event (`TextAreaSizeRequest`, `ColorRequest`) that the sink drops.
- * Those now go unanswered rather than being answered by the cache, which is the correct
- * direction under D-7 — the window's palette, cell size and version are not the session's —
- * and a gap recorded in §12 q7 for the daemon to close if a program ever needs it.
+ * `CSI 14/16 t` or an OSC colour query: alacritty either has no handler or raises an event
+ * (`TextAreaSizeRequest`, `ColorRequest`) that the sink drops. Those four now go unanswered
+ * rather than being answered by the cache, which is the correct direction under D-7 — the
+ * window's palette, cell size and version are not the session's — and a gap recorded in
+ * §12 q7 for the daemon to close if a program ever needs it.
+ *
+ * The kitty keyboard query is **not** in that list, in either direction: neither side answers
+ * it as either is configured, and both are one option away from doing so. See its entry in
+ * the table.
  */
 
 /** How xterm names a sequence: an optional prefix and intermediates, and a final byte. */
@@ -155,7 +159,16 @@ const REPLY_ONLY_CSI: readonly SequenceId[] = [
   { intermediates: '$', final: 'p' },
   /** DECRQM, private — `requestMode`. */
   { prefix: '?', intermediates: '$', final: 'p' },
-  /** The kitty keyboard query — `kittyKeyboardQuery`. */
+  /**
+   * The kitty keyboard query — `kittyKeyboardQuery`. **Muted for safety, not because it is
+   * answered.** In the pinned build it returns without writing anything unless
+   * `vtExtensions.kittyKeyboard` is set, and `./xterm.ts` does not set it; xterm's default
+   * `vtExtensions` is `{}`. The daemon is in the same position from the other side —
+   * `alacritty_terminal`'s `report_keyboard_mode` returns early unless `kitty_keyboard` is on,
+   * and 0.26 defaults it to `false`. Listed anyway: an option flip is one line and would make
+   * a responder of it, which is the shape CLAUDE.md §6 calls a suggestion rather than a
+   * default.
+   */
   { prefix: '?', final: 'u' },
 ];
 
@@ -167,7 +180,15 @@ const WINDOW_OPTIONS: SequenceId = { final: 't' };
 
 /**
  * The `CSI t` options that report: window size in pixels, cell size in pixels, window size in
- * cells. Everything else `windowOptions` implements pushes or pops a title and stays.
+ * cells. Everything else `windowOptions` implements pushes or pops a title, and is left.
+ *
+ * **In this app nothing here runs, and that is not a reason to drop it.** `InputHandler`
+ * wraps every `{ final: 't' }` registration — the mute's included — in a
+ * `paramToWindowOption` check against the `windowOptions` option, which xterm defaults to
+ * `{}` and `./xterm.ts` does not set; so a `CSI t` of any kind is refused before either
+ * handler is reached. The split is what the app would need the moment a window option is
+ * turned on, and getting it wrong then would be a report nobody asked for or a title stack
+ * that stopped working.
  */
 const REPORTING_WINDOW_OPTIONS: readonly number[] = [14, 16, 18];
 
@@ -194,8 +215,10 @@ export function muteTerminalReplies(parser: ReplyParser): void {
   }
   parser.registerDcsHandler(REPLY_ONLY_DCS, () => true);
 
-  // Reported, not handled: `true` swallows the report and `false` lets the built-in run, so
-  // a program pushing and popping the window title still gets what it asked for.
+  // Reported, not handled: `true` swallows the report and `false` leaves the built-in to run.
+  // See the constant — xterm's own `windowOptions` gate refuses every `CSI t` in this app
+  // before either of them is reached, so this is the shape the split must have rather than a
+  // behaviour that is live today.
   parser.registerCsiHandler(WINDOW_OPTIONS, (params) =>
     REPORTING_WINDOW_OPTIONS.includes(leadingParam(params)),
   );
