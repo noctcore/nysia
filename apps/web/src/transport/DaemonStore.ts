@@ -78,6 +78,22 @@ export class DaemonStore implements Store {
    * party that knows which ids are already in use on this connection.
    */
   readonly #streams = new Map<SessionHandle, StreamId>();
+
+  /**
+   * Which stream connection the ids in {@link #streams} were learned over.
+   *
+   * A `StreamId` does not identify a surface on its own, which is the part that is easy to
+   * miss: a daemon whose id counter restarts hands the first session id 1 again, so a
+   * reconnect can leave a pane's id *unchanged* while `resetStreams` has disposed the
+   * surface behind it. A pane keyed on the id alone then never remounts — it keeps a
+   * disposed surface, the output goes to a fresh one the delivery path built lazily and
+   * nobody has shown, and that one buffers as hidden until it overflows and resets. The
+   * status bar says ready the whole time.
+   *
+   * Counting connections is enough to tell those apart, and it is a number rather than
+   * anything richer because the only question ever asked of it is whether it changed.
+   */
+  #streamEpoch = 0;
   #nextErrorId = 1;
   #disposed = false;
 
@@ -200,6 +216,16 @@ export class DaemonStore implements Store {
 
   get window(): WindowControls {
     return this.#bridge.window;
+  }
+
+  /**
+   * Which stream connection {@link surfaceStream} is currently answering for.
+   *
+   * Read together with the id by anything that mounts a surface: the pair identifies a
+   * surface, where the id alone does not. See {@link #streamEpoch}.
+   */
+  get streamEpoch(): number {
+    return this.#streamEpoch;
   }
 
   /** The surface a pane draws into, or `null` before the daemon has named the session. */
@@ -372,6 +398,10 @@ export class DaemonStore implements Store {
       // its output would land in whichever pane held id 1 before.
       this.#streams.clear();
       this.#router.resetStreams();
+      // Bumped in the same breath as the reset that invalidates them. A pane on screen is
+      // holding a surface this call just disposed, and the id it is keyed on may come back
+      // unchanged, so this is the only thing that tells it to mount the new one.
+      this.#streamEpoch += 1;
 
       await this.#refresh();
     } catch (cause) {
