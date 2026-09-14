@@ -612,6 +612,15 @@ async fn a_second_stream_connection_does_not_take_the_first_one_s_streams_down()
     // time `stream` has returned the daemon has already counted it — which is the contract the
     // real client relies on when it attaches the instant its connect returns, and a contract
     // a test that merely waited would hide rather than check.
+    //
+    // **It is not the gate for that ordering, though — it reads like one and is not.** Over a
+    // real socket the window between the answer and a bind that followed it is microseconds
+    // wide, so this stays green with the bind moved back below the answer, and so does every
+    // other assertion here. The deterministic gate is
+    // `a_stream_connection_is_attachable_before_its_hello_is_answered` in `server.rs`, which
+    // holds the daemon *inside* the write of its own answer over a pipe too narrow for one
+    // line and looks for as long as it likes. Deleting that test because this one covers the
+    // same ground would leave the ordering with no proof it trips.
     assert_eq!(harness.daemon.streams().bound(), 1);
     let created = start_shell(&mut control).await;
     await_prompt(&mut control, &created.handle).await;
