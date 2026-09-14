@@ -410,7 +410,7 @@ describe('the rule that reads a syntax tree', () => {
     expect(findColourLiterals(`<Dot fill={shade} /> <Tag kind={'silver'} />`)).toEqual([]);
   });
 
-  it('finds a colour assigned through the style object, by name or by index', () => {
+  it('finds a colour assigned through a member, an index or a bare name', () => {
     expect(findColourLiterals(`el.style.color = 'red';`).map((c) => c.kind)).toEqual([
       'named-colour',
     ]);
@@ -422,6 +422,8 @@ describe('the rule that reads a syntax tree', () => {
     expect(findColourLiterals(`el.style['color'] = 'red';`).map((c) => c.kind)).toEqual([
       'named-colour',
     ]);
+    // And the bare name, which is what a destructured or re-assigned binding looks like.
+    expect(findColourLiterals(`color = 'red';`).map((c) => c.kind)).toEqual(['named-colour']);
   });
 
   it('finds a colour through the other two setters that take a property name', () => {
@@ -621,6 +623,10 @@ describe('the rule that reads a syntax tree', () => {
       `const s = { "--color-status-failed": "red" };`,
       `target.setProperty('--color-acc', 'red');`,
       `root.style.setProperty('--accent-color', 'navy');`,
+      // The bare call, which is what a destructured setter looks like. The verb is what is
+      // named, not the receiver — requiring `el.style.` in front would miss the helper that
+      // takes the declaration as a parameter, which is the shape `theme/tokens.ts` writes.
+      `setProperty('--color-acc', 'red');`,
     ]) {
       expect(findColourLiterals(written).map((c) => c.kind), written).toContain(
         'named-colour',
@@ -835,9 +841,11 @@ const tier = 'gold'`;
  * Both directions have already happened here — a gap closing, and an example quietly
  * ceasing to demonstrate its own entry.
  *
- * Eight of the nine are the vocabulary and value questions that came through the rewrite
- * untouched, because a syntax tree fixes where you look and not what you are looking for.
- * The ninth is the walk's own narrowness and is new.
+ * Eight of the nine are the vocabulary and value questions that survived the rewrite,
+ * because a syntax tree fixes where you look and not what you are looking for. Two of those
+ * eight moved rather than staying put — the computed key narrowed to a name assembled at
+ * run time, and the library key kept its shape while its reason changed — and the guard's
+ * own comment says which. The ninth is the walk's own narrowness and is new.
  */
 describe('the documented residue', () => {
   it('misses a colour that arrives through a variable', () => {
@@ -1008,6 +1016,23 @@ describe('hardcoded colour guard', () => {
       expect(violations[0]?.file, kind).toBe('src/App.tsx');
       expect(violations[0]?.kind, kind).toBe(kind);
     }
+  });
+
+  it('parses each file by its own extension, not by a guess', () => {
+    // The sweep hands `findColourLiterals` the real path, and this is the only thing that
+    // proves it does. A `.ts` file parsed as TSX is a parse error at the first type
+    // assertion, and the sites after it go quiet — which looks exactly like a clean file.
+    // The fixture test next to `scriptKindFor` shows the two kinds differ; nothing but this
+    // shows the sweep is the one telling them apart.
+    const assertion = `const swatch = <Record<string, string>>{ color: 'red' };`;
+    const poisoned = scanned.map((file) =>
+      file.path === 'src/theme/tokens.ts'
+        ? { ...file, source: `${file.source}\n${assertion}\n` }
+        : file,
+    );
+    const violations = scanForColourLiterals(poisoned);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]?.file).toBe('src/theme/tokens.ts');
   });
 
   it('does not trip when the same offender is injected as a comment', () => {

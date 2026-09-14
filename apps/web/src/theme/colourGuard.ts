@@ -143,9 +143,14 @@ const BRACKET_SPAN = /\[[^\]'"`]*\]/g;
  * the unlisted ones are precisely the shapes nobody thought of. Read this as the known blind
  * spots, which is useful, and not as the boundary of them, which it never was.
  *
- * Nine entries. Eight are vocabulary or value questions that a syntax tree does not touch,
- * and they carried over from the pattern this replaced unchanged. The ninth is new, and it
- * is the price of the walk being narrow:
+ * Nine entries. Eight are vocabulary or value questions that survive a change of technique,
+ * and they carried over from the pattern this replaced — but read them rather than counting
+ * on that sentence, because two of the eight did move. The computed-key entry narrowed: a
+ * key computed from a literal reads like any other key now, and only a name assembled at run
+ * time is left. The library-key entry kept its shape and changed its reason: `pointBackground`
+ * is outside the vocabulary because the vocabulary does not name it, where before it was a
+ * word-boundary guard holding it out. The ninth entry is new, and it is the price of the
+ * walk being narrow:
  *
  *  - a colour that reaches CSS through a variable rather than a literal: the value is a
  *    name at the point where the rule looks, and what it holds is decided somewhere else,
