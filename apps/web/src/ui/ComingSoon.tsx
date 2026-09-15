@@ -2,7 +2,7 @@
  * An honest empty state.
  *
  * The design spec draws three screens and a settings tree that anticipate a year of
- * product; v0.1 ships the Session screen plus General and Appearance. Every other entry
+ * product, and only part of that is built at any one time. Every entry without a pane
  * renders this rather than a convincing mock-up, because a fake screen is indistinguishable
  * from a broken one and costs someone a bug report.
  *
