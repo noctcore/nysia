@@ -12,6 +12,7 @@ import {
   type GeneralPreferences,
 } from './generalPreferences';
 import { SettingsCard, SettingsHeader } from './layout';
+import { settingsStorage } from './storage';
 
 /**
  * Settings › General.
@@ -26,11 +27,11 @@ import { SettingsCard, SettingsHeader } from './layout';
  */
 export function GeneralPane() {
   const [preferences, setPreferences] = useState<GeneralPreferences>(() =>
-    loadGeneral(storage()),
+    loadGeneral(settingsStorage()),
   );
 
   useEffect(() => {
-    saveGeneral(storage(), preferences);
+    saveGeneral(settingsStorage(), preferences);
   }, [preferences]);
 
   function update<K extends keyof GeneralPreferences>(
@@ -151,8 +152,4 @@ export function GeneralPane() {
       </SettingsCard>
     </>
   );
-}
-
-function storage(): Storage | undefined {
-  return typeof localStorage === 'undefined' ? undefined : localStorage;
 }
