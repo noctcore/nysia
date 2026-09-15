@@ -189,6 +189,18 @@ export class TerminalRouter {
   }
 
   /**
+   * Bytes the decoder is holding that did not yet form a whole frame.
+   *
+   * Exposed for one caller: the log line written when a delivery proves unreadable, which is
+   * worth a number saying how much had been retained when it gave up. Nothing branches on it
+   * — a partial frame is the ordinary case, not an error — so this is a measurement rather
+   * than a signal.
+   */
+  get bufferedBytes(): number {
+    return this.#frameDecoder.buffered;
+  }
+
+  /**
    * Take the record of output this pane discarded while it was hidden, in bytes.
    *
    * Zero for a surface that has not been built, which is the ordinary case: a pane nobody

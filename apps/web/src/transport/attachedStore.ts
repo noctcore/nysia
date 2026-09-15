@@ -68,7 +68,7 @@ export interface AttachedTransport {
   /** The surface a pane draws into, or `null` before the daemon has named the session. */
   surfaceStream(paneKey: PaneKey): StreamId | null;
   /** Tell the user that output was thrown away while a pane was hidden. */
-  reportDroppedOutput(bytes: number): void;
+  reportDroppedOutput(stream: StreamId, bytes: number): void;
   /** Forward what the user typed. Records its own failure; never rejects. */
   sendInput(paneKey: PaneKey, text: string): Promise<void>;
   /** Tell the daemon a pane changed size, in cells. Records its own failure; never rejects. */
@@ -102,8 +102,8 @@ export function setAttachedStore(store: DaemonStore): void {
       return store.streamEpoch;
     },
     surfaceStream: (paneKey) => store.surfaceStream(paneKey),
-    reportDroppedOutput: (bytes) => {
-      store.reportDroppedOutput(bytes);
+    reportDroppedOutput: (stream, bytes) => {
+      store.reportDroppedOutput(stream, bytes);
     },
     sendInput: (paneKey, text) => store.sendInput(paneKey, text),
     resize: (paneKey, cols, rows) => store.resize(paneKey, cols, rows),
