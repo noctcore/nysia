@@ -21,12 +21,13 @@ use nysia_core::rpc::{
     Client, ClientError, Discovered, DiscoveryError, Endpoint, SpawnPolicy, discover,
 };
 use nysia_proto::{
-    ClientId, ClientRole, ErrorEnvelope, ExitStatus, LineCursor, SessionCreate, SessionCreated,
-    SessionHandle, SessionKind, SessionSummary, TerminalRead, TerminalReadResult, TerminalResize,
-    TerminalSend, TerminalWait, TerminalWaitResult, WaitOutcome,
+    AgentStatus, AgentStatusRow, ClientId, ClientRole, ErrorEnvelope, ExitStatus, LineCursor,
+    PaneKey, SessionCreate, SessionCreated, SessionHandle, SessionKind, SessionSummary,
+    TerminalRead, TerminalReadResult, TerminalResize, TerminalSend, TerminalWait,
+    TerminalWaitResult, UnixMillis, WaitOutcome,
 };
 
-use crate::cli::{CreateArgs, ReadArgs, ResizeArgs, SendArgs, Verb, WaitArgs};
+use crate::cli::{CreateArgs, ReadArgs, ResizeArgs, SendArgs, StatusArgs, Verb, WaitArgs};
 
 /// Why a verb could not be run.
 ///
@@ -133,7 +134,7 @@ pub async fn connect(no_spawn: bool) -> Result<Client, VerbError> {
 /// Not an authority — §3.2 proves identity from peer credentials — so this only has to be
 /// recognisable in a daemon log line and unique enough that two CLI invocations do not share
 /// a stream outbox.
-fn client_id() -> ClientId {
+pub fn client_id() -> ClientId {
     let name = format!("nysia-cli-{}", std::process::id());
     match name.parse() {
         Ok(id) => id,
@@ -187,6 +188,16 @@ pub async fn run(verb: Verb, no_spawn: bool) -> Result<(), VerbError> {
             let result = client.terminal_wait(request).await?;
             print_wait(&result, json);
         }
+        Prepared::AgentStatus(pane) => {
+            // One shape, always: an array, filtered to one pane when a pane was named. A verb
+            // that answered with an object here and an array there would be one a caller has
+            // to branch on before it can read either.
+            let statuses = match pane {
+                Some(pane) => client.agent_status_get(pane).await?.into_iter().collect(),
+                None => client.agent_status_list().await?,
+            };
+            print_statuses(&statuses, json);
+        }
     }
     Ok(())
 }
@@ -204,6 +215,7 @@ enum Prepared {
     TerminalSend(TerminalSend),
     TerminalResize(TerminalResize),
     TerminalWait(TerminalWait),
+    AgentStatus(Option<PaneKey>),
 }
 
 /// Check a verb's arguments, without touching the socket.
@@ -216,7 +228,23 @@ fn prepare(verb: Verb) -> Result<Prepared, VerbError> {
         Verb::TerminalSend(args) => Prepared::TerminalSend(send_request(&args)?),
         Verb::TerminalResize(args) => Prepared::TerminalResize(resize_request(&args)?),
         Verb::TerminalWait(args) => Prepared::TerminalWait(wait_request(&args)?),
+        Verb::AgentStatus(args) => Prepared::AgentStatus(status_pane(&args)?),
     })
+}
+
+/// Which pane `agent status` was asked about, if it was asked about one.
+fn status_pane(args: &StatusArgs) -> Result<Option<PaneKey>, VerbError> {
+    args.pane
+        .as_deref()
+        .map(|raw| {
+            raw.parse::<PaneKey>().map_err(|err| {
+                VerbError::argument(
+                    err.to_string(),
+                    "a pane key is `<tabId>:<leafId>`; omit --pane for every pane",
+                )
+            })
+        })
+        .transpose()
 }
 
 /// Parse a session handle, saying what a good one looks like.
@@ -419,6 +447,63 @@ fn print_wait(result: &TerminalWaitResult, json: bool) {
     }
 }
 
+/// Print `agent status`.
+///
+/// The JSON shape is the one `crates/nysia/tests/agent_status.rs` pins: a bare array on
+/// stdout, one entry per pane, each an `AgentStatus` — so `lead.pane` names the pane and
+/// `lead.state` is its dot. It is the same shape the window and, later, the phone read,
+/// because it is the same verb.
+fn print_statuses(statuses: &[AgentStatus], json: bool) {
+    if json {
+        emit_json(&statuses);
+        return;
+    }
+    if statuses.is_empty() {
+        let _ = writeln!(std::io::stderr(), "no agent status");
+        return;
+    }
+    let now = now_ms();
+    for status in statuses {
+        println!("{}", status_line(&status.lead, now));
+        for subagent in &status.subagents {
+            println!("  {}", status_line(subagent, now));
+        }
+    }
+}
+
+/// One status row as a person reads it.
+///
+/// Staleness is spelled out here rather than stored, because §2.3's decay is derived at read
+/// time and "active" is not a fifth state — a row that says `working` and is half an hour old
+/// is still `working`, and the only thing that changed is the clock it is being read against.
+fn status_line(row: &AgentStatusRow, now: UnixMillis) -> String {
+    let mut line = format!("{:<12}  {}", row.state, row.pane);
+    if let Some(agent_id) = &row.agent_id {
+        line.push_str(&format!("  agent {agent_id}"));
+    }
+    if row.is_stale(now) {
+        line.push_str("  (stale)");
+    }
+    if row.restored_unconfirmed {
+        line.push_str("  (restored, unconfirmed)");
+    }
+    if row.session_boundary {
+        line.push_str("  (session boundary)");
+    }
+    line
+}
+
+/// This process's clock, for the read-time staleness above.
+fn now_ms() -> UnixMillis {
+    UnixMillis(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            }),
+    )
+}
+
 /// Print a verb whose whole answer is "it happened".
 fn print_done(what: &str, json: bool) {
     if json {
@@ -431,7 +516,14 @@ fn print_done(what: &str, json: bool) {
 
 /// Print an error: the envelope on stderr, whichever format was asked for.
 pub fn print_error(error: &VerbError, json: bool) {
-    let envelope = error.envelope();
+    print_envelope(&error.envelope(), json);
+}
+
+/// Print one error envelope on stderr, in whichever format was asked for.
+///
+/// Public because `nysia hook` is not a verb and still owes a caller the same thing: §6.2's
+/// next steps are about what the *caller* sees, and a caller cannot tell which layer failed.
+pub fn print_envelope(envelope: &ErrorEnvelope, json: bool) {
     let mut stderr = std::io::stderr();
     if json {
         match serde_json::to_string(&envelope) {

@@ -8,6 +8,7 @@
 //! nysia session create    -> CLI client
 //! nysia terminal read     -> CLI client (what agents call)
 //! nysia hook              -> status ingest, stdin -> socket
+//! nysia agent status      -> the dots, as the window and the phone read them
 //! ```
 //!
 //! Everything except `--daemon` is a client of the daemon socket — the same socket, the same
@@ -26,20 +27,6 @@ use std::path::PathBuf;
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use nysia_proto::{ReadMode, ShellProfile, WaitFor};
-
-/// A verb that parses, is routed correctly, and has no implementation behind it yet.
-///
-/// A typed error rather than a `todo!()`: a build that panics is indistinguishable from a
-/// build that is broken, and being told which version serves a verb is honest about what
-/// this one does.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("`nysia {verb}` is not implemented in this build; it lands in {owner}")]
-pub struct Unimplemented {
-    /// The verb path the user asked for, e.g. `hook`.
-    pub verb: String,
-    /// Which delivery-plan milestone owns the implementation.
-    pub owner: &'static str,
-}
 
 /// The Nysia daemon and CLI.
 #[derive(Debug, Parser)]
@@ -88,14 +75,48 @@ enum Command {
         action: TerminalAction,
     },
     /// Forward a Claude hook payload from stdin to the daemon (D-16).
-    Hook {
-        /// The hook event name, as Claude spells it.
-        #[arg(long)]
-        event: Option<String>,
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
+    Hook(HookArgs),
+    /// Read what the agents in this daemon's panes are doing.
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
     },
+}
+
+/// `nysia hook …`
+#[derive(Debug, Args)]
+pub struct HookArgs {
+    /// The hook event name, as Claude spells it.
+    ///
+    /// Fills in a payload that does not name one, and is **refused** when the payload names a
+    /// different one — see `crate::hook`, which is the only place the two values exist at the
+    /// same instant.
+    #[arg(long)]
+    pub event: Option<String>,
+    /// Print the error envelope as JSON.
+    ///
+    /// Only the error. Stdout is Claude's hook decision (§5.2) and carries `{}` whatever this
+    /// says, because a second document after it is a parse error for whoever reads one.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `nysia agent …`
+#[derive(Debug, Subcommand)]
+enum AgentAction {
+    /// Print the status of every pane, or of one.
+    Status(StatusArgs),
+}
+
+/// `nysia agent status …`
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    /// One pane, `<tabId>:<leafId>`. Omit for every pane the daemon holds a status for.
+    #[arg(long)]
+    pub pane: Option<String>,
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// `nysia session …`
@@ -315,8 +336,14 @@ pub enum Mode {
     },
     /// A verb that speaks to the daemon over its socket.
     Client(Box<Verb>),
-    /// A verb that parses but is not in this build.
-    Unimplemented(Unimplemented),
+    /// `nysia hook`: a Claude hook payload on stdin.
+    ///
+    /// Its own mode rather than a [`Verb`], because its output contract is the opposite of
+    /// every verb's. A verb puts its result on stdout when it has finished; the hook puts
+    /// `{}` there **before it starts**, since stdout is Claude's decision rather than an
+    /// answer (§5.2). Routing it through the verb runner would mean the first thing it did
+    /// was something that could fail.
+    Hook(HookArgs),
 }
 
 /// One resolved client verb, with its arguments and its output format.
@@ -344,6 +371,8 @@ pub enum Verb {
     TerminalResize(ResizeArgs),
     /// `nysia terminal wait`
     TerminalWait(WaitArgs),
+    /// `nysia agent status`
+    AgentStatus(StatusArgs),
 }
 
 impl Verb {
@@ -357,6 +386,7 @@ impl Verb {
             Self::TerminalSend(args) => args.json,
             Self::TerminalResize(args) => args.json,
             Self::TerminalWait(args) => args.json,
+            Self::AgentStatus(args) => args.json,
         }
     }
 }
@@ -410,11 +440,17 @@ impl Cli {
                 TerminalAction::Resize(args) => Verb::TerminalResize(args),
                 TerminalAction::Wait(args) => Verb::TerminalWait(args),
             })),
+            Some(Command::Agent { action }) => Mode::Client(Box::new(match action {
+                AgentAction::Status(args) => Verb::AgentStatus(args),
+            })),
+            Some(Command::Hook(args)) => Mode::Hook(args),
             // `arg_required_else_help` means clap has already exited when there is no
-            // subcommand and no flag, so `None` here is only reachable from a unit test.
-            Some(Command::Hook { .. }) | None => Mode::Unimplemented(Unimplemented {
-                verb: "hook".to_owned(),
-                owner: "v0.2 (Claude agent sessions)",
+            // subcommand and no flag, so `None` here is only reachable from a unit test. It
+            // answers with the hook because that is the mode that cannot fail before it has
+            // printed, and a mode that is never reached still has to be some mode.
+            None => Mode::Hook(HookArgs {
+                event: None,
+                json: false,
             }),
         }
     }
@@ -465,7 +501,7 @@ mod tests {
     fn every_verb_takes_json() {
         // §6.2's contract only holds if it holds everywhere. A verb without --json is one an
         // agent has to scrape.
-        let cases: [&[&str]; 7] = [
+        let cases: [&[&str]; 8] = [
             &["nysia", "session", "create", "--json"],
             &["nysia", "session", "list", "--json"],
             &["nysia", "session", "close", "sess_x", "--json"],
@@ -477,6 +513,7 @@ mod tests {
                 "nysia", "terminal", "resize", "sess_x", "--cols", "80", "--rows", "24", "--json",
             ],
             &["nysia", "terminal", "wait", "sess_x", "--json"],
+            &["nysia", "agent", "status", "--json"],
         ];
         for argv in cases {
             match parse(argv).into_mode() {
@@ -532,14 +569,42 @@ mod tests {
     }
 
     #[test]
-    fn the_hook_verb_names_the_version_that_serves_it() {
-        match parse(&["nysia", "hook"]).into_mode() {
-            Mode::Unimplemented(err) => {
-                assert_eq!(err.verb, "hook");
-                assert!(err.owner.contains("v0.2"));
-            }
-            other => panic!("hook is not implemented in this build, got {other:?}"),
-        }
+    fn the_hook_is_its_own_mode_and_never_a_verb() {
+        // Not a `Verb`, and the distinction is load-bearing rather than tidy: the verb runner
+        // parses arguments and opens a socket before it prints anything, and the hook has to
+        // have printed `{}` before either of those can fail (§5.2).
+        let Mode::Hook(args) = parse(&["nysia", "hook", "--event", "Stop"]).into_mode() else {
+            panic!("`nysia hook` is its own mode");
+        };
+        assert_eq!(args.event.as_deref(), Some("Stop"));
+        assert!(!args.json);
+
+        // And it takes --json like every other verb, for the error envelope.
+        let Mode::Hook(args) = parse(&["nysia", "hook", "--json"]).into_mode() else {
+            panic!("`nysia hook` is its own mode");
+        };
+        assert!(args.json);
+    }
+
+    #[test]
+    fn agent_status_takes_one_pane_or_all_of_them() {
+        let Mode::Client(verb) = parse(&["nysia", "agent", "status"]).into_mode() else {
+            panic!("a status read is a client verb");
+        };
+        let Verb::AgentStatus(args) = *verb else {
+            panic!("a status read parses as one");
+        };
+        assert!(args.pane.is_none(), "no --pane means every pane");
+
+        let Mode::Client(verb) =
+            parse(&["nysia", "agent", "status", "--pane", "tab_1:leaf_1"]).into_mode()
+        else {
+            panic!("a status read is a client verb");
+        };
+        let Verb::AgentStatus(args) = *verb else {
+            panic!("a status read parses as one");
+        };
+        assert_eq!(args.pane.as_deref(), Some("tab_1:leaf_1"));
     }
 
     #[test]

@@ -11,14 +11,20 @@
 //! | 0 | the process did what was asked |
 //! | 1 | it was asked for something valid and could not do it |
 //! | 2 | clap's usage error — you typed it wrong |
-//! | 3 | parsed and routed, but this build has no implementation |
 //!
-//! Three and one are kept apart on purpose. "This build cannot do that" is a fact about the
-//! build that no retry will change; "that did not work" is a fact about this attempt, and
-//! the error envelope that comes with it says whether retrying would help.
+//! There used to be a third — "parsed and routed, but this build has no implementation" —
+//! and `nysia hook` was the only thing that ever answered with it. It is gone because nothing
+//! answers with it any more: every verb this binary routes, it serves. A code documented for
+//! a case that cannot arise is a code somebody writes a branch for.
+//!
+//! **`nysia hook` never exits 2.** Claude reads exit 2 from a hook as "block, and feed stderr
+//! back to the model", which is the influence §5.2 exists to make impossible; the hook's own
+//! failures are exit 1. Clap's usage exit is the one route to a 2, and it is reachable only
+//! by a hook entry whose argv is malformed.
 
 mod cli;
 mod daemon;
+mod hook;
 mod verbs;
 
 use std::io::Write;
@@ -29,9 +35,6 @@ use crate::cli::{Cli, Mode};
 /// The verb was asked for something valid and it did not work. The error envelope on stderr
 /// says what and what to do about it.
 const EXIT_FAILED: u8 = 1;
-
-/// The verb parsed and routed correctly but has no implementation in this build.
-const EXIT_UNIMPLEMENTED: u8 = 3;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -74,9 +77,15 @@ async fn main() -> ExitCode {
                 }
             }
         }
-        Mode::Unimplemented(err) => {
-            let _ = writeln!(std::io::stderr(), "{err}");
-            ExitCode::from(EXIT_UNIMPLEMENTED)
+        Mode::Hook(args) => {
+            // `{}` is already on its way by the time this returns, whatever the answer is.
+            // `true` means the status was delivered, spooled, or specified to be dropped;
+            // `false` means the hook was asked for something it could not do.
+            if hook::run(&args).await {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(EXIT_FAILED)
+            }
         }
     }
 }
