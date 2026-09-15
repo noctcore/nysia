@@ -47,6 +47,29 @@
 //! it. Its harness is copied rather than shared: `survival.rs` is another wave's file and
 //! extracting a common module would be an edit outside this task's owned paths.
 //!
+//! # Read this before you trust a red — the pwsh line has never run
+//!
+//! [`hook_command`] picks one of three shells, and **the `pwsh` branch has been executed by
+//! nobody.** It was written on a machine without PowerShell 7, so every run of this test so
+//! far took the `cmd` branch — and `pwsh` is the branch **both CI legs take** the moment the
+//! `#[ignore]` comes off, because that is the profile `session create` resolves when it is
+//! installed. Only that one line is unproven: `survival.rs` already drives `--profile pwsh`
+//! on both runners, so the profile, the spawn and the prompt wait are all exercised; what is
+//! not is `Get-Content -Raw '<payload>' | & '<nysia>' hook …`, the one spelling of feeding
+//! the payload in that PowerShell needs because it has no `<` operator.
+//!
+//! So, for whoever removes the `#[ignore]`: **run this with `--ignored` on a machine that
+//! has `pwsh` before reading a red as a feature bug.**
+//!
+//! ```text
+//! cargo test -p nysia --test agent_status -- --ignored --nocapture
+//! ```
+//!
+//! The failure message prints the pane's screen, which is where a harness bug shows itself:
+//! a quoting or redirection fault appears there as a PowerShell parser error against the
+//! command line, where a missing feature appears as `nysia hook` answering for itself. If it
+//! is the harness, the fix is in this file and not in yours.
+//!
 //! [`PaneKey`]: nysia_proto::PaneKey
 
 use std::io::Read;
@@ -247,9 +270,15 @@ impl Drop for Nysiad {
 ///
 /// The payload never appears on the command line. A JSON document through three quoting
 /// dialects is a test that fails for reasons that have nothing to do with status.
+///
+/// **The `pwsh` line below has never been executed** — see the module docs. It is the line
+/// both CI legs will take, and it is the only part of this harness that no run has covered.
 fn hook_command(payload: &Path) -> (Vec<&'static str>, String) {
     let payload = payload.display();
     if nysia_core::pty::resolve("pwsh").is_ok() {
+        // Untried. `Get-Content -Raw` because PowerShell has no `<` operator — it is
+        // reserved and unimplemented — so the file cannot be redirected in the way the other
+        // two shells do it.
         return (
             vec!["--profile", "pwsh"],
             format!("Get-Content -Raw '{payload}' | & '{NYSIA}' hook --event Stop --no-spawn"),
