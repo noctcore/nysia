@@ -141,9 +141,23 @@ fn payload() -> Result<String, ErrorEnvelope> {
     Ok(payload)
 }
 
+/// A byte-order mark, which is not content and must not reach the JSON parser.
+///
+/// Stripped because a hook's stdin is whatever the shell in front of it produced, and at
+/// least one shell in Nysia's own tests produces one: PowerShell writes the pipe using
+/// `$OutputEncoding`, and a UTF-8 encoding with a preamble puts `U+FEFF` at the head of it.
+///
+/// `str::trim` does **not** remove it — `U+FEFF` is not `char::is_whitespace` — so without
+/// this the parser reports "expected value at line 1 column 1" for a payload that is
+/// otherwise perfect, and the status is lost to a character nobody wrote. It cost a
+/// debugging session to find from that message; the acceptance test's `pwsh` branch is where
+/// it appears, which is the branch both CI legs take.
+const BYTE_ORDER_MARK: char = '\u{feff}';
+
 /// Read the payload as an event, applying the flag rules this module's docs set out.
 fn event(payload: &str, flag: Option<&str>) -> Result<HookEvent, ErrorEnvelope> {
-    let mut document: serde_json::Value = serde_json::from_str(payload.trim()).map_err(|err| {
+    let payload = payload.trim_start_matches(BYTE_ORDER_MARK).trim();
+    let mut document: serde_json::Value = serde_json::from_str(payload).map_err(|err| {
         // The error, never the payload: it can carry a `waiting` question (trap 13).
         refusal(
             format!("the hook payload on stdin is not JSON: {err}"),
@@ -442,6 +456,23 @@ mod tests {
         // had not met would stop reporting status the day Claude adds one.
         let parsed = read(r#"{"hook_event_name":"SomethingNew"}"#, None).expect("it still reads");
         assert_eq!(parsed.state(), None, "and maps to nothing, which is a drop");
+    }
+
+    #[test]
+    fn a_byte_order_mark_in_front_of_the_payload_costs_nothing() {
+        // Found by running the acceptance test's `pwsh` line by hand rather than by reading
+        // it: PowerShell writes a native command's stdin using `$OutputEncoding`, and a UTF-8
+        // encoding with a preamble puts `U+FEFF` at the head of the pipe. `str::trim` leaves
+        // it — it is not `char::is_whitespace` — so the parser blamed column 1 of a payload
+        // that was perfect, and the pane's dot never moved.
+        let parsed = read("\u{feff}{\"hook_event_name\":\"Stop\"}", None)
+            .expect("a byte-order mark is not content");
+        assert_eq!(parsed.hook_event_name, HookEventName::Stop);
+
+        // And with the newline PowerShell adds after it, which is the real shape.
+        let parsed = read("\u{feff}{\"hook_event_name\":\"Stop\"}\r\n", None)
+            .expect("a mark and a trailing newline are both not content");
+        assert_eq!(parsed.hook_event_name, HookEventName::Stop);
     }
 
     #[test]

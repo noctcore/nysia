@@ -1,12 +1,16 @@
 //! The v0.2 acceptance test: **a hook fires inside a session and the pane's dot changes**.
 //!
-//! # It is expected to fail, and that is the point
+//! # It was written to fail, and that is the point
 //!
-//! Nothing behind this exists yet. `nysia hook` is a CLI stub that reports itself
-//! unimplemented, `nysia agent status` is not a verb at all, and there is no ingest, no
-//! store and no status RPC for either of them to reach. So the test is `#[ignore]`d with a
-//! reason naming the wave that lands them — `docs/plans/v0.2-delivery-plan.md` **wave C, W4**
-//! — and `cargo test --workspace` stays green with it in the tree.
+//! When this landed in wave A nothing behind it existed: `nysia hook` was a CLI stub that
+//! reported itself unimplemented, `nysia agent status` was not a verb at all, and there was
+//! no ingest, no store and no status RPC for either of them to reach. It was `#[ignore]`d
+//! with a reason naming the wave that would land them — `docs/plans/v0.2-delivery-plan.md`
+//! **wave C, W4** — so that `cargo test --workspace` stayed green with it in the tree.
+//!
+//! Wave C landed them and the `#[ignore]` came off. Nothing else about the test moved, which
+//! is the only reason its passing means anything: a test edited to fit the code it grades is
+//! a test that grades nothing.
 //!
 //! It is written now, in wave A, because of the single worst finding of v0.1: the daemon and
 //! the Tauri client were each green and did not interoperate, and only binding a real daemon
@@ -47,28 +51,31 @@
 //! it. Its harness is copied rather than shared: `survival.rs` is another wave's file and
 //! extracting a common module would be an edit outside this task's owned paths.
 //!
-//! # Read this before you trust a red — the pwsh line has never run
+//! # Read this before you trust a red — CI is the first thing to run the pwsh line
 //!
-//! [`hook_command`] picks one of three shells, and **the `pwsh` branch has been executed by
-//! nobody.** It was written on a machine without PowerShell 7, so every run of this test so
-//! far took the `cmd` branch — and `pwsh` is the branch **both CI legs take** the moment the
-//! `#[ignore]` comes off, because that is the profile `session create` resolves when it is
-//! installed. Only that one line is unproven: `survival.rs` already drives `--profile pwsh`
-//! on both runners, so the profile, the spawn and the prompt wait are all exercised; what is
-//! not is `Get-Content -Raw '<payload>' | & '<nysia>' hook …`, the one spelling of feeding
-//! the payload in that PowerShell needs because it has no `<` operator.
+//! [`hook_command`] picks one of three shells, and **the `pwsh` branch is the one no
+//! developer machine here has executed.** It was written on a machine without PowerShell 7
+//! and the run that turned this test green was on another one — so both took the `cmd`
+//! branch, and `pwsh` is the branch **both CI legs take**, because that is the profile
+//! `session create` resolves when it is installed.
 //!
-//! So, for whoever removes the `#[ignore]`: **run this with `--ignored` on a machine that
-//! has `pwsh` before reading a red as a feature bug.**
+//! Only that one line is unproven, and it is worth being precise about which: `survival.rs`
+//! already drives `--profile pwsh` on both runners, so the profile, the spawn and the prompt
+//! wait are all exercised. What is not is `Get-Content -Raw '<payload>' | & '<nysia>' hook …`,
+//! the one spelling of feeding the payload in that PowerShell needs, because it has no `<`
+//! operator. The nearest thing to a proof taken before merge was running that same pipeline
+//! through Windows PowerShell 5.1, which shares the syntax and the native-stdin behaviour;
+//! it is evidence rather than the leg itself.
+//!
+//! So: **a red here is a harness bug until it is ruled out.** The failure message prints the
+//! pane's screen, which is where one shows itself — a quoting or redirection fault appears
+//! there as a PowerShell parser error against the command line, where a missing feature
+//! appears as `nysia hook` answering for itself. If it is the harness, the fix is in this
+//! file rather than in the daemon.
 //!
 //! ```text
-//! cargo test -p nysia --test agent_status -- --ignored --nocapture
+//! cargo test -p nysia --test agent_status -- --nocapture
 //! ```
-//!
-//! The failure message prints the pane's screen, which is where a harness bug shows itself:
-//! a quoting or redirection fault appears there as a PowerShell parser error against the
-//! command line, where a missing feature appears as `nysia hook` answering for itself. If it
-//! is the harness, the fix is in this file and not in yours.
 //!
 //! [`PaneKey`]: nysia_proto::PaneKey
 
