@@ -17,6 +17,7 @@ pub mod frame;
 pub mod handshake;
 pub mod identity;
 mod newtype;
+pub mod project;
 pub mod session;
 pub mod stream;
 pub mod terminal;
@@ -44,6 +45,10 @@ pub use handshake::{
     HelloRequest, HelloResponse, HelloTag, LaunchNonce, OkFalse, OkTrue, PidRecord, RejectReason,
 };
 pub use identity::{IdentityError, Incarnation, PaneKey, SessionHandle, SessionKind};
+pub use project::{
+    MAX_LISTED_REPOSITORIES, Project, ProjectError, ProjectForget, ProjectId, ProjectList,
+    ProjectRegister, ProjectRegistered, RegisterRefusal, Worktree, unsupported_envelope,
+};
 pub use session::{
     ExitStatus, SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary,
     ShellProfile,
