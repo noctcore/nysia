@@ -59,8 +59,21 @@
  * So `pnpm dev` is `cargo build -p nysia && tauri dev`, and what decides whether anything
  * needs rebuilding is cargo's own fingerprint rather than a hand-rolled staleness test that
  * cannot see a feature, a profile, or a dependency that moved underneath it. Measured on
- * Windows with everything warm: ~0.3s when nothing changed, against the ~0.5s `tauri dev`
- * already spends deciding `nysia-desktop` is current.
+ * Windows with everything warm: ~0.3s when nothing changed with no daemon up and ~0.8s with
+ * one, against the ~0.5s `tauri dev` already spends deciding `nysia-desktop` is current.
+ *
+ * **What that costs when the last run's daemon is still up**, which is not exotic: it
+ * outlives the window by design, and idle retire needs `sessions.is_empty()`, so one that was
+ * holding a tab is still there. Change anything `nysia` is built from while it is, and the
+ * prepend **fails** — `failed to remove file target\<profile>\nysia.exe … os error 5`,
+ * measured — so `&&` short-circuits and no window opens. That is the rule two paragraphs up,
+ * reached through cargo's own uplift rather than through `copy_binaries`: rebuilding `nysia`
+ * writes a fresh `deps/nysia.exe` at a **new inode**, which orphans the uplift copy the daemon
+ * is running from, and a single-linked running image is the one Windows will not unlink. Same
+ * remedy as §12 q5, then: stop the daemon holding that file. A build with nothing to do does
+ * not trip it — measured with a daemon up — so an edit to the web app, or to the window
+ * alone, is unaffected. What that sequence did before the prepend was open a window onto the
+ * stale daemon and say nothing about it.
  *
  * Two commands:
  *
