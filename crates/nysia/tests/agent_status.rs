@@ -278,29 +278,58 @@ impl Drop for Nysiad {
 /// The payload never appears on the command line. A JSON document through three quoting
 /// dialects is a test that fails for reasons that have nothing to do with status.
 ///
-/// **The `pwsh` line below has never been executed** — see the module docs. It is the line
-/// both CI legs will take, and it is the only part of this harness that no run has covered.
+/// **Which branch it took is announced**, because on a green run it is otherwise invisible
+/// and the whole reason this function carries a warning is that nobody could tell. Wave A
+/// handed the test over saying the `pwsh` line had never run; the only way to answer that
+/// from a log was to reason about what is installed on a runner image, which is an inference
+/// and not an observation. See [`announce`].
 fn hook_command(payload: &Path) -> (Vec<&'static str>, String) {
     let payload = payload.display();
     if nysia_core::pty::resolve("pwsh").is_ok() {
-        // Untried. `Get-Content -Raw` because PowerShell has no `<` operator — it is
-        // reserved and unimplemented — so the file cannot be redirected in the way the other
-        // two shells do it.
+        // `Get-Content -Raw` because PowerShell has no `<` operator — it is reserved and
+        // unimplemented — so the file cannot be redirected in the way the other two shells
+        // do it. This is the line both CI legs take.
+        announce("pwsh");
         return (
             vec!["--profile", "pwsh"],
             format!("Get-Content -Raw '{payload}' | & '{NYSIA}' hook --event Stop --no-spawn"),
         );
     }
     if cfg!(windows) {
+        announce("cmd");
         return (
             vec!["--profile", "cmd"],
             format!("\"{NYSIA}\" hook --event Stop --no-spawn < \"{payload}\""),
         );
     }
+    announce("sh");
     (
         Vec::new(),
         format!("'{NYSIA}' hook --event Stop --no-spawn < '{payload}'"),
     )
+}
+
+/// Say which shell this run drove, on the process's real stderr.
+///
+/// **Not `eprintln!`**, and the difference is the whole point. libtest captures the `print!`
+/// family per test thread and shows it only when the test *fails*, so an `eprintln!` here
+/// would say nothing on exactly the runs somebody needs to read — the green ones. A direct
+/// write to [`std::io::stderr`] does not go through that capture and reaches the log either
+/// way.
+///
+/// One line, once per run, and it is the line that turns "both legs presumably took the pwsh
+/// branch" into something a reader can grep for:
+///
+/// ```text
+/// agent_status: driving the `pwsh` shell
+/// ```
+fn announce(shell: &str) {
+    use std::io::Write;
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "agent_status: driving the `{shell}` shell"
+    );
 }
 
 /// Wait until the shell has drawn its prompt and gone quiet.
