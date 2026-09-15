@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentState } from '../generated/AgentState';
+import type { AgentStatusChange } from '../generated/AgentStatusChange';
 import {
   createAgentNotificationSink,
   NOTIFIABLE,
   NOTIFICATION_CAP,
+  type AgentNotificationSink,
 } from './agentNotifications';
 import {
   LEAD,
@@ -34,10 +36,25 @@ import {
 const PANE = 'tab_1:leaf_1';
 const EVERY_STATE: readonly AgentState[] = ['working', 'waiting', 'done', 'interrupted'];
 
+/** What the provider was calling the pane's session when the change arrived. */
+const SESSION = 'Kirei deps but we already did…';
+
+/**
+ * Offer a change under the default label.
+ *
+ * `report` takes the session name because the sink holds no tabs and a notice's label
+ * belongs to the moment it was raised — see `AgentNotification.session`. Every case that is
+ * not *about* the label goes through here so the argument does not clutter twenty call
+ * sites; the two that are about it call `sink.report` directly with their own.
+ */
+function report(sink: AgentNotificationSink, change: AgentStatusChange): void {
+  sink.report(change, SESSION);
+}
+
 describe('which changes deserve a notification', () => {
   it('raises one for an agent that is waiting on the user', () => {
     const sink = createAgentNotificationSink();
-    sink.report(statusChange(statusOf(PANE, 'waiting')));
+    report(sink,statusChange(statusOf(PANE, 'waiting')));
 
     const notices = sink.getSnapshot();
     expect(notices).toHaveLength(1);
@@ -48,8 +65,8 @@ describe('which changes deserve a notification', () => {
 
   it('raises one when a turn ends, either way', () => {
     const sink = createAgentNotificationSink();
-    sink.report(statusChange(statusOf(PANE, 'done')));
-    sink.report(statusChange(statusOf('tab_2:leaf_1', 'interrupted')));
+    report(sink,statusChange(statusOf(PANE, 'done')));
+    report(sink,statusChange(statusOf('tab_2:leaf_1', 'interrupted')));
     expect(sink.getSnapshot().map((notice) => notice.title)).toEqual([
       'Done',
       'Interrupted',
@@ -60,14 +77,14 @@ describe('which changes deserve a notification', () => {
     // Permitted by the contract and still not worth a toast. The dot is already showing it,
     // and a notice per `PostToolUse` is the noise a status dot exists to replace.
     const sink = createAgentNotificationSink();
-    sink.report(statusChange(statusOf(PANE, 'working')));
+    report(sink,statusChange(statusOf(PANE, 'working')));
     expect(sink.getSnapshot()).toEqual([]);
   });
 
   it('raises none for a subagent', () => {
     // The roster still moves; the user is waiting on the lead, not on its helpers.
     const sink = createAgentNotificationSink();
-    sink.report(
+    report(sink,
       statusChange(statusOf(PANE, 'done'), PERMITTED, {
         target: 'subagent',
         agentId: 'sub_1',
@@ -90,7 +107,7 @@ describe('suppression', () => {
     // The exact trap. `SessionStart` maps to `done` with a session boundary, so this is a
     // change whose state is the one that normally notifies — and it must not.
     const sink = createAgentNotificationSink();
-    sink.report(
+    report(sink,
       statusChange(
         statusOf(PANE, 'done', { sessionBoundary: true }),
         SESSION_BOUNDARY,
@@ -104,7 +121,7 @@ describe('suppression', () => {
     // that just happened, and a window that toasted it would replay every notice the user
     // already dismissed.
     const sink = createAgentNotificationSink();
-    sink.report(
+    report(sink,
       statusChange(
         statusOf(PANE, 'done', { restoredUnconfirmed: true }),
         RESTORED,
@@ -116,7 +133,7 @@ describe('suppression', () => {
   it('survives a burst of session starts, which is what a reconnect looks like', () => {
     const sink = createAgentNotificationSink();
     for (let pane = 1; pane <= 10; pane += 1) {
-      sink.report(
+      report(sink,
         statusChange(
           statusOf(`tab_${pane}:leaf_1`, 'done', { sessionBoundary: true }),
           SESSION_BOUNDARY,
@@ -141,7 +158,7 @@ describe('reads the decision, not the row', () => {
     expect(row.sessionBoundary).toBe(false);
     expect(row.restoredUnconfirmed).toBe(false);
 
-    sink.report(statusChange({ lead: row, subagents: [] }, SESSION_BOUNDARY));
+    report(sink,statusChange({ lead: row, subagents: [] }, SESSION_BOUNDARY));
     expect(sink.getSnapshot()).toEqual([]);
   });
 
@@ -150,7 +167,7 @@ describe('reads the decision, not the row', () => {
     // the arm raises it. Nothing about this asks for the daemon to send such a frame — it
     // asks for the window to have no second opinion about the rule.
     const sink = createAgentNotificationSink();
-    sink.report(
+    report(sink,
       statusChange(statusOf(PANE, 'done', { sessionBoundary: true }), PERMITTED),
     );
     expect(sink.getSnapshot()).toHaveLength(1);
@@ -161,7 +178,7 @@ describe('the notice list', () => {
   it('keeps the newest and drops the oldest past the cap', () => {
     const sink = createAgentNotificationSink();
     for (let pane = 1; pane <= NOTIFICATION_CAP + 3; pane += 1) {
-      sink.report(statusChange(statusOf(`tab_${pane}:leaf_1`, 'done')));
+      report(sink,statusChange(statusOf(`tab_${pane}:leaf_1`, 'done')));
     }
 
     const notices = sink.getSnapshot();
@@ -174,12 +191,34 @@ describe('the notice list', () => {
     expect(notices[0]?.pane).toBe('tab_4:leaf_1');
   });
 
+  it('keeps the label it was raised with, not the pane’s current one', () => {
+    /*
+     * A `PaneKey` is durable and therefore reusable — `agentStatus.ts` drops a row whose
+     * pane is gone and `MockStore` prunes on close, both because reuse is real. A notice
+     * that resolved its own title against the current tab list would outlive the session it
+     * describes and then be relabelled: "codex · deskmate finished its turn" printed over a
+     * shell that had just taken the key.
+     *
+     * Two notices for one pane under two names is that situation, and both keep their own.
+     */
+    const sink = createAgentNotificationSink();
+    sink.report(statusChange(statusOf(PANE, 'done')), 'codex · deskmate');
+    sink.report(statusChange(statusOf(PANE, 'waiting')), 'pwsh · shiroani');
+
+    expect(sink.getSnapshot().map((notice) => notice.session)).toEqual([
+      'codex · deskmate',
+      'pwsh · shiroani',
+    ]);
+    // Same pane both times: the label is the thing that differs, which is the whole point.
+    expect(new Set(sink.getSnapshot().map((notice) => notice.pane))).toEqual(new Set([PANE]));
+  });
+
   it('gives every notice its own id, even for the same pane and state', () => {
     // The list is keyed on the id and dismissed by it, so a reused id would render
     // duplicate React keys and a dismiss that cleared two notices at once.
     const sink = createAgentNotificationSink();
-    sink.report(statusChange(statusOf(PANE, 'done')));
-    sink.report(statusChange(statusOf(PANE, 'done')));
+    report(sink,statusChange(statusOf(PANE, 'done')));
+    report(sink,statusChange(statusOf(PANE, 'done')));
 
     const ids = sink.getSnapshot().map((notice) => notice.id);
     expect(new Set(ids).size).toBe(2);
@@ -187,7 +226,7 @@ describe('the notice list', () => {
 
   it('dismisses by id, and dismissing twice is not an error', () => {
     const sink = createAgentNotificationSink();
-    sink.report(statusChange(statusOf(PANE, 'done')));
+    report(sink,statusChange(statusOf(PANE, 'done')));
     const id = sink.getSnapshot()[0]?.id ?? '';
 
     sink.dismiss(id);
@@ -201,7 +240,7 @@ describe('the notice list', () => {
     const sink = createAgentNotificationSink();
     expect(sink.getSnapshot()).toBe(sink.getSnapshot());
 
-    sink.report(statusChange(statusOf(PANE, 'done')));
+    report(sink,statusChange(statusOf(PANE, 'done')));
     const settled = sink.getSnapshot();
     sink.dismiss('nothing_by_this_name');
     expect(sink.getSnapshot()).toBe(settled);
@@ -214,15 +253,15 @@ describe('the notice list', () => {
       calls += 1;
     });
 
-    sink.report(statusChange(statusOf(PANE, 'done')));
+    report(sink,statusChange(statusOf(PANE, 'done')));
     expect(calls).toBe(1);
 
     // A suppressed change is not a change to the list, so it wakes nobody.
-    sink.report(statusChange(statusOf(PANE, 'done'), SESSION_BOUNDARY));
+    report(sink,statusChange(statusOf(PANE, 'done'), SESSION_BOUNDARY));
     expect(calls).toBe(1);
 
     unsubscribe();
-    sink.report(statusChange(statusOf(PANE, 'waiting')));
+    report(sink,statusChange(statusOf(PANE, 'waiting')));
     expect(calls).toBe(1);
   });
 
@@ -231,7 +270,7 @@ describe('the notice list', () => {
     // would date a spool drain to now, which is the same mistake the suppression above
     // exists to prevent, in a smaller place.
     const sink = createAgentNotificationSink();
-    sink.report(
+    report(sink,
       statusChange(statusOf(PANE, 'done', { observedAt: 1_234_567_890 }), PERMITTED, LEAD),
     );
     expect(sink.getSnapshot()[0]?.at).toBe(1_234_567_890);
@@ -239,7 +278,7 @@ describe('the notice list', () => {
 
   it('clears everything, so one case cannot leak into the next', () => {
     const sink = createAgentNotificationSink();
-    sink.report(statusChange(statusOf(PANE, 'done')));
+    report(sink,statusChange(statusOf(PANE, 'done')));
     sink.clear();
     expect(sink.getSnapshot()).toEqual([]);
   });

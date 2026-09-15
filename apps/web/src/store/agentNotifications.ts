@@ -49,8 +49,21 @@ import { STATE_TONE, type StatusTone } from './agentStatus';
 /** One notice, as the window shows it. */
 export interface AgentNotification {
   readonly id: string;
-  /** Which pane. The title is resolved at the edge, from the tab that is showing it. */
+  /** Which pane. */
   readonly pane: PaneKey;
+  /**
+   * What to call the session, captured when the notice was raised.
+   *
+   * Carried rather than looked up at render time, because a `PaneKey` is durable and
+   * therefore **reusable** — `agentStatus.ts` and `MockStore` both treat reuse as real and
+   * drop a row whose pane is gone. A notice that resolved its own title against the current
+   * tab list would survive the session it describes and then be relabelled with whatever
+   * took the key next: "codex · deskmate finished its turn" over a shell that just opened.
+   *
+   * A notice is a record of something that happened, so its label belongs to the moment it
+   * happened. The provider supplies it because the provider is the one holding the tabs.
+   */
+  readonly session: string;
   /** The palette entry, so the notice and the dot agree without a second mapping. */
   readonly tone: StatusTone;
   /** The heading: `Needs input`, `Done`, `Interrupted`. */
@@ -96,8 +109,16 @@ export interface AgentNotificationSink {
   /** Referentially stable between changes — this is read through `useSyncExternalStore`. */
   getSnapshot(): readonly AgentNotification[];
   subscribe(listener: () => void): () => void;
-  /** Offer a change. Whether it becomes a notice is this module's decision. */
-  report(change: AgentStatusChange): void;
+  /**
+   * Offer a change, with what the pane's session is called right now.
+   *
+   * Whether it becomes a notice is this module's decision; what the notice is *called* is
+   * not something this module can answer, because it holds no tabs. `session` is required
+   * rather than optional so a provider cannot forget it and silently produce notices
+   * labelled with pane keys — falling back to the key is the provider's decision to state,
+   * for a pane no tab is showing.
+   */
+  report(change: AgentStatusChange, session: string): void;
   dismiss(id: string): void;
   /** Test-only: drop everything, so one case cannot leak into the next. */
   clear(): void;
@@ -125,7 +146,7 @@ export function createAgentNotificationSink(): AgentNotificationSink {
       };
     },
 
-    report(change) {
+    report(change, session) {
       // Step one, and it is the only step that can veto on the contract's behalf. Both arms
       // are named because the type is an enum rather than a boolean for exactly that
       // reason: a caller has to say which one it is in.
@@ -153,6 +174,7 @@ export function createAgentNotificationSink(): AgentNotificationSink {
       const notice: AgentNotification = {
         id: `agent_${next}`,
         pane: row.pane,
+        session,
         tone: STATE_TONE[row.state],
         title: wording.title,
         message: wording.message,

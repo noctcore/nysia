@@ -1,6 +1,6 @@
 import type { AgentNotification } from '../store/agentNotifications';
 import { TONE_CLASS } from '../store/agentStatus';
-import { useAgentNotifications, useSnapshot } from '../store/hooks';
+import { useAgentNotifications } from '../store/hooks';
 import { GLYPH } from '../ui/glyphs';
 
 /**
@@ -27,7 +27,6 @@ import { GLYPH } from '../ui/glyphs';
  */
 export function AgentNotifications() {
   const { notices, dismiss } = useAgentNotifications();
-  const { tabs } = useSnapshot();
 
   if (notices.length === 0) {
     return null;
@@ -38,18 +37,12 @@ export function AgentNotifications() {
       role="log"
       aria-live="polite"
       aria-label="Agent status"
-      className="pointer-events-none absolute right-3.5 bottom-statusbar z-30 flex w-[320px] flex-col gap-2 pb-2"
+      // 320px is the target, not a promise: the column is absolutely positioned against one
+      // edge, so a fixed width runs off a narrow window. Same cap as `CommandErrors` (#71).
+      className="pointer-events-none absolute right-3.5 bottom-statusbar z-30 flex w-[320px] max-w-[calc(100vw-1.75rem)] flex-col gap-2 pb-2"
     >
       {notices.map((notice) => (
-        <Notice
-          key={notice.id}
-          notice={notice}
-          // The tab is where a session's title lives; the sink carries only the pane. A
-          // notice can outlive its tab — an agent finishing is exactly when someone closes
-          // it — so the key is the honest fallback rather than an invented name.
-          session={tabs.find((tab) => tab.paneKey === notice.pane)?.title ?? notice.pane}
-          onDismiss={() => dismiss(notice.id)}
-        />
+        <Notice key={notice.id} notice={notice} onDismiss={() => dismiss(notice.id)} />
       ))}
     </div>
   );
@@ -57,13 +50,12 @@ export function AgentNotifications() {
 
 function Notice({
   notice,
-  session,
   onDismiss,
 }: {
   readonly notice: AgentNotification;
-  readonly session: string;
   readonly onDismiss: () => void;
 }) {
+  const { session } = notice;
   return (
     <div className="border-line2 bg-bg2 text-term pointer-events-auto flex items-start gap-3 rounded-panel border p-3 shadow-flyout">
       {/* The same palette entry the pane's dot is showing, from the same table, so the
@@ -74,7 +66,10 @@ function Notice({
       />
       <div className="min-w-0 flex-1">
         <div className="text-fg font-semibold">{notice.title}</div>
-        <div className="text-fg2 mt-1 leading-normal">
+        {/* A session title is whatever the daemon calls the pane, which for a shell is
+            routinely a path with no spaces — the same unbroken run that ran past the border
+            in `CommandErrors` (#71), so it gets the same `overflow-wrap: anywhere`. */}
+        <div className="text-fg2 mt-1 leading-normal wrap-anywhere">
           <span className="text-fg">{session}</span> {notice.message}
         </div>
       </div>
