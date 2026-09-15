@@ -5,6 +5,7 @@ import type { StoreStatus } from '../store/types';
 import { useSnapshot } from '../store/hooks';
 import { GLYPH } from '../ui/glyphs';
 import { useDismiss } from '../ui/useDismiss';
+import { AgentNotifications } from './AgentNotifications';
 
 /**
  * The 30px status bar (design-spec.md §2).
@@ -18,6 +19,11 @@ import { useDismiss } from '../ui/useDismiss';
  * rows, quota windows, the hover flyout, "Manage accounts…" — is v0.4, and building a
  * convincing shell of it now would be a screen someone has to delete. The affordance is
  * here so the status bar does not have to change when it lands.
+ *
+ * `AgentNotifications` hangs off this bar rather than off the body, for the reason the
+ * daemon figures do: the bottom strip is the part of the window that speaks for the thing
+ * running outside it. It is a direct child of the bar's root and absolutely positioned, so
+ * it escapes the flex row and anchors against the window, opposite `CommandErrors`.
  */
 export function StatusBar() {
   const { usage, daemon, status } = useSnapshot();
@@ -82,6 +88,8 @@ export function StatusBar() {
           {daemon.worktreeCount}
         </span>
       </div>
+
+      <AgentNotifications />
     </div>
   );
 }

@@ -1,3 +1,6 @@
+import type { AgentState } from '../../generated/AgentState';
+import type { AgentStatus } from '../../generated/AgentStatus';
+import type { AgentStatusRow } from '../../generated/AgentStatusRow';
 import type { PaneKey } from '../../generated/PaneKey';
 import type { SessionHandle } from '../../generated/SessionHandle';
 import { emptySnapshot, type LauncherGroup, type Project, type StoreSnapshot, type Tab } from '../types';
@@ -148,6 +151,57 @@ export const SEED_LAUNCHERS: readonly LauncherGroup[] = [
   },
 ];
 
+/**
+ * One status row, with the six fields a seeded row does not vary spelled once.
+ *
+ * `question` is `null` rather than a transcribed payload: it is `unknown` on the wire
+ * because Claude's `tool_input` is arbitrary JSON, and nothing in v0.2 renders it. A seed
+ * that invented a shape for it would be the first hand-written opinion about a field D-13
+ * gives Rust.
+ */
+function statusRow(
+  pane: PaneKey,
+  state: AgentState,
+  observedAt: number,
+): AgentStatusRow {
+  return {
+    pane,
+    state,
+    question: null,
+    isInterrupt: state === 'interrupted',
+    sessionBoundary: false,
+    agentId: null,
+    observedAt,
+    restoredUnconfirmed: false,
+  };
+}
+
+/**
+ * Status for the two agent panes the design mock shows.
+ *
+ * Only the agents: a shell has no agent and therefore no row, which is the case the dot
+ * paints as *unknown* rather than as idle, and the seed should exercise it rather than
+ * paper over it.
+ *
+ * `observedAt` is an offset from the moment the store is built, for `startedAt`'s reason
+ * and one more: staleness is a comparison against the clock, so a fixed epoch would make
+ * every seeded dot decay to *active* the first time anyone opened the repository a day
+ * later.
+ *
+ * **What this proves and what it does not.** A teal dot here proves the mapping and the
+ * rendering. It proves nothing about the wire — there is no daemon ingest and no status RPC
+ * until v0.2 wave C, so the daemon-backed provider reports an empty list and the window
+ * paints the accent.
+ */
+export function seedAgentStatus(now: number): readonly AgentStatus[] {
+  return [
+    // Mid-turn, and recent enough to be fresh: the design mock's live session.
+    { lead: statusRow(KIREI_PANE, 'working', now - 2 * MINUTE), subagents: [] },
+    // Blocked on a question, which is the transition the notification rule exists for.
+    { lead: statusRow(CODEX_PANE, 'waiting', now - 40 * 1000), subagents: [] },
+  ];
+}
+
 export function createSeedSnapshot(now: number = Date.now()): StoreSnapshot {
   return {
     ...emptySnapshot('ready'),
@@ -167,5 +221,6 @@ export function createSeedSnapshot(now: number = Date.now()): StoreSnapshot {
       { label: '6d', percentLeft: 97 },
       { label: 'Fable', percentLeft: 99 },
     ],
+    agentStatus: seedAgentStatus(now),
   };
 }

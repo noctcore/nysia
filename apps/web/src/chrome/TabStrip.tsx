@@ -1,11 +1,13 @@
 import { useRef, type KeyboardEvent, type RefObject } from 'react';
 
-import { useCommands, useSnapshot } from '../store/hooks';
+import { useAgentStatus, useCommands, useSnapshot } from '../store/hooks';
 import type { Tab } from '../store/types';
 import { GLYPH } from '../ui/glyphs';
 import { isArrowKey, nextOption, tabbableIndex } from '../ui/roving';
+import { useNow } from '../ui/useNow';
 import { NewTabButton } from './NewTabButton';
 import { SessionGlyph } from './SessionGlyph';
+import { StatusDot } from './StatusDot';
 
 /**
  * The tab strip (design-spec.md §2).
@@ -32,6 +34,9 @@ import { SessionGlyph } from './SessionGlyph';
 export function TabStrip() {
   const { tabs, activeTab } = useSnapshot();
   const commands = useCommands();
+  // One clock for the strip. Staleness is a comparison against it, and a tab that held its
+  // own interval would be a timer per tab for a dot that changes twice an hour.
+  const now = useNow();
   const paneKeys = tabs.map((tab) => tab.paneKey);
   const tabbable = tabbableIndex(paneKeys, activeTab ?? '');
 
@@ -95,6 +100,7 @@ export function TabStrip() {
             tab={tab}
             active={tab.paneKey === activeTab}
             tabbable={index === tabbable}
+            now={now}
             nodes={tabNodes}
             onKeyDown={onKeyDown}
             onClose={focusAfterClose}
@@ -110,6 +116,7 @@ function TabButton({
   tab,
   active,
   tabbable,
+  now,
   nodes,
   onKeyDown,
   onClose,
@@ -117,11 +124,13 @@ function TabButton({
   readonly tab: Tab;
   readonly active: boolean;
   readonly tabbable: boolean;
+  readonly now: number;
   readonly nodes: RefObject<Map<string, HTMLDivElement>>;
   readonly onKeyDown: (event: KeyboardEvent<HTMLDivElement>, tab: Tab) => void;
   readonly onClose: (hadFocus: boolean) => void;
 }) {
   const commands = useCommands();
+  const status = useAgentStatus(tab.paneKey);
 
   return (
     // The tab is the focusable element, so the whole 34px chip takes the focus ring rather
@@ -147,6 +156,9 @@ function TabButton({
     >
       <SessionGlyph kind={tab.kind} />
       <span className="max-w-[240px] truncate">{tab.title}</span>
+      {/* Only agents. A tab is a session and a session is a terminal *or* an agent, so a
+          shell tab has no lifecycle to report and a dot beside it would invent one. */}
+      {tab.kind === 'agent' ? <StatusDot status={status} now={now} /> : null}
       <button
         type="button"
         tabIndex={-1}
