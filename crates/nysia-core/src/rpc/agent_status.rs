@@ -44,7 +44,6 @@
 //! the disk boundary. Nothing here widens it, and **no error variant or trace in this module
 //! carries a payload** — a row is named by its pane and its state, never by what it holds.
 
-use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -60,7 +59,6 @@ use crate::store::{Restored, Store, StoreError};
 #[derive(Debug)]
 pub struct AgentStatusService {
     store: Arc<Store>,
-    panes: Mutex<BTreeSet<PaneKey>>,
     subscribers: Mutex<Vec<Subscription>>,
 }
 
@@ -89,7 +87,6 @@ impl AgentStatusService {
     pub fn with_store(store: Arc<Store>) -> Self {
         Self {
             store,
-            panes: Mutex::new(BTreeSet::new()),
             subscribers: Mutex::new(Vec::new()),
         }
     }
@@ -109,7 +106,6 @@ impl AgentStatusService {
     pub fn restore(&self, rows: &[AgentStatusRow]) -> RestoreSummary {
         let mut summary = RestoreSummary::default();
         for row in rows {
-            self.remember(&row.pane);
             match self.store.restore_status(row) {
                 Ok(Restored::Applied) => summary.applied += 1,
                 Ok(Restored::Superseded) => summary.superseded += 1,
@@ -157,7 +153,6 @@ impl AgentStatusService {
             return Ok(None);
         };
         self.store.record_status(&row)?;
-        self.remember(pane);
         self.change(pane, event.target(), &row)
     }
 
@@ -170,37 +165,20 @@ impl AgentStatusService {
         self.store.status(pane)
     }
 
-    /// Every pane's status.
+    /// Every pane's status, from the table rather than from this process's memory.
     ///
-    /// # The enumeration this walks, and what it costs
-    ///
-    /// The store exposes `status(pane)`, `current_status(pane, agent)` and
-    /// `status_history(pane, agent)` — and no way to list the panes it holds. So this walks
-    /// the set of panes **this daemon process has seen**: every pane a live hook has named
-    /// and every pane a drained spool row carried.
-    ///
-    /// The gap is worth stating plainly rather than leaving for somebody to find: rows
-    /// persisted by a *previous* daemon, for a pane no hook has touched since this one
-    /// started, are in the database and are not in this answer. [`Self::status`] finds them
-    /// by name, so a caller that knows the pane — the window, which has its own tab tree —
-    /// reads them; a caller that asks for everything does not.
-    ///
-    /// The fix is one read-only query in `crates/nysia-core/src/store/status.rs`, which is
-    /// another worker's file. It is isolated here so that closing it is a change to this one
-    /// function body.
+    /// This asked the store for the panes **this daemon had itself seen** until
+    /// [`Store::statuses`] existed, and the difference is not academic: spool a row with no
+    /// daemon, start one and let it drain, kill it, start another — and the second daemon
+    /// answered `[]` here while `status(pane)` returned the row and SQLite held exactly one.
+    /// §2 has the sidebar render this list, so every restart blanked it until each pane's
+    /// next hook, including the `restored_unconfirmed` rows the drain had just recovered.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] when a row cannot be read back.
     pub fn statuses(&self) -> Result<Vec<AgentStatus>, StoreError> {
-        let panes: Vec<PaneKey> = lock(&self.panes).iter().cloned().collect();
-        let mut statuses = Vec::with_capacity(panes.len());
-        for pane in panes {
-            if let Some(status) = self.store.status(&pane)? {
-                statuses.push(status);
-            }
-        }
-        Ok(statuses)
+        self.store.statuses()
     }
 
     /// Start sending changes to `sink` on `connection`.
@@ -305,11 +283,6 @@ impl AgentStatusService {
             notify: row.notify(),
         }))
     }
-
-    /// Note that this pane has a status, for [`Self::statuses`].
-    fn remember(&self, pane: &PaneKey) {
-        lock(&self.panes).insert(pane.clone());
-    }
 }
 
 /// What a spool drain did once the store had seen it.
@@ -336,9 +309,9 @@ fn now() -> UnixMillis {
 
 /// Take a lock, treating poisoning as the data still being usable.
 ///
-/// The same rule the rest of `rpc` uses: a panic while holding one of these leaves a `Vec` or
-/// a `BTreeSet` intact, and refusing to serve status for the life of the process afterwards
-/// would turn a recoverable fault into a permanent one.
+/// The same rule the rest of `rpc` uses: a panic while holding one of these leaves the `Vec`
+/// behind it intact, and refusing to serve status for the life of the process afterwards would
+/// turn a recoverable fault into a permanent one.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -453,6 +426,46 @@ mod tests {
             1,
             "a drained pane is a pane the list knows"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_daemon_lists_what_the_first_one_drained() {
+        // The defect the in-memory pane index had, as the sequence that exposes it: a row is
+        // spooled with no daemon, daemon #1 drains it, daemon #1 dies, daemon #2 starts on the
+        // database it inherited — and has itself seen no hook for that pane. It answered `[]`
+        // while `status(pane)` returned the row, so §2's sidebar went blank on every restart.
+        let (dir, first) = store("second-daemon");
+        assert_eq!(
+            first.restore(&[AgentStatusRow {
+                pane: pane(),
+                state: AgentState::Working,
+                question: None,
+                is_interrupt: false,
+                session_boundary: false,
+                agent_id: None,
+                observed_at: UnixMillis(1_000),
+                restored_unconfirmed: false,
+            }]),
+            RestoreSummary {
+                applied: 1,
+                superseded: 0,
+                failed: 0
+            }
+        );
+        let path = first.store().path().to_path_buf();
+        drop(first);
+
+        // A service that has never been told anything, on the database the first one left.
+        let second = AgentStatusService::open(&path).expect("the second daemon opens it");
+        let listed = second.statuses().expect("the list reads");
+        assert_eq!(listed.len(), 1, "a restart must not blank the sidebar");
+        assert_eq!(listed[0].lead.pane, pane());
+        assert!(
+            listed[0].lead.restored_unconfirmed,
+            "and it is still the unconfirmed row §2.3 says never counts as fresh"
+        );
+        drop(second);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
