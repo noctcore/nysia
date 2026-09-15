@@ -9,7 +9,7 @@
  * `statSync` then throws `ENOENT` and that error's message already contains the path.
  *
  * So this drives both. `stage` is pointed at a scratch prefix that already holds a built
- * runtime, and the copy has to land under `binaries/` as `nysia-<triple>` with those
+ * runtime, and the copy has to land under `binaries/` with a `nysia-` prefix and those
  * bytes — an immediate `return` leaves that directory empty. `verify` is pointed at four
  * directories: one with a window and no runtime, one with a runtime that is empty, one
  * with neither, and one with both. The missing-runtime case has to refuse with the guard's
@@ -132,5 +132,7 @@ if (failures.length > 0) {
   process.stderr.write(`${failures.join('\n')}\n`);
   process.exitCode = 1;
 } else {
-  process.stdout.write('the sidecar check trips on every bundle missing its runtime\n');
+  process.stdout.write(
+    'stage lands the runtime under binaries/; verify trips on the three broken shapes and accepts the complete one\n',
+  );
 }
