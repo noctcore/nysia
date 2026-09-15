@@ -35,12 +35,16 @@
 //!
 //! # The pane is in the row, not in the file name
 //!
-//! §2.3 asks for a per-pane JSONL, and a [`PaneKey`](nysia_proto::PaneKey) is `<tabId>:<leafId>` where each half
-//! may contain anything but `:`, `@`, whitespace and control characters — so `/`, `\`, `..`
-//! and every character Windows refuses are all legal in one. A file named after a pane key is
-//! therefore a path traversal with extra steps. The name is the key's bytes in hex, which
-//! cannot contain a separator and cannot collide, and the drain reads the pane back out of
-//! the row rather than out of the name it was filed under.
+//! §2.3 asks for a per-pane JSONL, and a [`PaneKey`](nysia_proto::PaneKey) is
+//! `<tabId>:<leafId>` where each half may contain anything but `:`, `@`, whitespace and
+//! control characters — so `/`, `\`, `..` and every character Windows refuses are all legal in
+//! one. A file named after a pane key is therefore a path traversal with extra steps. The name
+//! is the key's bytes in hex, which cannot contain a separator, and the drain reads the pane
+//! back out of the row rather than out of the name it was filed under.
+//!
+//! Identity puts **no length cap on a pane key** and hex doubles, so a long one is filed under
+//! a digest instead — see [`file_stem`], which is also where the reason a digest collision
+//! costs nothing is written down.
 //!
 //! # The drain deletes before it applies, and that is the safe direction
 //!
@@ -81,10 +85,12 @@
 //! | `hook::spool_it`'s `observed_at` | `UnixMillis(0)` | `a_status_no_daemon_will_take_is_spooled_rather_than_lost` |
 //! | `hook`'s `EXIT_FAILED` | `2` | `a_hook_never_exits_with_the_code_claude_reads_as_block` |
 //! | `hook::event`'s `trim_start_matches` | dropped | `a_byte_order_mark_in_front_of_the_payload_costs_nothing` |
+//! | `file_stem`'s hex-length guard | never taken | `a_pane_key_too_long_to_hex_still_spools_and_still_drains` |
 //!
-//! The last one is the only row here that was red **before** its fix rather than after it:
-//! the byte-order mark was found by running the acceptance test's `pwsh` line by hand, which
-//! is why that row is evidence rather than a demonstration.
+//! The byte-order-mark row is the only one here that was red **before** its fix rather than
+//! after it:
+//! it was found by running the acceptance test's `pwsh` line by hand, which is why that row is
+//! evidence rather than a demonstration.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -320,14 +326,52 @@ fn claim(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// A pane key as a file name: its bytes in lower-case hex.
+/// The longest hex stem this will produce before it switches to a digest.
+///
+/// Every filesystem this ships on caps one path component at 255 — bytes on ext4 and APFS,
+/// UTF-16 units on NTFS — and the stem is not the whole name: [`append`] adds `.jsonl` and
+/// [`claim`] adds `.<nanoseconds>.draining`, which is thirty more characters at its longest.
+/// Two hundred leaves room for both with margin to spare, and it is a cap on the *stem* so
+/// the arithmetic is done here rather than at each of the two call sites.
+const MAX_HEX_STEM: usize = 200;
+
+/// The prefix a digested stem carries.
+///
+/// A hex stem cannot contain `-`, so the two forms share no names and a long pane key can
+/// never be filed under a short one's stem by coincidence.
+const DIGEST_PREFIX: &str = "h-";
+
+/// A pane key as a file name: its bytes in lower-case hex, or a digest when that is too long.
 ///
 /// Not the key itself. See the module docs — a pane key may legally contain `/`, `\` and
 /// `..`, so a file named after one is a path traversal. Hex has no separator in it at all,
 /// which makes the question "could this escape the spool directory" answerable by looking at
 /// the alphabet rather than at the input.
+///
+/// # Why there is a second form at all
+///
+/// Hex doubles, and `nysia-proto`'s identity puts **no length cap on a pane key** — the GUI
+/// mints short ones and `session create --pane-key` takes whatever it is given. So a key over
+/// about 124 bytes produced a name past 255, `append` failed, and the hook reported a refusal
+/// and exited 1. Losing a status is the one outcome the spool exists to prevent, so the long
+/// case switches to a digest rather than failing.
+///
+/// FNV-1a, matching `rpc::endpoint`'s `short_digest` and for the same reason: this is a name,
+/// not a security boundary, and the workspace dependency table is coordinator-owned. A
+/// collision here would file two panes in one file, which costs nothing and is worth saying
+/// out loud — the drain reads each row's pane out of the row, so the rows still land under
+/// the panes they belong to. That is also why the digest may be short.
 fn file_stem(pane: &str) -> String {
-    pane.bytes().map(|byte| format!("{byte:02x}")).collect()
+    let hex: String = pane.bytes().map(|byte| format!("{byte:02x}")).collect();
+    if hex.len() <= MAX_HEX_STEM {
+        return hex;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in pane.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{DIGEST_PREFIX}{hash:016x}")
 }
 
 /// Open `path` for appending, creating it owner-only if it is not there.
@@ -510,6 +554,65 @@ mod tests {
         let err = append(&dir, &row(pane("tab_1"), 1_000)).expect_err("a full spool refuses");
         assert!(matches!(err, SpoolError::Full { .. }), "got {err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pane_key_too_long_to_hex_still_spools_and_still_drains() {
+        // Hex doubles and `nysia-proto`'s identity caps a pane key at nothing, so a key over
+        // about 124 bytes used to produce a name past every filesystem's 255 and the append
+        // failed — which the hook reports as a refusal and exits 1 on. Losing a status is the
+        // one outcome the spool exists to prevent, so the long case digests instead.
+        let dir = runtime_dir("long-key");
+        let long = pane(&"t".repeat(300));
+        assert!(
+            long.as_str().len() > 300,
+            "the fixture has to be past the hex cap to mean anything"
+        );
+
+        let path = append(&dir, &row(long.clone(), 1_000)).expect("a long pane key still spools");
+        let name = path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            name.len() < 255,
+            "the whole name has to fit one path component, got {} chars",
+            name.len()
+        );
+        assert!(name.starts_with(DIGEST_PREFIX), "got {name}");
+        assert!(
+            !name.contains("..") && !name.contains('/') && !name.contains('\\'),
+            "the digest form carries no path syntax either, got {name}"
+        );
+
+        // And the pane survives, because it travels in the row rather than in the name — which
+        // is also why a digest collision would cost nothing.
+        let drained = drain(&dir).expect("the drain runs");
+        assert_eq!(drained.rows.first().map(|row| row.pane.clone()), Some(long));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_ordinary_pane_key_keeps_its_readable_hex_name() {
+        // The common case is unchanged, which is the point of the cap rather than a blanket
+        // digest: a uuid-pair key is ~82 bytes, well inside the hex form, and a person looking
+        // at the spool directory can still decode the name back to the pane.
+        let uuid_pair = pane("tab_9f8a6c12-4b1e-4a77-9d33-0c2f71b5ee90");
+        let stem = file_stem(uuid_pair.as_str());
+        assert!(!stem.starts_with(DIGEST_PREFIX), "got {stem}");
+        assert!(stem.len() <= MAX_HEX_STEM);
+        assert_eq!(
+            String::from_utf8(
+                stem.as_bytes()
+                    .chunks(2)
+                    .filter_map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+                    .collect()
+            )
+            .expect("the hex decodes back to the key"),
+            uuid_pair.as_str(),
+            "the hex form stays reversible by eye"
+        );
     }
 
     #[test]
