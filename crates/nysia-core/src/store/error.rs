@@ -149,6 +149,21 @@ pub enum StoreError {
         /// The offending value.
         millis: i64,
     },
+    /// The database path is a symbolic link.
+    ///
+    /// Refused rather than followed. `create_owner_only` uses `create_new`, which fails with
+    /// `AlreadyExists` on an existing symlink and is mapped to "the file is already there" —
+    /// after which `chmod` follows the link and narrows its **target**, and SQLite opens that
+    /// target as the database. So a link planted at the path redirects a file trap 14 says is
+    /// owner-only, and hands `0600` to whatever it points at.
+    ///
+    /// Planting one needs write access to the daemon's state directory, which is itself
+    /// owner-only, so this is a second line rather than the only one.
+    #[error("the store path {} is a symbolic link, which this will not follow", path.display())]
+    Symlink {
+        /// The link.
+        path: PathBuf,
+    },
     /// Another thread panicked while holding the connection.
     ///
     /// Surfaced rather than recovered. `rusqlite` rolls a dropped [`rusqlite::Transaction`]
