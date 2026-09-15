@@ -976,6 +976,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn an_out_of_order_drain_still_lands() {
+        // The `restored_unconfirmed = 0` half of rule 3, which is the half that makes the
+        // guard "consults **live** rows only" rather than "consults whatever is newest".
+        //
+        // A spool is not sorted: the drain hands over whatever order the entries were written
+        // in, and a re-drain after a crash can hand them over oldest-last. So the second entry
+        // here is *older* than the first, and both must land — a restored row is not evidence
+        // that anything was confirmed, so it cannot be the thing that supersedes.
+        //
+        // `a_restored_row_does_not_block_the_next_one` only covers the ascending order, which
+        // passes with the clause dropped. This one goes red without it, with
+        // `left: Superseded / right: Applied`.
+        let (dir, store) = store("restore-out-of-order");
+        assert_eq!(
+            store.restore_status(&row(pane(), 2_000)).expect("newer"),
+            Restored::Applied
+        );
+        assert_eq!(
+            store.restore_status(&row(pane(), 1_000)).expect("older"),
+            Restored::Applied,
+            "a restored row is not live, so it cannot supersede the next one"
+        );
+        assert_eq!(count(&store), 2, "an out-of-order drain loses nothing");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ---- Trap 14: the question payload ---------------------------------------------------
 
     #[test]

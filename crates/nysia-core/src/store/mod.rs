@@ -59,6 +59,7 @@
 //! | `status::insert`'s timestamp | `row.observed_at.get() / 1000` | `a_row_at_the_staleness_boundary_reads_back_exact` |
 //! | `Store::restore_status`'s provenance | `Provenance::Live` | `a_restored_row_is_unconfirmed_whatever_the_caller_said` |
 //! | `status::insert`'s question filter | dropped | `only_a_waiting_row_keeps_its_question` |
+//! | `status::live_row_at_least_as_recent`'s `restored_unconfirmed = 0` | dropped | `an_out_of_order_drain_still_lands` |
 //! | `migrate::apply`'s `migration.version <= found` guard | dropped | `opening_a_current_store_takes_no_write_lock` |
 //!
 //! The tests assert **literal** numbers — twenty rows, `1_800_000` milliseconds — rather
