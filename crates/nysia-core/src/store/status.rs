@@ -173,26 +173,7 @@ impl Store {
         agent_id: Option<&str>,
     ) -> Result<Option<AgentStatusRow>, StoreError> {
         let conn = self.conn()?;
-        let mut statement = conn
-            .prepare_cached(&format!(
-                "SELECT {COLUMNS} FROM agent_status
-                  WHERE pane = ?1 AND agent_id IS ?2
-                  ORDER BY seq DESC LIMIT 1"
-            ))
-            .map_err(self.sqlite("prepare the current-status query"))?;
-        let mut rows = statement
-            .query(rusqlite::params![pane.as_str(), agent_id])
-            .map_err(self.sqlite("read the current status"))?;
-        let Some(row) = rows
-            .next()
-            .map_err(self.sqlite("read the current status"))?
-        else {
-            return Ok(None);
-        };
-        RawRow::read(row)
-            .map_err(self.sqlite("read the current status"))?
-            .decode(&self.path)
-            .map(Some)
+        current_status_on(&conn, &self.path, pane, agent_id)
     }
 
     /// One pane's whole status: the lead's row and the subagent roster.
@@ -207,11 +188,21 @@ impl Store {
     ///
     /// As [`Store::current_status`].
     pub fn status(&self, pane: &PaneKey) -> Result<Option<AgentStatus>, StoreError> {
-        let Some(lead) = self.current_status(pane, None)? else {
+        let mut conn = self.conn()?;
+        // One snapshot for both queries. Holding the mutex across them is not enough: it
+        // serialises only this `Store`'s writers, and the whole reason a second `Store` may
+        // exist on the same path is that a CLI process writes status too — it would commit
+        // between two autocommit `SELECT`s regardless of any lock held in here. A deferred
+        // transaction is a WAL read snapshot, so the roster is the one that belonged to the
+        // lead. Deferred rather than `IMMEDIATE` because nothing here writes, and a reader
+        // that took the write lock would block the hooks this is describing.
+        let tx = conn
+            .transaction()
+            .map_err(self.sqlite("begin a status read"))?;
+        let Some(lead) = current_status_on(&tx, &self.path, pane, None)? else {
             return Ok(None);
         };
-        let conn = self.conn()?;
-        let mut statement = conn
+        let mut statement = tx
             .prepare_cached(&format!(
                 "SELECT {COLUMNS} FROM agent_status
                   WHERE pane = ?1
@@ -234,6 +225,7 @@ impl Store {
             .map(|raw| raw.decode(&self.path))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(AgentStatus { lead, subagents }))
+        // `tx` rolls back on drop, which for a read is just releasing the snapshot.
     }
 
     /// An agent's history, newest first.
@@ -274,6 +266,44 @@ impl Store {
             source,
         }
     }
+}
+
+/// The newest row for one agent, read through whatever connection the caller has.
+///
+/// A free function rather than a method because [`Store::status`] needs it **inside** an open
+/// transaction, and a method would have to take the connection mutex a second time — which is
+/// a deadlock, not a slow path, since `std::sync::Mutex` is not reentrant.
+fn current_status_on(
+    conn: &rusqlite::Connection,
+    path: &Path,
+    pane: &PaneKey,
+    agent_id: Option<&str>,
+) -> Result<Option<AgentStatusRow>, StoreError> {
+    let sqlite = |action: &'static str| {
+        let path = path.to_path_buf();
+        move |source| StoreError::Sqlite {
+            action,
+            path,
+            source,
+        }
+    };
+    let mut statement = conn
+        .prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM agent_status
+              WHERE pane = ?1 AND agent_id IS ?2
+              ORDER BY seq DESC LIMIT 1"
+        ))
+        .map_err(sqlite("prepare the current-status query"))?;
+    let mut rows = statement
+        .query(rusqlite::params![pane.as_str(), agent_id])
+        .map_err(sqlite("read the current status"))?;
+    let Some(row) = rows.next().map_err(sqlite("read the current status"))? else {
+        return Ok(None);
+    };
+    RawRow::read(row)
+        .map_err(sqlite("read the current status"))?
+        .decode(path)
+        .map(Some)
 }
 
 /// Open a write transaction that takes the write lock immediately.
