@@ -1,0 +1,13 @@
+{
+  "code": "path_unreadable",
+  "message": "that path does not exist, or could not be read",
+  "nextCommandArgs": null,
+  "nextSteps": [
+    "Check the path is spelled the way it is on disk and that you can open it.",
+    "Nysia never creates the folder for you: register one that is already there."
+  ],
+  "receipt": null,
+  "requestId": "req_11111111-1111-4111-8111-111111111111",
+  "retryable": false,
+  "type": "error"
+}
