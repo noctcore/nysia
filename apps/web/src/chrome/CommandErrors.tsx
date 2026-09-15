@@ -14,6 +14,12 @@ import { GLYPH } from '../ui/glyphs';
  * message carries the daemon's `nextSteps` — and a notice that removes itself while
  * someone is reading it is worse than one they have to dismiss.
  *
+ * That argument is about *time*, not about *size*, and the two were briefly conflated: a
+ * notice that stays until dismissed is right, and a notice that grows without limit while it
+ * stays is not. `nextSteps` is as long as the daemon needs it to be, so the message body is
+ * capped and scrolls. The notice keeps its place in the corner instead of climbing over the
+ * sidebar, and nothing in it is lost.
+ *
  * Two lists are merged here, from two places, for one reason. `snapshot.errors` is what a
  * provider wrapped and recorded. `useUnexpectedFailures()` is what got out unwrapped — a
  * raw transport error, a provider bug — which the provider by definition did not record,
@@ -35,7 +41,10 @@ export function CommandErrors() {
       role="log"
       aria-live="polite"
       aria-label="Command failures"
-      className="pointer-events-none absolute bottom-statusbar left-3.5 z-30 flex w-[380px] flex-col gap-2 pb-2"
+      // 380px is the target, not a promise. It sits `left-3.5` in an absolutely positioned
+      // column, so a fixed width reaches the right edge of a narrow window and then past it;
+      // the cap keeps the same gutter on both sides at any size.
+      className="pointer-events-none absolute bottom-statusbar left-3.5 z-30 flex w-[380px] max-w-[calc(100vw-1.75rem)] flex-col gap-2 pb-2"
     >
       {errors.map((error) => (
         <Notice
@@ -63,9 +72,31 @@ function Notice({
       <span aria-hidden="true" className="text-status-failed leading-none">
         {GLYPH.dot}
       </span>
-      <div className="flex-1">
+      {/* `min-w-0` because a flex item's default `min-width: auto` is its min-content
+          width, and an unbroken path has a large one — without this the item refuses to
+          shrink and pushes the dismiss button out of the box no matter how the text wraps. */}
+      <div className="min-w-0 flex-1">
+        {/* The heading is words, so it wraps on them. */}
         <div className="text-fg font-semibold">{error.command} failed</div>
-        <div className="text-fg2 mt-1 leading-normal">{error.message}</div>
+        {/*
+         * The message is not words. The daemon's `nextSteps` carries an absolute path, and
+         * on Windows that is `C:\Users\…\target\debug\nysia.exe` — no spaces, so no break
+         * opportunities, so a box that only knows how to break between words neither wraps
+         * it nor clips it and the text runs past the border (#71). The notice that reports a
+         * *missing runtime* is guaranteed to carry one, so this is the common case here.
+         *
+         * `wrap-anywhere` is `overflow-wrap: anywhere` rather than `break-word`, and the
+         * difference is the one that matters inside a flex item: `anywhere` counts the break
+         * opportunities when the min-content width is computed, so the item can actually
+         * shrink. `break-words` leaves min-content at the full length of the path, which is
+         * why it is "often not enough" for exactly this input.
+         *
+         * `break-all` was the other candidate and is worse: it breaks mid-word in ordinary
+         * prose too, and most of these messages are sentences.
+         */}
+        <div className="text-fg2 mt-1 max-h-40 overflow-y-auto leading-normal wrap-anywhere">
+          {error.message}
+        </div>
       </div>
       <button
         type="button"
