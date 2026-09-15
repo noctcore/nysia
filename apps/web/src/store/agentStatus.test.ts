@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentState } from '../generated/AgentState';
+import { AGENT_STATUS_STALE_AFTER_MS } from '../generated/wireConstants';
 import { STATUS_TOKENS } from '../theme/themes';
 import {
   agentDot,
@@ -8,7 +9,6 @@ import {
   findAgentStatus,
   isStale,
   retainAgentStatus,
-  STALE_AFTER_MS,
   STALE_CLASS,
   STATE_LABEL,
   STATE_TONE,
@@ -71,19 +71,20 @@ describe('the state → palette mapping', () => {
 });
 
 describe('staleness', () => {
-  it('is §2.3’s thirty minutes, to the millisecond', () => {
-    // `agentStatus.ts` duplicates this from `AGENT_STATUS_STALE_AFTER_MS`, because ts-rs
-    // exports types and not values. Pinning it proves the copy has not been edited; it
-    // cannot prove the copy still agrees with Rust, which is why that module says where the
-    // authority is and the PR says it is a copy.
-    expect(STALE_AFTER_MS).toBe(1_800_000);
+  it('is §2.3’s thirty minutes, as Rust generated it', () => {
+    // Not a pin on a transcribed copy any more. `nysia-proto`'s `bindings` module writes
+    // this from `AGENT_STATUS_STALE_AFTER_MS`, `pnpm ts-drift` fails if the committed
+    // output and the crate disagree, and the crate's own test asserts the export against
+    // the constant — so this case reads the value rather than restating it, and what it
+    // adds is that thirty minutes is what §2.3 asked for.
+    expect(AGENT_STATUS_STALE_AFTER_MS).toBe(30 * 60 * 1000);
   });
 
   it('is strictly older, so a row exactly on the boundary is still fresh', () => {
     const row = statusRow('tab_1:leaf_1', 'working', { observedAt: NOW });
     expect(isStale(row, NOW)).toBe(false);
-    expect(isStale(row, NOW + STALE_AFTER_MS)).toBe(false);
-    expect(isStale(row, NOW + STALE_AFTER_MS + 1)).toBe(true);
+    expect(isStale(row, NOW + AGENT_STATUS_STALE_AFTER_MS)).toBe(false);
+    expect(isStale(row, NOW + AGENT_STATUS_STALE_AFTER_MS + 1)).toBe(true);
   });
 
   it('never calls a row from the future stale', () => {
@@ -95,7 +96,7 @@ describe('staleness', () => {
   });
 
   it('decays only a working dot, and never into a fifth colour', () => {
-    const old = NOW - STALE_AFTER_MS - 1;
+    const old = NOW - AGENT_STATUS_STALE_AFTER_MS - 1;
 
     const working = agentDot(statusRow('tab_1:leaf_1', 'working', { observedAt: old }), NOW);
     expect(working.stale).toBe(true);

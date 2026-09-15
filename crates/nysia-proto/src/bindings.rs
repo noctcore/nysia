@@ -33,6 +33,7 @@
 //! serde produces for [`CreditWindow::DEFAULT`], key for key and value for value, so a
 //! renamed or added field cannot quietly miss the export.
 
+use crate::agent::AGENT_STATUS_STALE_AFTER_MS;
 use crate::credit::CreditWindow;
 use crate::frame::{FRAME_HEADER_BYTES, FrameKind, MAX_FRAME_PAYLOAD_BYTES};
 use crate::version::{MIN_ATTACHABLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
@@ -213,6 +214,22 @@ export const CREDIT_WINDOW_DEFAULT = {{
 {window}}} as const satisfies CreditWindow;
 
 /**
+ * How old a `working` row has to be before it is **stale** (§2.3).
+ *
+ * A status row carries `observedAt` and nothing else about its age, so the comparison
+ * against the clock happens in the window — which means the window needs this number, and a
+ * number a client needs at run time is a number that is generated rather than transcribed.
+ * It was not, for one wave: `apps/web` carried `30 * 60 * 1000` beside a comment naming
+ * `AGENT_STATUS_STALE_AFTER_MS` as its authority, and a comment is not a mechanism.
+ *
+ * Strictly older, and a row from the future is not stale — see `AgentStatusRow::is_stale`,
+ * which is the implementation a client has to agree with. Staleness is **not** a fifth
+ * state: `AgentState` has four and a stale `working` row decays to what the design paints
+ * as *active*, which is a reading of `state` and this number together.
+ */
+export const AGENT_STATUS_STALE_AFTER_MS = {agent_status_stale_after_ms};
+
+/**
  * A `RejectReason` as it may *arrive*, rather than as this build writes it.
  *
  * Rust absorbs an unrecognised `kind` into `RejectReason::Unknown`, so the union ts-rs
@@ -255,6 +272,7 @@ export type {open} = RejectReason | {{ \"kind\": string & {{}} }};
         min_attachable = MIN_ATTACHABLE_PROTOCOL_VERSION.get(),
         frame_header_bytes = FRAME_HEADER_BYTES,
         max_frame_payload_bytes = MAX_FRAME_PAYLOAD_BYTES,
+        agent_status_stale_after_ms = AGENT_STATUS_STALE_AFTER_MS,
         open = OPEN_REJECT_REASON,
     )
 }
@@ -420,6 +438,12 @@ mod tests {
         assert!(generated.contains("export const MIN_ATTACHABLE_PROTOCOL_VERSION = 2;"));
         assert!(generated.contains("export const FRAME_HEADER_BYTES = 9;"));
         assert!(generated.contains("export const MAX_FRAME_PAYLOAD_BYTES = 1048576;"));
+        // Read from the constant rather than written as a literal: the point of generating
+        // it is that the number has one home, and asserting a second spelling of 1800000
+        // here would put a third copy in the repository to keep in step.
+        assert!(generated.contains(&format!(
+            "export const AGENT_STATUS_STALE_AFTER_MS = {AGENT_STATUS_STALE_AFTER_MS};"
+        )));
         assert!(generated.contains("  ackBatch: 196608,"));
         assert!(generated.contains("  chunk: 49152,"));
         // The `satisfies` clauses are what make a disagreement between this module and the

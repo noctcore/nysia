@@ -4,6 +4,7 @@ import type { AgentStatus } from '../generated/AgentStatus';
 import type { AgentStatusChange } from '../generated/AgentStatusChange';
 import type { AgentStatusRow } from '../generated/AgentStatusRow';
 import type { PaneKey } from '../generated/PaneKey';
+import { AGENT_STATUS_STALE_AFTER_MS } from '../generated/wireConstants';
 import type { StatusTokens } from '../theme/themes';
 
 /**
@@ -98,19 +99,13 @@ export const STATE_LABEL = {
 } as const satisfies Record<AgentState, string>;
 
 /**
- * §2.3's thirty minutes, after which a `working` row is stale.
- *
- * **This is a copy, and it should not stay one.** The authority is
- * `AGENT_STATUS_STALE_AFTER_MS` in `crates/nysia-proto/src/agent.rs`; D-13 makes Rust the
- * sole wire authority, but ts-rs exports types and not values and `nysia-proto`'s
- * `bindings` module does not yet emit this one into `generated/wireConstants.ts` the way it
- * emits `FRAME_HEADER_BYTES`. The number is written once, here, so that the day it is
- * generated the change is this line and its import.
- */
-export const STALE_AFTER_MS = 30 * 60 * 1000;
-
-/**
  * Whether a row is older than §2.3's thirty minutes, as of `now`.
+ *
+ * The threshold is `AGENT_STATUS_STALE_AFTER_MS` out of `generated/wireConstants`, which
+ * `nysia-proto`'s `bindings` module writes from the same Rust constant the daemon uses
+ * (D-13). It was briefly a `30 * 60 * 1000` here beside a comment naming that constant as
+ * its authority; a comment is not a mechanism, and the generated module is the channel this
+ * repository already uses for a value a client needs at run time.
  *
  * Strictly older, and a row from the future is not stale — both matching
  * `AgentStatusRow::is_stale`, which is the implementation this one has to agree with. A
@@ -118,7 +113,7 @@ export const STALE_AFTER_MS = 30 * 60 * 1000;
  * ahead of the window's clock, and calling that stale would decay a dot that is live.
  */
 export function isStale(row: AgentStatusRow, now: number): boolean {
-  return now - row.observedAt > STALE_AFTER_MS;
+  return now - row.observedAt > AGENT_STATUS_STALE_AFTER_MS;
 }
 
 /** What a status dot paints, and what it says. */
