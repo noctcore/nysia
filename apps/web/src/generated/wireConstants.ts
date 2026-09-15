@@ -38,6 +38,7 @@ export const FRAME_KIND = {
   "osc133": 4,
   "credit": 5,
   "replay_end": 6,
+  "agent_status": 7,
 } as const satisfies Record<FrameKind, number>;
 
 /**
@@ -53,6 +54,7 @@ export const FRAME_KIND_BY_BYTE: Readonly<Record<number, FrameKind | undefined>>
   4: "osc133",
   5: "credit",
   6: "replay_end",
+  7: "agent_status",
 };
 
 /**

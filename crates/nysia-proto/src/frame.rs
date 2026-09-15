@@ -34,6 +34,7 @@
 //! | 4 | [`FrameKind::Osc133`] | The shell-integration event, as JSON. |
 //! | 5 | [`FrameKind::Credit`] | A credit grant or ack, as JSON. |
 //! | 6 | [`FrameKind::ReplayEnd`] | Empty. The replay is over; live output starts here. |
+//! | 7 | [`FrameKind::AgentStatus`] | One agent-status change, as JSON. |
 //!
 //! Zero is deliberately not a kind, and [`StreamId::RESERVED`] is deliberately not a stream,
 //! so a zero-filled buffer is rejected twice over rather than read as a run of empty frames.
@@ -123,17 +124,42 @@ pub enum FrameKind {
     /// back out as keystrokes — which ConPTY reads as function keys. See
     /// [`crate::stream`] for what a client owes this frame.
     ReplayEnd = 6,
+    /// One agent-status change, as JSON: a serialised
+    /// [`AgentStatusChange`](crate::AgentStatusChange) — the pane's whole status, which
+    /// entry moved, and whether it may raise a notification.
+    ///
+    /// **Only ever on a stream id from
+    /// [`AgentStatusSubscribe`](crate::AgentStatusSubscribe)**, never on one a
+    /// [`StreamAttach`](crate::StreamAttach) opened. That rule is what makes this kind
+    /// additive rather than breaking — see [`crate::version`] — and a daemon that broke it
+    /// would hand a terminal surface a JSON document to paint.
+    ///
+    /// **The whole status, not a diff.** A client that missed a frame is correct again after
+    /// the next one, which is the same argument [`ReplayEnd`](Self::ReplayEnd) makes against
+    /// a byte count: a diff is a derivation two implementations have to keep agreeing on
+    /// forever, and a snapshot is a document that either arrived or did not.
+    ///
+    /// **The notification decision travels with it**, already made, so the window reads an
+    /// arm rather than remembering §2.1's rule about session boundaries. That is the reason
+    /// a change is a wrapper rather than a bare status.
+    ///
+    /// **Spends no credit**, like [`Exit`](Self::Exit) and [`Bell`](Self::Bell). §7.3's
+    /// window is replenished by a client acking after xterm's `write()` callback, and a
+    /// subscriber paints no terminal and so acks nothing — charging it would drain the
+    /// allowance until the subscription stalled for a reason no log line would name.
+    AgentStatus = 7,
 }
 
 impl FrameKind {
     /// Every kind, in wire-byte order. The table the module docs describe.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Output,
         Self::Exit,
         Self::Bell,
         Self::Osc133,
         Self::Credit,
         Self::ReplayEnd,
+        Self::AgentStatus,
     ];
 
     /// The byte that names this kind in a header.
@@ -156,6 +182,7 @@ impl FrameKind {
             Self::Osc133 => "osc133",
             Self::Credit => "credit",
             Self::ReplayEnd => "replay_end",
+            Self::AgentStatus => "agent_status",
         }
     }
 
@@ -169,6 +196,7 @@ impl FrameKind {
             4 => Some(Self::Osc133),
             5 => Some(Self::Credit),
             6 => Some(Self::ReplayEnd),
+            7 => Some(Self::AgentStatus),
             _ => None,
         }
     }
@@ -510,7 +538,7 @@ mod tests {
         // Zero is not a kind, so a zero-filled buffer is rejected rather than read as a
         // run of empty frames.
         assert_eq!(FrameKind::from_byte(0), None);
-        assert_eq!(FrameKind::from_byte(7), None);
+        assert_eq!(FrameKind::from_byte(8), None);
         assert_eq!(FrameKind::from_byte(u8::MAX), None);
     }
 
@@ -561,7 +589,7 @@ mod tests {
         // kind would sit on a dead connection reporting nothing.
         assert_eq!(decode(&[0]), Err(FrameError::UnknownKind(0)));
         assert_eq!(decode(&[99]), Err(FrameError::UnknownKind(99)));
-        assert_eq!(decode(&[7, 0, 0]), Err(FrameError::UnknownKind(7)));
+        assert_eq!(decode(&[8, 0, 0]), Err(FrameError::UnknownKind(8)));
     }
 
     #[test]

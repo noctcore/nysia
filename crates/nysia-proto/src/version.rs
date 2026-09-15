@@ -41,11 +41,30 @@ impl fmt::Display for ProtocolVersion {
 
 /// The protocol version this build speaks and advertises in the handshake.
 ///
-/// Two, because v2 added [`FrameKind::ReplayEnd`](crate::FrameKind::ReplayEnd). A new frame
-/// kind is a **breaking** change in this direction and only this one: a v1 reader's decoder
-/// refuses a kind it does not know and drops the connection, by design, so a v2 daemon that
-/// served a v1 client would kill every session on that client's stream connection the first
-/// time anything attached.
+/// Two, because v2 added [`FrameKind::ReplayEnd`](crate::FrameKind::ReplayEnd).
+///
+/// # When a new frame kind is breaking, and when it is not
+///
+/// A reader's decoder refuses a kind it does not know and drops the connection, by design.
+/// So the question a new kind has to answer is **whether an older client can be sent one**,
+/// and that turns on how its frames come to exist:
+///
+/// - `ReplayEnd` is **breaking**, which is why it cost a version. The daemon sends it on
+///   every `stream_attach`, unbidden — a v1 client that attached anything would be sent a
+///   kind its decoder treats as fatal, and would lose every session on that connection.
+/// - [`FrameKind::AgentStatus`](crate::FrameKind::AgentStatus) is **additive**, and did not.
+///   Its frames travel only on a stream id minted by
+///   [`AgentStatusSubscribe`](crate::AgentStatusSubscribe) — a verb a client that does not
+///   know the kind cannot send — so there is no sequence of requests by which an older
+///   client receives one. A v0.1 client asking a v0.2 daemon for a verb it does not know
+///   gets [`ErrorCode::Unsupported`](crate::ErrorCode::Unsupported) on the control
+///   connection and nothing at all on the stream one.
+///
+/// The rule, then, is not "a new kind bumps the version". It is: **a new kind bumps the
+/// version when the daemon can send it on a stream an older client could have opened.** A
+/// daemon that emitted `AgentStatus` on a session stream would break that and silently make
+/// this constant wrong, which is why the variant's own docs state the confinement rather
+/// than leaving it here.
 pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(2);
 
 /// The oldest daemon protocol this build will attach to.
