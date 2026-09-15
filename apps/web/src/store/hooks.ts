@@ -1,5 +1,9 @@
 import { useContext, useMemo, useSyncExternalStore } from 'react';
 
+import type { AgentStatus } from '../generated/AgentStatus';
+import type { PaneKey } from '../generated/PaneKey';
+import { agentNotifications, type AgentNotification } from './agentNotifications';
+import { findAgentStatus } from './agentStatus';
 import { routeCommands, type StoreCommands } from './commands';
 import { StoreContext } from './StoreContext';
 import type { Store, StoreSnapshot } from './types';
@@ -73,4 +77,42 @@ export function useUnexpectedFailures(): UnexpectedFailures {
     unexpectedFailures.getSnapshot,
   );
   return useMemo(() => ({ failures, dismiss: unexpectedFailures.dismiss }), [failures]);
+}
+
+/**
+ * The status of one pane's agent, or `undefined` when the daemon has none for it.
+ *
+ * `undefined` is a real answer and not a gap to paper over: a shell has no agent at all,
+ * and an agent has no row until its first hook reaches the daemon. `agentDot` in
+ * `./agentStatus` paints that case as the accent rather than as a lifecycle colour, because
+ * "nothing is known" and "idle" are different things.
+ *
+ * A hook per row rather than a lookup table built once: `useSnapshot` is
+ * `useSyncExternalStore` and the rows are components already subscribed to it, so this adds
+ * a `find` over a list of tens and no subscription that was not already there.
+ */
+export function useAgentStatus(paneKey: PaneKey): AgentStatus | undefined {
+  return findAgentStatus(useSnapshot().agentStatus, paneKey);
+}
+
+/**
+ * The notices raised by status changes, and the way to dismiss one.
+ *
+ * Read off the sink rather than the snapshot, for the reason `agentNotifications.ts` gives:
+ * a notification is an event this window reacted to, not state the daemon holds. Shaped
+ * exactly like `useUnexpectedFailures` — including the memoised pair, because pairing them
+ * builds an object and a fresh one every render is a dependency array that never settles.
+ */
+export interface AgentNotifications {
+  readonly notices: readonly AgentNotification[];
+  dismiss(id: string): void;
+}
+
+export function useAgentNotifications(): AgentNotifications {
+  const notices = useSyncExternalStore(
+    agentNotifications.subscribe,
+    agentNotifications.getSnapshot,
+    agentNotifications.getSnapshot,
+  );
+  return useMemo(() => ({ notices, dismiss: agentNotifications.dismiss }), [notices]);
 }
