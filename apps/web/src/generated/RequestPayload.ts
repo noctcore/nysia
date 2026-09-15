@@ -4,6 +4,9 @@ import type { AgentStatusGet } from "./AgentStatusGet";
 import type { AgentStatusList } from "./AgentStatusList";
 import type { AgentStatusSubscribe } from "./AgentStatusSubscribe";
 import type { AgentStatusUnsubscribe } from "./AgentStatusUnsubscribe";
+import type { ProjectForget } from "./ProjectForget";
+import type { ProjectList } from "./ProjectList";
+import type { ProjectRegister } from "./ProjectRegister";
 import type { SessionClose } from "./SessionClose";
 import type { SessionCreate } from "./SessionCreate";
 import type { SessionList } from "./SessionList";
@@ -23,4 +26,4 @@ import type { TerminalWait } from "./TerminalWait";
  * weaker bound costs nothing and keeping the stronger one would have meant re-shaping a
  * payload this crate has no authority over.
  */
-export type RequestPayload = { "type": "session_create" } & SessionCreate | { "type": "session_list" } & SessionList | { "type": "session_close" } & SessionClose | { "type": "terminal_read" } & TerminalRead | { "type": "terminal_send" } & TerminalSend | { "type": "terminal_resize" } & TerminalResize | { "type": "terminal_wait" } & TerminalWait | { "type": "stream_attach" } & StreamAttach | { "type": "stream_detach" } & StreamDetach | { "type": "agent_hook" } & AgentHook | { "type": "agent_status_get" } & AgentStatusGet | { "type": "agent_status_list" } & AgentStatusList | { "type": "agent_status_subscribe" } & AgentStatusSubscribe | { "type": "agent_status_unsubscribe" } & AgentStatusUnsubscribe;
+export type RequestPayload = { "type": "session_create" } & SessionCreate | { "type": "session_list" } & SessionList | { "type": "session_close" } & SessionClose | { "type": "terminal_read" } & TerminalRead | { "type": "terminal_send" } & TerminalSend | { "type": "terminal_resize" } & TerminalResize | { "type": "terminal_wait" } & TerminalWait | { "type": "stream_attach" } & StreamAttach | { "type": "stream_detach" } & StreamDetach | { "type": "agent_hook" } & AgentHook | { "type": "agent_status_get" } & AgentStatusGet | { "type": "agent_status_list" } & AgentStatusList | { "type": "agent_status_subscribe" } & AgentStatusSubscribe | { "type": "agent_status_unsubscribe" } & AgentStatusUnsubscribe | { "type": "project_register" } & ProjectRegister | { "type": "project_list" } & ProjectList | { "type": "project_forget" } & ProjectForget;

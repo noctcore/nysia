@@ -3,6 +3,8 @@ import type { AgentStatus } from "./AgentStatus";
 import type { AgentStatusSubscribed } from "./AgentStatusSubscribed";
 import type { ErrorEnvelope } from "./ErrorEnvelope";
 import type { MutationReceipt } from "./MutationReceipt";
+import type { Project } from "./Project";
+import type { ProjectRegistered } from "./ProjectRegistered";
 import type { RequestId } from "./RequestId";
 import type { SessionCreated } from "./SessionCreated";
 import type { SessionSummary } from "./SessionSummary";
@@ -36,4 +38,8 @@ status: AgentStatus | null, } | { "type": "agent_status_list",
 /**
  * The rows.
  */
-statuses: Array<AgentStatus>, } | { "type": "agent_status_subscribe" } & AgentStatusSubscribed | { "type": "agent_status_unsubscribe" } | { "type": "error" } & ErrorEnvelope);
+statuses: Array<AgentStatus>, } | { "type": "agent_status_subscribe" } & AgentStatusSubscribed | { "type": "agent_status_unsubscribe" } | { "type": "project_register" } & ProjectRegistered | { "type": "project_list", 
+/**
+ * The rows.
+ */
+projects: Array<Project>, } | { "type": "project_forget" } | { "type": "error" } & ErrorEnvelope);

@@ -847,6 +847,18 @@ impl Daemon {
                 self.streams.detach(&caller.client_id, request.stream_id);
                 ResponsePayload::AgentStatusUnsubscribe
             }
+            // Scaffolding, and **v0.3 wave C1 replaces it** with the three real handlers.
+            // The verbs are on the wire from wave A so that the store, the window and this
+            // daemon are built against one definition of them; a daemon that is asked one
+            // before C1 lands still has to answer something, and `unsupported` is the code
+            // for a verb this daemon does not serve. One arm rather than a wildcard, on
+            // purpose: the match stays exhaustive, so the next verb added to the wire fails
+            // the build here rather than being answered silently by a catch-all.
+            RequestPayload::ProjectRegister(_)
+            | RequestPayload::ProjectList(_)
+            | RequestPayload::ProjectForget(_) => {
+                ResponsePayload::Error(nysia_proto::project::unsupported_envelope())
+            }
         }
     }
 

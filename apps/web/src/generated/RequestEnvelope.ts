@@ -4,6 +4,9 @@ import type { AgentStatusGet } from "./AgentStatusGet";
 import type { AgentStatusList } from "./AgentStatusList";
 import type { AgentStatusSubscribe } from "./AgentStatusSubscribe";
 import type { AgentStatusUnsubscribe } from "./AgentStatusUnsubscribe";
+import type { ProjectForget } from "./ProjectForget";
+import type { ProjectList } from "./ProjectList";
+import type { ProjectRegister } from "./ProjectRegister";
 import type { RequestId } from "./RequestId";
 import type { SessionClose } from "./SessionClose";
 import type { SessionCreate } from "./SessionCreate";
@@ -30,4 +33,4 @@ requestId: RequestId,
  * landed, the original answer comes back with `replayed` set and nothing runs twice.
  * Meaningful only when the payload [`is_mutation`](RequestPayload::is_mutation).
  */
-retryRequest: RequestId | null, } & ({ "type": "session_create" } & SessionCreate | { "type": "session_list" } & SessionList | { "type": "session_close" } & SessionClose | { "type": "terminal_read" } & TerminalRead | { "type": "terminal_send" } & TerminalSend | { "type": "terminal_resize" } & TerminalResize | { "type": "terminal_wait" } & TerminalWait | { "type": "stream_attach" } & StreamAttach | { "type": "stream_detach" } & StreamDetach | { "type": "agent_hook" } & AgentHook | { "type": "agent_status_get" } & AgentStatusGet | { "type": "agent_status_list" } & AgentStatusList | { "type": "agent_status_subscribe" } & AgentStatusSubscribe | { "type": "agent_status_unsubscribe" } & AgentStatusUnsubscribe);
+retryRequest: RequestId | null, } & ({ "type": "session_create" } & SessionCreate | { "type": "session_list" } & SessionList | { "type": "session_close" } & SessionClose | { "type": "terminal_read" } & TerminalRead | { "type": "terminal_send" } & TerminalSend | { "type": "terminal_resize" } & TerminalResize | { "type": "terminal_wait" } & TerminalWait | { "type": "stream_attach" } & StreamAttach | { "type": "stream_detach" } & StreamDetach | { "type": "agent_hook" } & AgentHook | { "type": "agent_status_get" } & AgentStatusGet | { "type": "agent_status_list" } & AgentStatusList | { "type": "agent_status_subscribe" } & AgentStatusSubscribe | { "type": "agent_status_unsubscribe" } & AgentStatusUnsubscribe | { "type": "project_register" } & ProjectRegister | { "type": "project_list" } & ProjectList | { "type": "project_forget" } & ProjectForget);
