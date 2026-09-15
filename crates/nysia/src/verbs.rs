@@ -73,7 +73,11 @@ impl VerbError {
     }
 
     /// An argument that was not the shape the wire needs.
-    fn argument(message: impl Into<String>, next_step: impl Into<String>) -> Self {
+    ///
+    /// `pub(crate)` because `nysia hook` builds one too: it is not a verb, and it still owes a
+    /// caller §6.2's next steps. Sharing the constructor is also what keeps the hook free of a
+    /// second, hand-rolled envelope builder — see `crate::hook::refusal`.
+    pub(crate) fn argument(message: impl Into<String>, next_step: impl Into<String>) -> Self {
         Self::Argument {
             message: message.into(),
             next_step: next_step.into(),
@@ -516,14 +520,7 @@ fn print_done(what: &str, json: bool) {
 
 /// Print an error: the envelope on stderr, whichever format was asked for.
 pub fn print_error(error: &VerbError, json: bool) {
-    print_envelope(&error.envelope(), json);
-}
-
-/// Print one error envelope on stderr, in whichever format was asked for.
-///
-/// Public because `nysia hook` is not a verb and still owes a caller the same thing: §6.2's
-/// next steps are about what the *caller* sees, and a caller cannot tell which layer failed.
-pub fn print_envelope(envelope: &ErrorEnvelope, json: bool) {
+    let envelope = error.envelope();
     let mut stderr = std::io::stderr();
     if json {
         match serde_json::to_string(&envelope) {

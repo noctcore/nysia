@@ -56,11 +56,11 @@ use std::time::Duration;
 
 use nysia_core::rpc::{Discovered, Endpoint, PANE_KEY_VAR, SpawnPolicy, discover, spool};
 use nysia_proto::{
-    AgentHook, AgentStatusRow, ClientRole, ErrorCode, ErrorEnvelope, HookEvent, HookEventName,
-    PaneKey, UnixMillis,
+    AgentHook, AgentStatusRow, ClientRole, HookEvent, HookEventName, PaneKey, UnixMillis,
 };
 
 use crate::cli::HookArgs;
+use crate::verbs::VerbError;
 
 /// What Claude reads as "no decision": the hook has nothing to say about this event.
 const EMPTY_DECISION: &str = "{}";
@@ -87,7 +87,7 @@ enum Outcome {
     /// §2.1 maps the event to no state, so there was never a row (`PreCompact` and friends).
     Unmapped(HookEventName),
     /// The hook could not do what it was asked.
-    Refused(ErrorEnvelope),
+    Refused(VerbError),
 }
 
 /// Answer Claude, then get the event to the daemon.
@@ -128,7 +128,7 @@ fn answer_now() {
 /// be far larger than the control line cap — and the wire drops a `tool_input` that is not a
 /// question anyway, so the large payload is read, mapped to `working`, and never sent. A cap
 /// here would refuse exactly the events that are cheapest to serve.
-fn payload() -> Result<String, ErrorEnvelope> {
+fn payload() -> Result<String, VerbError> {
     let mut payload = String::new();
     std::io::stdin()
         .read_to_string(&mut payload)
@@ -155,7 +155,7 @@ fn payload() -> Result<String, ErrorEnvelope> {
 const BYTE_ORDER_MARK: char = '\u{feff}';
 
 /// Read the payload as an event, applying the flag rules this module's docs set out.
-fn event(payload: &str, flag: Option<&str>) -> Result<HookEvent, ErrorEnvelope> {
+fn event(payload: &str, flag: Option<&str>) -> Result<HookEvent, VerbError> {
     let payload = payload.trim_start_matches(BYTE_ORDER_MARK).trim();
     let mut document: serde_json::Value = serde_json::from_str(payload).map_err(|err| {
         // The error, never the payload: it can carry a `waiting` question (trap 13).
@@ -351,8 +351,8 @@ fn report(outcome: &Outcome, json: bool) -> bool {
             tracing::debug!(%event, "§2.1 maps this event to no state; dropping it");
             true
         }
-        Outcome::Refused(envelope) => {
-            crate::verbs::print_envelope(envelope, json);
+        Outcome::Refused(error) => {
+            crate::verbs::print_error(error, json);
             false
         }
     }
@@ -369,26 +369,33 @@ fn now() -> UnixMillis {
     )
 }
 
-/// An envelope for something the hook was asked to do and could not.
-fn refusal(message: impl Into<String>, next_step: &str) -> ErrorEnvelope {
-    let steps = match nysia_proto::NextSteps::new(next_step) {
-        Ok(steps) => steps,
-        // Unreachable: every call site passes a non-blank literal, and blank is the whole of
-        // what the constructor checks.
-        Err(_) => match nysia_proto::NextSteps::new("run `nysia hook --help`") {
-            Ok(steps) => steps,
-            Err(_) => unreachable!("a non-blank first step is all NextSteps::new asks"),
-        },
-    };
-    ErrorEnvelope::new(ErrorCode::InvalidRequest, message, steps)
+/// Something the hook was asked to do and could not.
+///
+/// [`VerbError::argument`] rather than a hand-built [`ErrorEnvelope`], and the reason is a
+/// rule rather than a preference. `NextSteps::new` is fallible — it refuses a blank first
+/// step — and it has no infallible sibling, so a function here that had to return an envelope
+/// whatever happened needed an arm for a case its own literals make impossible. That arm was
+/// an `unreachable!`, which is a panic outside tests and `main`, and the rule has no
+/// exemption for a provably dead one.
+///
+/// Routing through the error type every other verb already uses removes the arm rather than
+/// silencing it, and it means a hook failure and a verb failure reach a caller through the
+/// same function — which is what §6.2 is about anyway.
+fn refusal(message: impl Into<String>, next_step: &'static str) -> VerbError {
+    VerbError::argument(message, next_step)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn read(payload: &str, flag: Option<&str>) -> Result<HookEvent, ErrorEnvelope> {
-        event(payload, flag)
+    /// The event, or the envelope a caller would actually be shown.
+    ///
+    /// The refusals are asserted through `envelope()` rather than through the `VerbError`
+    /// itself, because the envelope is what reaches stderr — and trap 13 is a claim about
+    /// what a person can read, not about which type held it on the way there.
+    fn read(payload: &str, flag: Option<&str>) -> Result<HookEvent, nysia_proto::ErrorEnvelope> {
+        event(payload, flag).map_err(|err| err.envelope())
     }
 
     #[test]

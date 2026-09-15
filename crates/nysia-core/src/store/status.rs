@@ -1393,7 +1393,11 @@ mod tests {
             .record_status(&subagent(pane(), 1_200, "sub-a"))
             .expect("a");
         store
-            .record_status(&waiting(other_pane(), 1_500, json!({ "question": "which?" })))
+            .record_status(&waiting(
+                other_pane(),
+                1_500,
+                json!({ "question": "which?" }),
+            ))
             .expect("second pane");
 
         for listed in store.statuses().expect("list") {
@@ -1416,7 +1420,9 @@ mod tests {
         store
             .record_status(&subagent(pane(), 1_000, "sub-a"))
             .expect("subagent with no lead");
-        store.record_status(&row(other_pane(), 1_500)).expect("lead");
+        store
+            .record_status(&row(other_pane(), 1_500))
+            .expect("lead");
 
         let listed = store.statuses().expect("list");
         assert_eq!(listed.len(), 1, "the leaderless pane is not listed");
