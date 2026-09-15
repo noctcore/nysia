@@ -58,7 +58,9 @@ macro_rules! error_codes {
         #[ts(
             export,
             type = "\"unknown_session\" | \"invalid_request\" | \"unsupported\" | \"path_refused\" \
-                    | \"spawn_failed\" | \"session_busy\" | \"internal\" | (string & {})"
+                    | \"spawn_failed\" | \"session_busy\" | \"unknown_project\" \
+                    | \"not_a_repository\" | \"many_repositories\" | \"path_unreadable\" \
+                    | \"internal\" | (string & {})"
         )]
         pub enum ErrorCode {
             $( $(#[$doc])* $variant, )+
@@ -114,6 +116,14 @@ error_codes! {
     SpawnFailed => "spawn_failed",
     /// The session exists but cannot take this verb right now.
     SessionBusy => "session_busy",
+    /// No project by that id. Usually an id from before someone forgot it.
+    UnknownProject => "unknown_project",
+    /// The folder offered for registration is readable and is not a git repository (§3.2).
+    NotARepository => "not_a_repository",
+    /// The folder offered for registration is not a repository, but folders in it are.
+    ManyRepositories => "many_repositories",
+    /// The path offered for registration does not exist, or could not be read.
+    PathUnreadable => "path_unreadable",
     /// The daemon failed in a way the caller did nothing to cause.
     Internal => "internal",
 }
