@@ -5,6 +5,7 @@ import { useSnapshot } from '../store/hooks';
 import { GLYPH, SETTINGS_SEARCH_HINT } from '../ui/glyphs';
 import { ComingSoon } from '../ui/ComingSoon';
 import { SectionLabel } from '../ui/SectionLabel';
+import { AgentsPane } from './AgentsPane';
 import { AppearancePane } from './AppearancePane';
 import { GeneralPane } from './GeneralPane';
 import {
@@ -23,9 +24,9 @@ import { matches, matchingGroups } from './search';
  * vertical rule down the window does not move when you enter settings — only what is
  * beside it changes.
  *
- * The nav renders the whole tree; only General and Appearance are built. Everything else
- * opens an honest placeholder naming the release it is due in, because a settings entry
- * that silently does nothing is worse than one that says it is not here yet.
+ * The nav renders the whole tree; Agents, General and Appearance are built. Everything
+ * else opens an honest placeholder naming the release it is due in, because a settings
+ * entry that silently does nothing is worse than one that says it is not here yet.
  *
  * The selected entry is local state. Which pane a window is showing is not something the
  * daemon knows, and two windows should be able to sit on different panes.
@@ -126,6 +127,9 @@ function SettingsPane({
   readonly selected: string;
   readonly projects: readonly Project[];
 }) {
+  if (selected === 'agents') {
+    return <AgentsPane />;
+  }
   if (selected === 'general') {
     return <GeneralPane />;
   }

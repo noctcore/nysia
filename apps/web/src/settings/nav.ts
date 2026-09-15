@@ -31,7 +31,7 @@ export interface SettingsEntry {
   readonly label: string;
   /** The small uppercase pill the mock puts beside `AI provider accounts`. */
   readonly tag?: string;
-  /** Which release delivers it. Absent for the two panes v0.1 implements. */
+  /** Which release delivers it. Absent once the pane is built. */
   readonly version?: string;
   readonly detail?: string;
 }
@@ -45,12 +45,9 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
   {
     label: 'AI capabilities',
     entries: [
-      {
-        id: 'agents',
-        label: 'Agents',
-        version: 'v0.2',
-        detail: 'Claude sessions, managed status hooks and the installed-agent list.',
-      },
+      // Built in v0.2, hence no `version`: carrying one on a pane that exists would put a
+      // "coming in v0.2" placeholder in front of the pane it promises.
+      { id: 'agents', label: 'Agents' },
       {
         id: 'accounts',
         label: 'AI provider accounts',
