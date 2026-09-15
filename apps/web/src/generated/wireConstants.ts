@@ -91,6 +91,22 @@ export const CREDIT_WINDOW_DEFAULT = {
 } as const satisfies CreditWindow;
 
 /**
+ * How old a `working` row has to be before it is **stale** (§2.3).
+ *
+ * A status row carries `observedAt` and nothing else about its age, so the comparison
+ * against the clock happens in the window — which means the window needs this number, and a
+ * number a client needs at run time is a number that is generated rather than transcribed.
+ * It was not, for one wave: `apps/web` carried `30 * 60 * 1000` beside a comment naming
+ * `AGENT_STATUS_STALE_AFTER_MS` as its authority, and a comment is not a mechanism.
+ *
+ * Strictly older, and a row from the future is not stale — see `AgentStatusRow::is_stale`,
+ * which is the implementation a client has to agree with. Staleness is **not** a fifth
+ * state: `AgentState` has four and a stale `working` row decays to what the design paints
+ * as *active*, which is a reading of `state` and this number together.
+ */
+export const AGENT_STATUS_STALE_AFTER_MS = 1800000;
+
+/**
  * A `RejectReason` as it may *arrive*, rather than as this build writes it.
  *
  * Rust absorbs an unrecognised `kind` into `RejectReason::Unknown`, so the union ts-rs
