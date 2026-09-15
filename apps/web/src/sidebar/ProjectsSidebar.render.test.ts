@@ -2,6 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
+import { createAgentNotificationSink } from '../store/agentNotifications';
 import { statusChange, statusOf } from '../store/agentStatusFixture';
 import { MockStore } from '../store/mock/MockStore';
 import { createSeedSnapshot } from '../store/mock/seed';
@@ -52,7 +53,12 @@ describe('the sidebar session rows', () => {
   });
 
   it('follows the store when the state changes', () => {
-    const store = new MockStore(createSeedSnapshot());
+    // Its own sink: `receiveAgentStatus` feeds the notices as well as the dots, and this
+    // file never renders a notice — so without it a sidebar case writes into the window's
+    // module-level sink and leaves a notice behind for whatever runs next.
+    const store = new MockStore(createSeedSnapshot(), {
+      notifications: createAgentNotificationSink(),
+    });
     store.receiveAgentStatus(statusChange(statusOf(KIREI_PANE, 'waiting')));
 
     const markup = render(store);

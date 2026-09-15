@@ -3,7 +3,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { AgentState } from '../generated/AgentState';
-import { agentNotifications } from '../store/agentNotifications';
+import {
+  agentNotifications,
+  createAgentNotificationSink,
+} from '../store/agentNotifications';
 import { STATE_LABEL, STATE_TONE, TONE_CLASS } from '../store/agentStatus';
 import {
   PERMITTED,
@@ -124,7 +127,13 @@ describe('the tab strip', () => {
   });
 
   it('follows a change the store received', () => {
-    const store = new MockStore(createSeedSnapshot());
+    // Its own sink, although this case is about dots and not notices. `receiveAgentStatus`
+    // feeds both, so the module-level sink would take a write from a test that never looks
+    // at it — harmless while the block below clears in `beforeEach`, and a shared-global
+    // write that a future reorder turns into a cross-test dependency.
+    const store = new MockStore(createSeedSnapshot(), {
+      notifications: createAgentNotificationSink(),
+    });
     store.receiveAgentStatus(statusChange(statusOf(PANE, 'interrupted')));
 
     const markup = render(createElement(TabStrip), store);
