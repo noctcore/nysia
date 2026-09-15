@@ -35,3 +35,11 @@ pub use profile::{ProfileError, ShellProfile};
 pub use resolve::{ResolveError, ResolvedProgram, resolve};
 pub use session::{DEFAULT_OUTPUT_QUEUE, Output, PtyOutput, PtySession, SessionSpec, SpawnError};
 pub use teardown::DEFAULT_GRACE;
+
+// `crate::git` needs the same Job Object to enforce its timeouts: a `git` killed for
+// overrunning its deadline has to take any helper it started with it, and ConPTY has no
+// signals to do that with (traps register #7). Re-exported rather than duplicated, because
+// two copies of the same unsafe handle-lifetime dance is exactly how trap 7 gets paid for a
+// second time.
+#[cfg(windows)]
+pub(crate) use teardown::JobObject;
