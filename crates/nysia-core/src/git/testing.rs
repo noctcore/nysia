@@ -68,6 +68,11 @@ impl Scratch {
         }
     }
 
+    /// The scratch directory itself.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// An empty folder at `relative`, creating its parents.
     pub(crate) fn folder(&self, relative: &str) -> PathBuf {
         let path = self.root.join(relative);
@@ -105,6 +110,30 @@ impl Scratch {
         let path = self.folder(relative);
         self.run(&path, ["init", "--initial-branch", Self::BRANCH]);
         path
+    }
+
+    /// A bare repository at `relative`.
+    pub(crate) fn bare_repository(&self, relative: &str) -> PathBuf {
+        let path = self.folder(relative);
+        self.run(&path, ["init", "--bare", "--initial-branch", Self::BRANCH]);
+        path
+    }
+
+    /// A git directory at `path`, not attached to any working tree.
+    ///
+    /// What a submodule's `.git` file points at, under the superproject's `.git/modules`.
+    pub(crate) fn init_git_dir(&self, path: &Path) {
+        std::fs::create_dir_all(path).expect("a folder for the git directory");
+        self.run(path, ["init", "--bare", "--initial-branch", Self::BRANCH]);
+    }
+
+    /// Add a linked worktree of `repo` at `path`, on a new branch.
+    pub(crate) fn add_worktree(&self, repo: &Path, path: &Path, branch: &str) {
+        let command = GitCommand::new(["worktree", "add", "-b", branch]).operand_path(path);
+        let at = CanonicalPath::of(repo).expect("the repository is a folder");
+        self.git
+            .run(&command, &at)
+            .unwrap_or_else(|err| panic!("git worktree add failed: {err}"));
     }
 
     /// Run git in `at`, panicking with git's own message if it fails.
