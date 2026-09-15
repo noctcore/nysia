@@ -43,6 +43,27 @@
 //!   `tool_input` to `waiting` on the wire; [`status`] applies the same rule on the way in,
 //!   on the one private path both entry points share, so a row built in process rather than
 //!   received over the socket cannot widen it.
+//!
+//! # Proving the durability rules trip
+//!
+//! Traps register #13 — every gate ships a proof that it trips. Each rule below has a named
+//! test, and each was **run against the mutation beside it** rather than asserted to be
+//! capable of failing. To repeat one: apply the edit, run
+//! `cargo test -p nysia-core store::status::tests::<name>` from the crate directory, revert.
+//!
+//! | Mutate | To | Turns red |
+//! |---|---|---|
+//! | `status::trim`'s cap parameter | `i64::from(AGENT_STATUS_HISTORY_CAP) + 1` | `the_history_stops_at_the_cap` |
+//! | `status::insert`'s timestamp | `row.observed_at.get() / 1000` | `a_row_at_the_staleness_boundary_reads_back_exact` |
+//! | `Store::restore_status`'s provenance | `Provenance::Live` | `a_restored_row_is_unconfirmed_whatever_the_caller_said` |
+//! | `status::insert`'s question filter | dropped | `only_a_waiting_row_keeps_its_question` |
+//!
+//! The tests assert **literal** numbers — twenty rows, `1_800_000` milliseconds — rather
+//! than recomputing them from the constants they are checking. A test that derives its
+//! expectation from the value under test passes whatever that value becomes, which is the
+//! shape of a gate that cannot trip. `the_cap_is_the_plans_twenty` and
+//! `the_staleness_threshold_is_the_plans_thirty_minutes` hold those literals against
+//! `nysia-proto`'s constants in the other direction, so the two cannot drift apart quietly.
 
 mod error;
 mod migrate;
