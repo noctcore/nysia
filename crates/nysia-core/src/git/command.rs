@@ -103,6 +103,8 @@ const USAGE_EXIT_CODE: i32 = 129;
 /// Passed as `-c key=value` ahead of the verb, where they outrank `/etc/gitconfig`, the
 /// user's `~/.gitconfig` **and** the repository's own `.git/config` — which is the one that
 /// matters, because it is the file an agent working in a checkout can write.
+/// `the_neutralisers_stop_programs_the_repository_config_names` proves that precedence by
+/// writing each key into a fixture's own `.git/config` first.
 ///
 /// # Empty is not always "no program"
 ///
@@ -149,6 +151,17 @@ const USAGE_EXIT_CODE: i32 = 129;
 ///
 /// So the claim that every config key naming a program is neutralised by `-c` alone is true
 /// of the keys below and not of diff.
+///
+/// # Which of these are proven by execution
+///
+/// `the_neutralisers_stop_programs_the_repository_config_names` runs `core.hooksPath`,
+/// `core.fsmonitor` and `diff.external` both ways against a fixture whose own `.git/config`
+/// names a program, each with a control that fires first. `core.sshCommand` is measured above
+/// as a transport rather than in a test, because reaching it needs a remote. `core.pager` is
+/// never consulted — `--no-pager` is on every invocation — and `core.askPass` and
+/// `core.gitProxy` are held here as list membership only: unverified rather than known good,
+/// and behind `GIT_TERMINAL_PROMPT=0`, a null stdin and a deadline, so the worst case each
+/// can produce is a bounded failure rather than a hang.
 pub const NEUTRALISED_CONFIG: &[(&str, &str)] = &[
     // Runs a filesystem-monitor hook on almost every command.
     ("core.fsmonitor", ""),
@@ -733,6 +746,8 @@ mod unix_kill {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
     use super::*;
     use crate::git::testing::{Scratch, git_or_skip};
 
@@ -875,6 +890,178 @@ mod tests {
              diff.<driver>.textconv, which -c cannot wildcard, and the mitigation is \
              --no-textconv on wave C's diff verb"
         );
+    }
+
+    #[test]
+    fn the_neutralisers_stop_programs_the_repository_config_names() {
+        // The list's claim, run rather than asserted about — and run against the threat it
+        // exists for. Every key goes into the repository's **own** `.git/config`, which is the
+        // file an agent working in a checkout can write, so what this shows is `-c` outranking
+        // that file rather than merely beating a default.
+        //
+        // Each key gets a control that fires first. Without one, a neutraliser that did
+        // nothing would still pass: a verb that never reaches the program looks exactly like
+        // one that was stopped.
+        //
+        // The PR that added this module claimed the neutralisers could not be proven
+        // behaviourally because nothing here fires a hook. That was wrong — the fixtures run
+        // `git commit` and `git worktree add`, which fire `pre-commit` and `post-checkout`
+        // today — and this is the proof that was available all along.
+        let Some(git) = git_or_skip() else { return };
+        let scratch = Scratch::new("neutralisers");
+        let repo = scratch.repository("project");
+        let at = CanonicalPath::of(&repo).expect("the fixture is a folder");
+        // One program and one marker per key. Sharing them would let a neutraliser that
+        // stopped working be reported against a different key entirely.
+        let (hook_program, hook_fired) = scratch.marker_program("hook");
+        let (fsmonitor_program, fsmonitor_fired) = scratch.marker_program("fsmonitor");
+        let (diff_program, diff_fired) = scratch.marker_program("differ");
+
+        let hooks = scratch.folder("hostile-hooks");
+        let hook = hooks.join("post-checkout");
+        std::fs::copy(&hook_program, &hook)
+            .expect("a hook in a directory of the attacker's choosing");
+        crate::git::testing::make_executable(&hook);
+
+        scratch.poison_config(
+            &repo,
+            &[
+                ("core", "hooksPath", hooks.as_path()),
+                ("core", "fsmonitor", fsmonitor_program.as_path()),
+                ("diff", "external", diff_program.as_path()),
+            ],
+        );
+        // `diff` needs something to diff.
+        std::fs::write(repo.join("a.txt"), "changed\n").expect("a change to diff");
+
+        // `core.hooksPath`, through `git worktree add` — the verb `Scratch::add_worktree`
+        // already runs, so the hook fires on the fixtures exactly as they stand.
+        let loose = scratch.root().join("unguarded-checkout");
+        assert!(
+            without_neutralisers(
+                &git,
+                &at,
+                &[
+                    OsStr::new("worktree"),
+                    OsStr::new("add"),
+                    OsStr::new("-b"),
+                    OsStr::new("loose"),
+                    loose.as_os_str(),
+                ],
+                &hook_fired
+            ),
+            "the control did not fire: plain `git worktree add` must run the relocated \
+             post-checkout hook, or the next assertion proves nothing"
+        );
+        assert!(
+            !with_neutralisers(
+                &git,
+                &at,
+                &GitCommand::new(["worktree", "add", "-b", "guarded"])
+                    .operand_path(&scratch.root().join("guarded-checkout")),
+                &hook_fired
+            ),
+            "core.hooksPath did not stop a hook the repository's own config relocated"
+        );
+
+        // `core.fsmonitor`, which git consults on almost every command that reads the index.
+        assert!(
+            without_neutralisers(
+                &git,
+                &at,
+                &[OsStr::new("status"), OsStr::new("--porcelain")],
+                &fsmonitor_fired
+            ),
+            "the control did not fire: plain `git status` must run the fsmonitor program"
+        );
+        assert!(
+            !with_neutralisers(
+                &git,
+                &at,
+                &GitCommand::new(["status", "--porcelain"]),
+                &fsmonitor_fired
+            ),
+            "core.fsmonitor did not stop a program the repository's own config named"
+        );
+
+        // `diff.external`, which replaces diff wholesale, and is the one key the `-c` does
+        // not finish on its own.
+        assert!(
+            without_neutralisers(&git, &at, &[OsStr::new("diff")], &diff_fired),
+            "the control did not fire: plain `git diff` must run the external differ"
+        );
+        // How wave C's diff verb has to spell it. `--no-ext-diff` stops git consulting the
+        // key at all, so the empty value is never spawned and a real diff comes back.
+        assert!(
+            !with_neutralisers(
+                &git,
+                &at,
+                &GitCommand::new(["diff", "--no-ext-diff"]),
+                &diff_fired
+            ),
+            "diff.external did not stop a program the repository's own config named"
+        );
+        // And when that flag is forgotten, the failure is the safe one. This is the assertion
+        // that says why the entry stays in the list despite not being sufficient: without it,
+        // a forgotten flag runs the attacker's program instead of refusing to diff.
+        std::fs::remove_file(&diff_fired).ok();
+        let forgotten = git
+            .run(&GitCommand::new(["diff"]), &at)
+            .expect_err("an empty diff.external cannot be spawned, so git must stop");
+        assert!(
+            matches!(forgotten, GitError::Failed { .. }),
+            "a diff verb that forgot --no-ext-diff must fail rather than succeed: {forgotten:?}"
+        );
+        assert!(
+            !diff_fired.exists(),
+            "git ran the program the repository's config named instead of the empty one"
+        );
+    }
+
+    /// Run git in `at` the way plain git would, with none of the chokepoint's `-c` settings,
+    /// and say whether the marker program ran.
+    ///
+    /// This is the control arm. Its exit status is deliberately ignored: what it has to show
+    /// is that the verb reaches the program at all, and a `status` whose fsmonitor returned
+    /// nonsense has still run it.
+    fn without_neutralisers(
+        git: &Git,
+        at: &CanonicalPath,
+        args: &[&OsStr],
+        marker: &std::path::Path,
+    ) -> bool {
+        std::fs::remove_file(marker).ok();
+        let argv = git
+            .program
+            .argv(args.iter().copied())
+            .expect("the fixture arguments are safe for any resolved program");
+        let (program, rest) = argv.split_first().expect("argv holds the program");
+        Command::new(program)
+            .args(rest)
+            .current_dir(at.as_path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git ran");
+        marker.exists()
+    }
+
+    /// Run the same verb through the chokepoint and say whether the marker program ran.
+    ///
+    /// The run must succeed. A guarded run that failed for an unrelated reason would leave the
+    /// marker untouched too, and would read as a neutraliser working.
+    fn with_neutralisers(
+        git: &Git,
+        at: &CanonicalPath,
+        command: &GitCommand,
+        marker: &std::path::Path,
+    ) -> bool {
+        std::fs::remove_file(marker).ok();
+        git.run(command, at).unwrap_or_else(|err| {
+            panic!("the guarded run must succeed, or its silence means nothing: {err}")
+        });
+        marker.exists()
     }
 
     #[test]

@@ -51,15 +51,10 @@ impl Scratch {
 
     /// A new scratch directory, named for the test using it.
     ///
-    /// The pid and thread id are in the name because `cargo test` runs tests in parallel
-    /// threads of one process: a shared name is a fixture two tests delete from under each
-    /// other, which passes alone and fails in a suite.
+    /// See [`unique_name`] for why the name is built rather than taken from the thread id
+    /// directly: one half of that is parallelism, and the other half cost an afternoon.
     pub(crate) fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "nysia-git-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = std::env::temp_dir().join(unique_name(tag));
         remove_tree(&root);
         std::fs::create_dir_all(&root).expect("a scratch directory");
         Self {
@@ -127,6 +122,50 @@ impl Scratch {
         self.run(path, ["init", "--bare", "--initial-branch", Self::BRANCH]);
     }
 
+    /// A program that touches a marker when it runs, and prints nothing.
+    ///
+    /// Returns the program and the marker it will touch. **Each caller gets its own pair**,
+    /// which is not tidiness: three programs sharing one marker makes a failing neutraliser
+    /// indistinguishable from a passing one, because whichever program still runs touches the
+    /// file every assertion is reading. Removing `core.fsmonitor` from the list and watching
+    /// the `core.hooksPath` assertion fail is how that was found.
+    ///
+    /// A `/bin/sh` script on both platforms. Git for Windows runs hooks and config-named
+    /// programs through its own bundled `sh`, so one spelling covers both CI legs — which is
+    /// also why the marker path is written with forward slashes and quoted, since a backslash
+    /// is an escape inside a shell script and a runner's temp directory is not this fixture's
+    /// to promise free of spaces.
+    pub(crate) fn marker_program(&self, name: &str) -> (PathBuf, PathBuf) {
+        let program = self.root.join(format!("{name}.sh"));
+        let marker = self.root.join(format!("{name}.fired"));
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ntouch \"{}\"\n", forward_slashes(&marker)),
+        )
+        .expect("write the marker program");
+        make_executable(&program);
+        (program, marker)
+    }
+
+    /// Write settings into a repository's **own** `.git/config`.
+    ///
+    /// Appended to the file rather than set through `git config`, because that is the shape of
+    /// the threat the neutralisers exist for: an agent working in a checkout can write this
+    /// file, and `-c` is what has to outrank it. Repeating a section header is legal in a git
+    /// config, so one entry per setting needs no grouping.
+    ///
+    /// Values are written with forward slashes. A backslash is an escape character in a git
+    /// config value, so `C:\Users` would be read as an invalid escape rather than a path.
+    pub(crate) fn poison_config(&self, repo: &Path, settings: &[(&str, &str, &Path)]) {
+        let config = repo.join(".git").join("config");
+        let mut text = std::fs::read_to_string(&config).expect("the fixture has a .git/config");
+        for (section, key, value) in settings {
+            let value = forward_slashes(value);
+            text.push_str(&format!("\n[{section}]\n\t{key} = {value}\n"));
+        }
+        std::fs::write(&config, text).expect("write .git/config");
+    }
+
     /// Add a linked worktree of `repo` at `path`, on a new branch.
     pub(crate) fn add_worktree(&self, repo: &Path, path: &Path, branch: &str) {
         let command = GitCommand::new(["worktree", "add", "-b", branch]).operand_path(path);
@@ -153,6 +192,51 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         remove_tree(&self.root);
+    }
+}
+
+/// A directory name unique to this test, and safe for a path a shell will read.
+///
+/// Two separate requirements, and the second is not obvious.
+///
+/// **Unique**, because `cargo test` runs tests in parallel threads of one process: a shared
+/// name is a fixture two tests delete from under each other, which passes alone and fails in a
+/// suite. The pid and the thread id together give that.
+///
+/// **Free of shell metacharacters**, because this crate's whole subject is spawning programs.
+/// The obvious spelling of a thread id is `format!("{:?}")`, which produces `ThreadId(191)` —
+/// and git runs a program named by `core.fsmonitor` or `diff.external` *through a shell*, so
+/// a fixture living under a directory with parentheses in it silently fails to launch
+/// anything. That is exactly how `the_neutralisers_stop_programs_the_repository_config_names`
+/// first failed: its control did not fire, and the neutraliser it was testing was fine. Only
+/// the digits are kept.
+pub(crate) fn unique_name(tag: &str) -> String {
+    let thread = format!("{:?}", std::thread::current().id());
+    let digits: String = thread.chars().filter(|c| c.is_ascii_digit()).collect();
+    format!("nysia-git-{tag}-{}-t{digits}", std::process::id())
+}
+
+/// A path spelled the way a shell script and a git config value both read it.
+pub(crate) fn forward_slashes(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
+/// Give a file an execute bit where the platform has one.
+///
+/// Windows decides by extension and by what `sh` is willing to run, so there is nothing to
+/// set; macOS will not run a hook without it, and git reports that as the hook simply not
+/// existing.
+pub(crate) fn make_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("mark the fixture program executable");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }
 

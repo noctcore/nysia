@@ -80,6 +80,7 @@ const RESERVED_NAMES: &[&str] = &[
 /// Construct with [`CanonicalPath::of`]. There is no way to make one from a path that does
 /// not exist, is not a directory, or could not be read, which is what lets every caller
 /// downstream treat it as a working directory without re-checking.
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CanonicalPath(PathBuf);
 
@@ -230,15 +231,11 @@ fn is_plainly_spellable(path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    /// A uniquely named temporary directory. Tests run in parallel threads, so a shared
-    /// name is a test that passes alone and fails in a suite.
+    /// A uniquely named temporary directory, shell-safe. See
+    /// [`crate::git::testing::unique_name`] for both halves of why.
     fn temp_dir(tag: &str) -> PathBuf {
-        let unique = format!(
-            "nysia-git-path-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        );
-        let dir = std::env::temp_dir().join(unique);
+        let dir =
+            std::env::temp_dir().join(crate::git::testing::unique_name(&format!("path-{tag}")));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir
