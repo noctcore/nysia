@@ -390,10 +390,20 @@ async function waitForReady(store: Store): Promise<void> {
  * assertion touches. That is the timing coupling this suite spent a round removing, so it
  * does not come back for a partial gain.
  *
- * What is left uncovered: a value replaced by a wrong value of the same shape, and any
- * change to `usage` at all. Both are W5's to hold, and it has been told so.
+ * `agentStatus` joins them for the same reason and a sharper one. Status arrives from the
+ * daemon on its own schedule — a hook fires while a `selectTab` is in flight and the pane
+ * list legitimately moves under it — so requiring it to be frozen across an unrelated
+ * command would fail a correct provider on a dot that ticked. It is the one field here a
+ * *command* is never supposed to touch, which is exactly why holding it still is the
+ * transport's business rather than the contract's.
+ *
+ * What is left uncovered: a value replaced by a wrong value of the same shape, any change
+ * to `usage` at all, and a command that silently rewrites `agentStatus`. All three are
+ * W5's to hold, and it has been told so — `agentStatus.test.ts` is where the fold is held
+ * to replacing one pane and leaving the rest alone.
  */
-export interface Observable extends Omit<StoreSnapshot, 'errors' | 'status' | 'daemon' | 'usage'> {
+export interface Observable
+  extends Omit<StoreSnapshot, 'errors' | 'status' | 'daemon' | 'usage' | 'agentStatus'> {
   readonly daemonKeys: readonly string[];
 }
 

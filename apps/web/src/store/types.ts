@@ -1,3 +1,4 @@
+import type { AgentStatus } from '../generated/AgentStatus';
 import type { PaneKey } from '../generated/PaneKey';
 import type { SessionHandle } from '../generated/SessionHandle';
 import type { SessionKind } from '../generated/SessionKind';
@@ -44,13 +45,18 @@ export type LauncherId = string;
 export type NavSection = 'session' | 'tasks' | 'history';
 
 /**
- * Agent lifecycle, as the status palette will paint it (design-spec.md §1).
+ * Whether the **process** in a pane is alive, which is not agent lifecycle.
  *
- * Carried from v0.1 even though nothing paints it yet: the sidebar's session dot is the
- * accent, because there it only has to say "an agent lives here". The lifecycle colours
- * belong to the Tasks table (v0.3), where a row has to be triaged at a glance among
- * dozens. Modelling the state now means the daemon-backed provider has somewhere to put
- * it without the interface changing shape.
+ * v0.1 guessed that this would become the sidebar's dot. It did not. `DaemonStore` derives
+ * it from `SessionSummary.exitStatus` — "has this pane's child exited" — and that question
+ * is answered for shells too, where there is no agent and no lifecycle at all. Agent
+ * lifecycle arrived in v0.2 on the wire instead, as `AgentState`, and the plan's §2 is
+ * explicit that nobody defines a second one.
+ *
+ * So **nothing paints from this**. The dots come from `StoreSnapshot.agentStatus` through
+ * `./agentStatus`, and this stays only because it is the daemon's honest answer about a
+ * process. If a surface ever wants "did this shell exit non-zero", it is already here; if
+ * one wants "what is the agent doing", this is the wrong field.
  */
 export type SessionStatus = 'idle' | 'running' | 'needsInput' | 'queued' | 'failed';
 
@@ -162,6 +168,20 @@ export interface StoreSnapshot {
   readonly launchers: readonly LauncherGroup[];
   readonly daemon: DaemonMetrics;
   readonly usage: readonly UsageWindow[];
+  /**
+   * What each agent pane is doing, as the daemon last reported it.
+   *
+   * The wire type, unaltered: `AgentStatus` per pane, lead row plus subagent roster. D-13
+   * makes Rust the sole authority on that shape, so this carries it rather than a
+   * client-side rewrite of it — `./agentStatus` holds the *reading* of it, which is a
+   * different job and a local one.
+   *
+   * A list, matching `AgentStatusList`'s `statuses: Array<AgentStatus>`, and empty until a
+   * provider has something to put in it. Empty is a real answer: the daemon's status RPC
+   * lands in v0.2 wave C, so the daemon-backed provider reports nothing here until then,
+   * and a pane with no row is painted as *unknown* rather than as idle.
+   */
+  readonly agentStatus: readonly AgentStatus[];
 }
 
 /**
@@ -184,6 +204,7 @@ export function emptySnapshot(status: StoreStatus = 'connecting'): StoreSnapshot
     launchers: [],
     daemon: { memoryBytes: 0, terminalCount: 0, worktreeCount: 0 },
     usage: [],
+    agentStatus: [],
   };
 }
 
