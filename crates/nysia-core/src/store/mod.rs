@@ -14,10 +14,12 @@
 //! | Module | What it owns |
 //! |---|---|
 //! | [`migrate`] | the versioned schema, applied forward once, in a transaction |
+//! | [`status`] | the §2.2 agent-status row, its history cap and its rehydration |
 //! | [`error`] | one error type, every variant carrying the path it failed on |
 //!
-//! The §2.2 status table is the next commit; scrollback, worktrees and orchestration are
-//! later waves and later migrations.
+//! Scrollback, worktrees and orchestration are later waves and later migrations. Nothing
+//! here reads or writes the disk spool: that is `nysia hook`'s and the daemon's (W4). The
+//! store persists what the drain hands it, through [`Store::restore_status`].
 //!
 //! # It is synchronous, and that is deliberate
 //!
@@ -29,20 +31,28 @@
 //!
 //! # Trap 14: the database file is owner-only
 //!
-//! A `waiting` row will carry a tool's input verbatim, and a tool's input can be a secret the
+//! A `waiting` row carries a tool's input verbatim, and a tool's input can be a secret the
 //! same way scrollback can. (The architecture doc's register numbers this 14; `CLAUDE.md`
-//! §5 numbers the same trap 13.) So the file is created `0600` **before SQLite opens it**,
-//! and the `-wal` and `-shm` sidecars — which SQLite creates with the mode of the main
-//! database — are owner-only with it. Creating it afterwards would leave the WAL, which
-//! holds the most recent rows, wider than the database it belongs to.
+//! §5 numbers the same trap 13.) Two things follow, and both are load-bearing:
+//!
+//! - The file is created `0600` **before SQLite opens it**, so the `-wal` and `-shm`
+//!   sidecars — which SQLite creates with the mode of the main database — are owner-only
+//!   too. Creating it afterwards would leave the WAL, which holds the most recent rows,
+//!   wider than the database it belongs to.
+//! - `question` reaches the disk **only on a `waiting` row**. `nysia-proto` already confines
+//!   `tool_input` to `waiting` on the wire; [`status`] applies the same rule on the way in,
+//!   on the one private path both entry points share, so a row built in process rather than
+//!   received over the socket cannot widen it.
 
 mod error;
 mod migrate;
+mod status;
 
 #[cfg(test)]
 mod tests_support;
 
 pub use error::StoreError;
+pub use status::Restored;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -73,7 +83,8 @@ const WAL_RETRY_INTERVAL: Duration = Duration::from_millis(20);
 /// One connection behind a mutex. `rusqlite::Connection` is `Send` and not `Sync`, and the
 /// alternative — a pool — would buy parallel writers that SQLite serialises anyway. Readers
 /// that genuinely need to run alongside a write open their **own** [`Store`] on the same
-/// path, which is what WAL is for.
+/// path, which is what WAL is for and what `two_writers_racing_the_cap_leave_exactly_the_cap`
+/// exercises.
 #[derive(Debug)]
 pub struct Store {
     path: PathBuf,
@@ -325,7 +336,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::tests_support::temp_db;
+    use crate::store::tests_support::{self, temp_db};
 
     #[test]
     fn a_new_store_is_in_wal_at_the_current_schema() {
@@ -344,6 +355,28 @@ mod tests {
         assert_eq!(mode, "wal");
         drop(conn);
         drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_an_existing_store_keeps_its_rows() {
+        let (dir, path) = temp_db("open-again");
+        let first = Store::open(&path).expect("open");
+        first
+            .record_status(&tests_support::row(tests_support::pane(), 1_000))
+            .expect("record");
+        drop(first);
+
+        let second = Store::open(&path).expect("reopen");
+        assert_eq!(
+            second
+                .status_history(&tests_support::pane(), None)
+                .expect("history")
+                .len(),
+            1,
+            "reopening must not truncate the database"
+        );
+        drop(second);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -382,9 +415,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let (dir, path) = temp_db("open-modes");
-        // Opening already migrated, which is a write, so the `-wal` and `-shm` exist to be
-        // checked. They live beside the database for as long as a connection is open.
         let store = Store::open(&path).expect("open");
+        // A write, so the `-wal` and `-shm` exist to be checked. They live beside the
+        // database for as long as a connection is open.
+        store
+            .record_status(&tests_support::row(tests_support::pane(), 1_000))
+            .expect("record");
 
         for suffix in ["", "-wal", "-shm"] {
             let mut sidecar = path.clone().into_os_string();
