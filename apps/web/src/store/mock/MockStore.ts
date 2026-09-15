@@ -134,11 +134,18 @@ export class MockStore implements Store {
    * never inspects `notify`.
    */
   receiveAgentStatus = (change: AgentStatusChange): void => {
+    // Resolved here, and now, because a `PaneKey` outlives the session in it: a notice that
+    // looked its own title up later could be relabelled with whatever reused the key. The
+    // pane key is the fallback for a pane no tab is showing — an honest name rather than an
+    // invented one.
+    const pane = change.status.lead.pane;
+    const session = this.#snapshot.tabs.find((tab) => tab.paneKey === pane)?.title ?? pane;
+
     this.#update((current) => ({
       ...current,
       agentStatus: applyAgentStatus(current.agentStatus, change),
     }));
-    this.#notifications.report(change);
+    this.#notifications.report(change, session);
   };
 
   dismissError = async (id: string): Promise<void> => {
