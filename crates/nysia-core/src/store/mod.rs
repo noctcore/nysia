@@ -54,8 +54,9 @@
 //! test, and each was **run against the mutation beside it** rather than asserted to be
 //! capable of failing. To repeat one: apply the edit, run
 //! `cargo test -p nysia-core <module>::tests::<name>` from the crate directory, revert. The
-//! module is the one the test's row names — `store::status` for the four status rules,
-//! `store` for the open.
+//! module is `store::status::tests` for the rows naming `status::`, and `store::tests` for the
+//! rest — including the `migrate::apply` row, whose test lives with the other `Store::open`
+//! tests rather than beside the code it mutates.
 //!
 //! | Mutate | To | Turns red |
 //! |---|---|---|
@@ -133,6 +134,8 @@ impl Store {
     /// # Errors
     ///
     /// - [`StoreError::Io`] if the directory or the file cannot be created.
+    /// - [`StoreError::Symlink`] if `path` is a symbolic link, which is refused rather than
+    ///   followed.
     /// - [`StoreError::NotWal`] if the filesystem will not give SQLite a WAL.
     /// - [`StoreError::SchemaAhead`] if a newer build of Nysia wrote this database.
     /// - [`StoreError::Migration`] if a migration fails; it is rolled back.
@@ -513,9 +516,9 @@ mod tests {
     }
 
     /// Trap 14 again: the path itself, not its mode. `cfg(unix)` because creating a symbolic
-    /// link on Windows needs a privilege the CI runner does not have, so a cross-platform
-    /// version of this would be a test that silently does nothing on one leg. The code it
-    /// checks is not `cfg`-gated.
+    /// link on Windows needs a privilege this machine does not grant and the Windows leg
+    /// cannot be relied on to, so a cross-platform version would be a test that silently does
+    /// nothing wherever it is missing. The code it checks is not `cfg`-gated.
     #[cfg(unix)]
     #[test]
     fn a_symlinked_database_path_is_refused() {
