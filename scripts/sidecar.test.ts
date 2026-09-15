@@ -42,15 +42,30 @@ describe('profileFor', () => {
     expect(profileFor(['-v', '--', '--release']).directory).toBe('release');
   });
 
-  it('maps a named cargo profile to its directory, including the dev quirk', () => {
-    // `tauri dev` has no `--profile`, but it hands runner arguments to `cargo run`, so this
-    // does move the output. `dev` is the one profile whose directory is not its name.
-    expect(profileFor(['--', '--profile', 'bench'])).toEqual({
-      directory: 'bench',
-      cargoFlags: ['--profile', 'bench'],
+  // Every built-in, because half of them are not named after their own directory and an
+  // earlier revision of this test pinned the pretty version instead of the measured one —
+  // `bench` to `target/bench`, which cargo never writes. A wrong directory here is not a
+  // cosmetic error: `ensure` would check a path that never appears, rebuild on every run, and
+  // so degrade back into the unconditional build the absent-only rule exists to avoid.
+  //
+  // The table is from cargo 1.97.1, one `--profile` per build against a throwaway crate.
+  it.each([
+    ['dev', 'debug'],
+    ['test', 'debug'],
+    ['release', 'release'],
+    ['bench', 'release'],
+  ])('maps the built-in %s profile to target/%s', (profile, directory) => {
+    expect(profileFor(['--profile', profile])).toEqual({
+      directory,
+      cargoFlags: ['--profile', profile],
     });
-    expect(profileFor(['--profile', 'dev']).directory).toBe('debug');
-    expect(profileFor(['--profile', 'release']).directory).toBe('release');
+  });
+
+  it('gives a profile cargo does not know a directory of its own name', () => {
+    // What a manifest-declared profile gets. This workspace declares none, so nothing here
+    // can reach it today — it is the fallback that makes the table above the exception list
+    // rather than the whole world.
+    expect(profileFor(['--', '--profile', 'bespoke']).directory).toBe('bespoke');
   });
 
   it('falls back to debug for an argument that selects no profile', () => {
