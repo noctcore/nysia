@@ -8,6 +8,7 @@ import { callSites, importedValues, reExports } from './moduleReferences.ts';
 import { findRepoRoot } from './repoRoot.ts';
 import {
   blankRustComments,
+  noClaudeSpecificsOutsideAgent,
   noUnmutedRenderer,
   runCargoRules,
   runSourceRules,
@@ -333,6 +334,130 @@ describe('what a module binds from another', () => {
     ]);
   });
 
+});
+
+describe('Claude specifics leaving the module they are allowed to live in', () => {
+  const AGENT = 'crates/nysia-core/src/agent';
+
+  /** Run rule (f) over one synthetic file, written at `file`. */
+  const check = (file: string, source: string) => {
+    const scratch = mkdtempSync(join(tmpdir(), 'lint-meta-agent-'));
+    try {
+      mkdirSync(join(scratch, file.slice(0, file.lastIndexOf('/'))), { recursive: true });
+      writeFileSync(join(scratch, file), source, 'utf8');
+      return noClaudeSpecificsOutsideAgent(scratch, [file]);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  };
+
+  const outside = 'crates/nysia/src/verbs.rs';
+
+  it('reports every spelling of the import from outside the module', () => {
+    // Each of these names `crate::agent::claude`, and only the first two write those two
+    // segments next to each other. The grouped forms are why the use-tree is expanded rather
+    // than matched — the same shape rule (a) met in `use {tauri, serde};`.
+    for (const spelling of [
+      'use crate::agent::claude::PROGRAM;',
+      'use crate::agent::claude as c;',
+      'use crate::agent::{claude, hooks};',
+      'use crate::agent::{claude::{a, b}, launch};',
+      'use ::nysia_core::agent::claude::EVENTS;',
+      'use nysia_core :: agent :: claude :: EVENTS;',
+      'fn f() { crate::agent::claude::PROGRAM; }',
+    ]) {
+      expect(check(outside, spelling), spelling).toHaveLength(1);
+    }
+  });
+
+  it('reports a multi-line grouped import at the line the statement starts on', () => {
+    const source = [
+      'use crate::agent::{',
+      '    claude::{install, uninstall},',
+      '    launch,',
+      '};',
+    ].join('\n');
+    const violations = check(outside, source);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]?.line).toBe(1);
+  });
+
+  it('says nothing about a claude module belonging to somebody else', () => {
+    // The rule is the `agent::claude` pair, not the segment on its own. lint-meta has no
+    // suppression mechanism, so a file reported here would have no way out.
+    for (const innocent of [
+      'use crate::vendor::claude::Whatever;',
+      'use crate::agent::{launch, hooks};',
+      'use crate::my_agent::claude::Thing;',
+      '/// A doc comment naming crate::agent::claude::PROGRAM.',
+      'const S: &str = "crate::agent::claude::PROGRAM";',
+    ]) {
+      expect(check(outside, innocent), innocent).toEqual([]);
+    }
+  });
+
+  it('lets the agent module name it, on a use and on a path', () => {
+    for (const allowed of [
+      'use claude::hooks::EVENTS;',
+      'use crate::agent::claude::launch;',
+      'mod claude;',
+      'fn f() { crate::agent::claude::PROGRAM; }',
+    ]) {
+      expect(check(`${AGENT}/launch.rs`, allowed), allowed).toEqual([]);
+    }
+  });
+
+  it('reports a re-export that launders a Claude item into the neutral namespace', () => {
+    // The half the compiler permits, and the one that matters most: callers then write
+    // `agent::ClaudeLaunch` and the word `claude` is gone from the path, so a rule matching
+    // on it stops seeing the thing it is guarding.
+    for (const laundering of [
+      'pub use claude::ClaudeLaunch;',
+      'pub use self::claude::hooks::EVENTS as HOOK_EVENTS;',
+      'pub(crate) use crate::agent::claude::PROGRAM;',
+    ]) {
+      const violations = check(`${AGENT}/mod.rs`, laundering);
+      expect(violations, laundering).toHaveLength(1);
+      expect(violations[0]?.message).toContain('out of the Claude module');
+    }
+    // A grouped re-export reports once per laundered path, because each names a different
+    // item and a reader fixing one needs to see the other.
+    expect(
+      check(`${AGENT}/mod.rs`, 'pub use claude::{hooks::install, launch::PROGRAM};'),
+    ).toHaveLength(2);
+  });
+
+  it('says nothing about a re-export that passes through nothing Claude', () => {
+    expect(check(`${AGENT}/mod.rs`, 'pub use launch::{AgentLaunch, LaunchError};')).toEqual([]);
+  });
+
+  it('reports any visibility on the module declaration, and only on that name', () => {
+    // Rust privacy is the load-bearing half of this boundary. `pub(crate)` takes it away as
+    // completely as `pub` does.
+    for (const published of ['pub mod claude;', 'pub(crate) mod claude;', 'pub(super) mod claude;']) {
+      const violations = check(`${AGENT}/mod.rs`, published);
+      expect(violations, published).toHaveLength(1);
+      expect(violations[0]?.message).toContain('publishes `mod claude`');
+    }
+    expect(check(`${AGENT}/mod.rs`, 'mod claude;')).toEqual([]);
+    // A module whose name merely begins the same way is a different module.
+    expect(check(`${AGENT}/mod.rs`, 'pub mod claude_helpers;')).toEqual([]);
+  });
+
+  it('exempts the Claude module itself from all three checks', () => {
+    const inside = `${AGENT}/claude/mod.rs`;
+    for (const anything of [
+      'pub mod claude;',
+      'pub use claude::hooks::EVENTS;',
+      'use crate::agent::claude::launch::PROGRAM;',
+    ]) {
+      expect(check(inside, anything), anything).toEqual([]);
+    }
+  });
+
+  it('pass against the real repository', () => {
+    expect(noClaudeSpecificsOutsideAgent(repoRoot, walk(repoRoot))).toEqual([]);
+  });
 });
 
 describe('the cargo dependency rules', () => {

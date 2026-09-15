@@ -4,6 +4,8 @@ import { join, posix, relative, sep } from 'node:path';
 import { Minimatch } from 'minimatch';
 
 import {
+  AGENT,
+  AGENT_CLAUDE,
   BUNDLED_EXTENSIONS,
   STORE_CONTEXT_ALLOWED,
   TAURI_ALLOWED,
@@ -737,6 +739,256 @@ export function noUnmutedRenderer(root: string, files: readonly string[]): Viola
   return violations;
 }
 
+/** The module segment that holds Claude's specifics. */
+const CLAUDE_SEGMENT = 'claude';
+
+/** The module segment that is allowed to name it. */
+const AGENT_SEGMENT = 'agent';
+
+/** Rule (f)'s name, written once because the proof asserts on it. */
+const CLAUDE_RULE = 'no-claude-specifics-outside-agent';
+
+/**
+ * A fully-qualified `agent::claude` path used without a `use` statement.
+ *
+ * The lookbehind excludes an identifier character and **not** a colon, which is the
+ * difference between this and the tauri patterns above. `tauri` has to be a crate root, so
+ * one preceded by `::` is somebody else's module; `agent::claude` is always in the middle of
+ * a path — `crate::agent::claude`, `nysia_core::agent::claude` — so excluding a preceding
+ * colon here matched nothing at all. The fixture caught that; nothing else would have,
+ * because the use-tree half was reporting the same files for its own reasons.
+ */
+const RUST_AGENT_CLAUDE_PATH = new RegExp(
+  `(?<![A-Za-z0-9_])${AGENT_SEGMENT}\\s*::\\s*${CLAUDE_SEGMENT}(?![A-Za-z0-9_])`,
+  'g',
+);
+
+/** `pub mod claude;` in any visibility spelling — `pub`, `pub(crate)`, `pub(super)`. */
+const RUST_PUBLISHED_CLAUDE_MOD = new RegExp(
+  `(?<![\\w:])pub(?:\\s*\\([^)]*\\))?\\s+mod\\s+${CLAUDE_SEGMENT}(?![\\w])`,
+  'g',
+);
+
+/** One path a `use` statement actually names, after its tree has been expanded. */
+interface UsePath {
+  /** 1-indexed line of the statement it came from. */
+  readonly line: number;
+  /** The full path, whitespace stripped and any `as` alias dropped. */
+  readonly path: string;
+  /** Whether the statement hands it on — `pub use`, in any visibility spelling. */
+  readonly reExport: boolean;
+}
+
+/** The index of the brace closing the one at `open`. */
+function matchingBrace(text: string, open: number): number {
+  let depth = 0;
+  for (let at = open; at < text.length; at += 1) {
+    if (text[at] === '{') depth += 1;
+    else if (text[at] === '}') {
+      depth -= 1;
+      if (depth === 0) return at;
+    }
+  }
+  return -1;
+}
+
+/** Split on the commas that are not inside a nested group. */
+function splitTopLevel(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let at = 0; at < text.length; at += 1) {
+    if (text[at] === '{') depth += 1;
+    else if (text[at] === '}') depth -= 1;
+    else if (text[at] === ',' && depth === 0) {
+      parts.push(text.slice(start, at));
+      start = at + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+/**
+ * Expand a use-tree into every path it names.
+ *
+ * `crate::agent::{claude::{a, b}, other}` is three paths, and only two of them are about
+ * Claude. A rule that matched the statement text instead would report the third, and one
+ * that looked for the literal `agent::claude` would report none of them — the grouped form
+ * never spells those two segments next to each other. Rule (a) learned the same thing about
+ * `use {tauri, serde};`, which is the shape a line-anchored regex walks straight past.
+ */
+function expandUseTree(tree: string): string[] {
+  const text = tree.trim();
+  if (text === '') return [];
+
+  const open = text.indexOf('{');
+  if (open === -1) {
+    // A leaf. The alias is dropped: `use crate::agent::claude as c` still names the module,
+    // and matching on the local name would miss it.
+    return [text.replace(/\s+as\s+[A-Za-z_][A-Za-z0-9_]*$/, '').replace(/\s+/g, '')];
+  }
+
+  const close = matchingBrace(text, open);
+  // Unbalanced braces mean the statement was not what this parser thought it was. Keep the
+  // raw text so the caller still sees whatever it names rather than silently nothing.
+  if (close === -1) return [text.replace(/\s+/g, '')];
+
+  const prefix = text.slice(0, open).replace(/\s+/g, '').replace(/::$/, '');
+  return splitTopLevel(text.slice(open + 1, close)).flatMap((part) =>
+    expandUseTree(part).map((expanded) => (prefix === '' ? expanded : `${prefix}::${expanded}`)),
+  );
+}
+
+/** Every path every `use` statement in `code` names. `code` must already be blanked. */
+function rustUsePaths(code: string): UsePath[] {
+  const found: UsePath[] = [];
+  for (const match of code.matchAll(RUST_USE_STATEMENT)) {
+    if (match.index === undefined) continue;
+    const statement = match[0];
+    const line = lineAt(code, match.index);
+    const reExport = /^\s*pub(?:\s*\([^)]*\))?\s+use\b/.test(statement);
+    const body = statement
+      .replace(/^\s*(?:pub(?:\s*\([^)]*\))?\s+)?use\s/, '')
+      .replace(/;\s*$/, '');
+    for (const path of expandUseTree(body)) found.push({ line, path, reExport });
+  }
+  return found;
+}
+
+/** Whether an expanded path names the Claude module as `agent::claude`. */
+function namesTheClaudeModule(path: string): boolean {
+  const segments = path.split('::').filter((segment) => segment !== '');
+  return segments.some(
+    (segment, at) => segment === AGENT_SEGMENT && segments[at + 1] === CLAUDE_SEGMENT,
+  );
+}
+
+/** Whether an expanded path passes through a `claude` module at all. */
+function reachesClaude(path: string): boolean {
+  return path.split('::').includes(CLAUDE_SEGMENT);
+}
+
+/**
+ * Rule (f): nothing outside `agent/**` may import Claude's specifics.
+ *
+ * D-3 and D-4: Claude is the only agent, and there is **no provider trait**. §7.4 gives the
+ * reason and nightcore is the evidence — its seam was designed against one implementation,
+ * and when a second arrived `StartSessionParams` fields were silently dropped, scans
+ * hardcoded an autonomy level the new provider refuses, and every scan of the new kind
+ * failed on first run from the UI. A trait extracted from one implementation encodes that
+ * implementation's assumptions and calls them universal. So the protection now is a
+ * boundary, and the trait gets extracted from two real implementations in v0.6+.
+ *
+ * **Rust privacy is the load-bearing half of this boundary**, the way rule (b) is to rule
+ * (a): `agent/mod.rs` declares `mod claude` with no visibility modifier, so nothing outside
+ * `agent/` can name it and code that tries does not compile. This rule is the half that
+ * reports a file and a line a developer can act on in ten seconds — and the half that covers
+ * what the compiler happily permits. It checks three things:
+ *
+ * 1. **Outside `agent/**`: naming `agent::claude`.** Through a `use` in any spelling — the
+ *    tree is expanded, so `use crate::agent::{claude, other}` and
+ *    `use crate::agent::{claude::{a, b}}` both report although neither writes those two
+ *    segments next to each other, and `use crate::agent::claude as c` reports although the
+ *    local name is `c`. Through a fully-qualified path with no `use` at all, too.
+ * 2. **Inside `agent/**` but outside `agent/claude/**`: a `pub use` that reaches into
+ *    `claude`.** This is the one the compiler allows and the one that matters most. A
+ *    `pub use claude::ClaudeLaunch;` in `agent/mod.rs` hands a Claude type on as
+ *    `agent::ClaudeLaunch`, so every caller gets Claude's shape while the word `claude`
+ *    disappears from the path — the boundary stops being one and nothing anywhere says so.
+ *    The module is arranged so this never has to happen: neutral types are declared in
+ *    `agent/`'s own files and `claude/` imports them *upward*.
+ * 3. **Inside `agent/**` but outside `agent/claude/**`: `pub mod claude`.** Any visibility
+ *    modifier at all, `pub(crate)` included, disarms the privacy half. A bare `mod claude;`
+ *    is the only accepted spelling.
+ *
+ * Files under `agent/claude/**` are exempt from all three: the module may import whatever it
+ * likes, which is the point of having one.
+ *
+ * # What it cannot see, said rather than implied
+ *
+ * - **A path reached through an aliased ancestor.** `use crate::agent as a;` then
+ *   `a::claude::foo()` names no `agent::claude`, and a parser can say a path is rooted at a
+ *   local alias but not what that alias resolves to. Note that this is exactly where
+ *   privacy — the half that does not care how the path is spelled — is the one still
+ *   standing: `claude` is private, so that code does not compile.
+ * - **Anything that only exists after macro expansion**, `include!` included, the same blind
+ *   spot rule (a) documents.
+ * - **A Claude specific that is not in the `claude` module.** The rule is about a module
+ *   boundary, not about the word: a constant spelling `"claude"` in `rpc/` is invisible to
+ *   it. That is the right scope — D-4 is about where the implementation lives — but it is a
+ *   scope, not a guarantee.
+ * - **`agent.rs` instead of `agent/mod.rs`.** The boundary is a directory, so a single-file
+ *   spelling of the module would sit outside it. Nothing in the repository is written that
+ *   way and the layout is `agent/mod.rs`; it is listed because "the rule stopped looking"
+ *   is the failure class this tool exists to remove.
+ */
+export function noClaudeSpecificsOutsideAgent(
+  root: string,
+  files: readonly string[],
+): Violation[] {
+  const violations: Violation[] = [];
+
+  for (const file of files) {
+    if (!file.endsWith('.rs')) continue;
+    // The module itself may import whatever it likes. That is what a boundary is for.
+    if (matches(file, AGENT_CLAUDE)) continue;
+
+    const code = blankRustComments(read(root, file));
+    const insideAgent = matches(file, AGENT);
+
+    if (!insideAgent) {
+      const lines = new Set<number>();
+      for (const { line, path } of rustUsePaths(code)) {
+        if (namesTheClaudeModule(path)) lines.add(line);
+      }
+      for (const match of code.matchAll(RUST_AGENT_CLAUDE_PATH)) {
+        if (match.index !== undefined) lines.add(lineAt(code, match.index));
+      }
+      for (const line of [...lines].sort((a, b) => a - b)) {
+        violations.push({
+          rule: CLAUDE_RULE,
+          file,
+          line,
+          message:
+            `imports Claude specifics from \`${AGENT.path}\`; only that module may name ` +
+            'them (D-3, D-4). Reach the agent through the neutral surface it exports, or ' +
+            'add one — a trait gets extracted from two implementations, not from one (§7.4)',
+        });
+      }
+      continue;
+    }
+
+    for (const { line, path, reExport } of rustUsePaths(code)) {
+      if (!reExport || !reachesClaude(path)) continue;
+      violations.push({
+        rule: CLAUDE_RULE,
+        file,
+        line,
+        message:
+          `re-exports \`${path}\` out of the Claude module, which hands a Claude specific ` +
+          'on under a neutral name and leaves callers naming this module rather than ' +
+          `\`${CLAUDE_SEGMENT}\` — declare the neutral type here and have the Claude module ` +
+          'import it instead',
+      });
+    }
+
+    for (const match of code.matchAll(RUST_PUBLISHED_CLAUDE_MOD)) {
+      if (match.index === undefined) continue;
+      violations.push({
+        rule: CLAUDE_RULE,
+        file,
+        line: lineAt(code, match.index),
+        message:
+          `publishes \`mod ${CLAUDE_SEGMENT}\`, which is the half of this boundary the ` +
+          'compiler enforces; a bare `mod claude;` is the only spelling that keeps it',
+      });
+    }
+  }
+
+  return violations;
+}
+
 /** Which crate a dependency is, spelled for a message — `ui (package = "tauri")` renamed. */
 function describe(edge: CargoDependencyEdge): string {
   return edge.rename === null
@@ -859,6 +1111,7 @@ export function runSourceRules(root: string, includeFixtures = false): Violation
     ...noTauriOutsideDesktop(root, files),
     ...noStoreContextOutsideStore(root, files),
     ...noUnmutedRenderer(root, files),
+    ...noClaudeSpecificsOutsideAgent(root, files),
   ];
 }
 
