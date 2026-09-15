@@ -84,6 +84,7 @@ export function SettingsScreen() {
               <NavItem
                 key={entry.id}
                 label={entry.label}
+                glyph={entry.glyph}
                 tag={entry.tag}
                 selected={selected === entry.id}
                 onSelect={() => setSelected(entry.id)}
@@ -101,6 +102,7 @@ export function SettingsScreen() {
               <NavItem
                 key={project.id}
                 label={project.name}
+                glyph={null}
                 selected={selected === project.id}
                 onSelect={() => setSelected(project.id)}
               />
@@ -166,13 +168,28 @@ function findEntry(id: string): SettingsEntry | undefined {
   return undefined;
 }
 
+/**
+ * One nav row.
+ *
+ * The glyph slot is drawn whether or not there is a glyph. `Nysia account` has no honest
+ * mark and the project rows are identified by their names (`nav.ts` says why), so those
+ * rows render an empty cell of the same width rather than closing the column up — a label
+ * that starts further left than the one above it reads as a bug, where an aligned blank
+ * reads as a decision.
+ *
+ * The slot carries no colour of its own. It inherits the row's `text-fg`/`text-fg2`, so
+ * selection and hover carry the glyph with the label and the accent picker has nothing
+ * here to get wrong. Mono at 11px, matching the `+` menu, so `>_` occupies one cell.
+ */
 function NavItem({
   label,
+  glyph,
   tag,
   selected,
   onSelect,
 }: {
   readonly label: string;
+  readonly glyph: string | null;
   readonly tag?: string | undefined;
   readonly selected: boolean;
   readonly onSelect: () => void;
@@ -186,6 +203,9 @@ function NavItem({
         selected ? 'bg-bg3 text-fg' : 'text-fg2 hover:text-fg bg-transparent'
       }`}
     >
+      <span aria-hidden="true" className="w-4 flex-none text-center font-mono text-[11px]">
+        {glyph}
+      </span>
       {label}
       {tag === undefined ? null : (
         <span className="bg-bg2 text-fg3 tracking-group ml-auto rounded-pill px-1.5 py-px text-[9.5px] uppercase">
