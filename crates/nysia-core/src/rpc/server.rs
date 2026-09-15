@@ -35,19 +35,21 @@
 //! not exit in the moment before its spawner dials in.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nysia_proto::{
-    ClientId, ClientRole, CreditFrame, CreditWindow, DaemonIdentity, ErrorCode, ErrorEnvelope,
-    FrameDecoder, FrameKind, HelloAccepted, HelloRejected, HelloRequest, HelloResponse,
-    LaunchNonce, MutationReceipt, PROTOCOL_VERSION, ProtocolRange, RejectReason, RequestEnvelope,
-    RequestId, RequestPayload, ResponseEnvelope, ResponsePayload, SessionList, StreamAttached,
-    StreamId,
+    AgentStatusList, AgentStatusSubscribe, AgentStatusSubscribed, ClientId, ClientRole,
+    CreditFrame, CreditWindow, DaemonIdentity, ErrorCode, ErrorEnvelope, FrameDecoder, FrameKind,
+    HelloAccepted, HelloRejected, HelloRequest, HelloResponse, LaunchNonce, MutationReceipt,
+    PROTOCOL_VERSION, PaneKey, ProtocolRange, RejectReason, RequestEnvelope, RequestId,
+    RequestPayload, ResponseEnvelope, ResponsePayload, SessionList, StreamAttached, StreamId,
 };
 use tokio::io::AsyncWriteExt;
 
+use crate::rpc::agent_status::AgentStatusService;
 use crate::rpc::control::{ControlError, ControlReader, ControlWriter};
 use crate::rpc::endpoint::Endpoint;
 use crate::rpc::errors::{IntoEnvelope, envelope};
@@ -69,6 +71,12 @@ const DEFAULT_IDLE_RETIRE: Duration = Duration::from_secs(30);
 /// How often idle is re-checked.
 const IDLE_TICK: Duration = Duration::from_millis(250);
 
+/// The database file, beside the endpoint in the runtime directory.
+///
+/// One name in one place: the daemon opens it and a test asserting against it has to be able
+/// to name the same file without copying a literal.
+pub const STORE_FILE: &str = "nysia.db";
+
 /// How many mutation receipts are kept before the oldest is forgotten.
 ///
 /// A receipt only has to outlive the reconnect that a retry crosses, which is seconds. Keeping
@@ -88,6 +96,14 @@ pub enum ServerError {
     /// The adoption lease could not be written.
     #[error(transparent)]
     Lease(#[from] crate::rpc::lease::LeaseError),
+    /// The status store could not be opened or migrated.
+    ///
+    /// Fatal rather than degraded. A daemon serving sessions with no store would answer
+    /// every status verb with an internal error and lose every hook that fired at it, which
+    /// looks to a person exactly like hooks being installed wrongly (§2). Failing at the bind
+    /// says which of the two it is, once, in the place that can still be read.
+    #[error(transparent)]
+    Store(#[from] crate::store::StoreError),
 }
 
 /// What a daemon needs to know before it binds.
@@ -110,6 +126,12 @@ pub struct DaemonConfig {
     /// window would deadlock, so [`StreamRegistry::with_window`] refuses one and serves
     /// [`CreditWindow::DEFAULT`] instead.
     pub credit_window: CreditWindow,
+    /// Where the D-12 store lives.
+    ///
+    /// Beside the endpoint by default, so a daemon on an isolated runtime directory gets an
+    /// isolated database without anybody having to remember to move it — which is what lets
+    /// a test drive real persistence against a real socket with one environment variable.
+    pub store_path: PathBuf,
 }
 
 impl DaemonConfig {
@@ -117,10 +139,11 @@ impl DaemonConfig {
     #[must_use]
     pub fn new(endpoint: Endpoint) -> Self {
         Self {
-            endpoint,
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
             idle_retire_after: Some(DEFAULT_IDLE_RETIRE),
             credit_window: CreditWindow::DEFAULT,
+            store_path: endpoint.runtime_dir().join(STORE_FILE),
+            endpoint,
         }
     }
 }
@@ -134,6 +157,7 @@ pub struct Daemon {
     idle_retire_after: Option<Duration>,
     sessions: Arc<SessionRegistry>,
     streams: Arc<StreamRegistry>,
+    status: Arc<AgentStatusService>,
     receipts: Mutex<Receipts>,
     clients: AtomicUsize,
     in_flight: AtomicUsize,
@@ -149,13 +173,25 @@ impl Daemon {
     /// listening — a client that read one and then failed to connect would have no way to
     /// tell "starting" from "crashed".
     ///
+    /// **The spool is drained here**, after the store is open and before the first connection
+    /// can be accepted. §2.3 says the drain happens on daemon start, and "start" has to mean
+    /// before anything is served: a client that read a status between the bind and the drain
+    /// would be told a pane has no status and then told it has one, for a row that was on
+    /// disk the whole time.
+    ///
+    /// The bind comes first so that the loser of a start race does no work at all — it has
+    /// no endpoint, so it has no business opening the winner's database or claiming the
+    /// spool the winner is about to drain.
+    ///
     /// # Errors
     ///
     /// Returns [`ServerError::Transport`] when the endpoint is already held — which a spawner
-    /// reads as "somebody else won the race" — and [`ServerError::Lease`] when the record
-    /// cannot be written.
+    /// reads as "somebody else won the race" — [`ServerError::Store`] when the database
+    /// cannot be opened, and [`ServerError::Lease`] when the record cannot be written.
     pub fn bind(config: DaemonConfig) -> Result<(Arc<Self>, Listener), ServerError> {
         let listener = Listener::bind(&config.endpoint)?;
+        let status = Arc::new(AgentStatusService::open(&config.store_path)?);
+        drain_spool(config.endpoint.runtime_dir(), &status);
         let identity = DaemonIdentity {
             pid: std::process::id(),
             started_at_ms: SystemTime::now()
@@ -177,6 +213,7 @@ impl Daemon {
                 idle_retire_after: config.idle_retire_after,
                 sessions: Arc::new(SessionRegistry::new()),
                 streams: Arc::new(StreamRegistry::with_window(config.credit_window)),
+                status,
                 receipts: Mutex::new(Receipts::default()),
                 clients: AtomicUsize::new(0),
                 in_flight: AtomicUsize::new(0),
@@ -214,6 +251,12 @@ impl Daemon {
     #[must_use]
     pub fn streams(&self) -> &Arc<StreamRegistry> {
         &self.streams
+    }
+
+    /// The agent status this daemon serves, and the store behind it.
+    #[must_use]
+    pub fn status(&self) -> &Arc<AgentStatusService> {
+        &self.status
     }
 
     /// Serve until the daemon retires or is interrupted.
@@ -513,11 +556,11 @@ impl Daemon {
             // *can* provide the ordering has to.
             if let Some(pending) = deferred {
                 if written {
-                    pending.start().await;
+                    pending.start(&self.status).await;
                 } else {
                     // The client will never learn the id, so nothing may be routed to it. A
                     // sink left open here can never be acked and would stall its session.
-                    let request = pending.request.clone();
+                    let request = pending.request().clone();
                     pending.abandon(&self.streams);
                     // And the receipt goes with it. An attach's whole effect is the id in its
                     // answer, so a receipt kept here would replay that id to a retry after the
@@ -540,7 +583,7 @@ impl Daemon {
         self: &Arc<Self>,
         request: RequestEnvelope,
         caller: &Caller,
-        deferred: &mut Option<PendingReplay>,
+        deferred: &mut Option<Deferred>,
     ) -> ResponseEnvelope {
         let incoming = request.request_id.clone();
         let is_mutation = request.payload.is_mutation();
@@ -588,7 +631,7 @@ impl Daemon {
         payload: RequestPayload,
         caller: &Caller,
         request_id: &RequestId,
-        deferred: &mut Option<PendingReplay>,
+        deferred: &mut Option<Deferred>,
     ) -> ResponsePayload {
         let sessions = Arc::clone(&self.sessions);
         match payload {
@@ -660,29 +703,153 @@ impl Daemon {
                 self.streams.detach(&caller.client_id, request.stream_id);
                 ResponsePayload::StreamDetach
             }
-            // The v0.2 agent-status verbs parse, route, and have nothing behind them in this
-            // build. `unsupported` is exactly what that code means — "a verb this daemon does
-            // not serve" — and saying so, with the milestone that serves it, is what the CLI
-            // already does for `nysia hook`. The alternative was a `_` arm, which would have
-            // let a later verb reach this quietly instead of failing the build here.
-            //
-            // `crates/nysia/tests/agent_status.rs` is the acceptance test that goes green
-            // when wave C replaces this arm with an implementation.
-            RequestPayload::AgentHook(_)
-            | RequestPayload::AgentStatusGet(_)
-            | RequestPayload::AgentStatusList(_)
-            | RequestPayload::AgentStatusSubscribe(_)
-            | RequestPayload::AgentStatusUnsubscribe(_) => ResponsePayload::Error(envelope(
-                ErrorCode::Unsupported,
-                "agent status is not served by this build; it lands in v0.2 wave C",
-                "wait for a daemon build that serves it, or read the pane's screen with \
-                 `nysia terminal read`",
-                &[
-                    "see docs/plans/v0.2-delivery-plan.md wave C (W4) for what implements \
-                     these verbs",
-                ],
-            )),
+            // The five v0.2 agent-status verbs. Still no `_` arm, for the reason the
+            // placeholder this replaces was written without one: a verb added later must fail
+            // the build here rather than be served silently.
+            RequestPayload::AgentHook(request) => {
+                let pane = match self.ingest_pane(caller, request.pane_hint.as_ref()) {
+                    Ok(pane) => pane,
+                    Err(refusal) => return ResponsePayload::Error(refusal),
+                };
+                let status = Arc::clone(&self.status);
+                // The write, and the broadcast with it, on the blocking pool: `rusqlite` is a
+                // blocking C library and this runs on the agent's critical path once per tool
+                // call it makes. The broadcast goes to *other* clients' stream connections, so
+                // nothing orders it against this answer.
+                blocking(move || match status.record(&pane, &request.event) {
+                    Ok(change) => {
+                        if let Some(change) = change {
+                            status.broadcast(&change);
+                        }
+                        ResponsePayload::AgentHook
+                    }
+                    // Reported rather than swallowed: the hook spools what the daemon could
+                    // not keep, and a daemon answering "received" would have it throw the
+                    // status away instead (§2.3).
+                    Err(err) => ResponsePayload::Error(err.into_envelope()),
+                })
+                .await
+            }
+            RequestPayload::AgentStatusGet(request) => {
+                let status = Arc::clone(&self.status);
+                blocking(move || match status.status(&request.pane) {
+                    Ok(status) => ResponsePayload::AgentStatusGet { status },
+                    Err(err) => ResponsePayload::Error(err.into_envelope()),
+                })
+                .await
+            }
+            RequestPayload::AgentStatusList(AgentStatusList {}) => {
+                let status = Arc::clone(&self.status);
+                blocking(move || match status.statuses() {
+                    Ok(statuses) => ResponsePayload::AgentStatusList { statuses },
+                    Err(err) => ResponsePayload::Error(err.into_envelope()),
+                })
+                .await
+            }
+            RequestPayload::AgentStatusSubscribe(AgentStatusSubscribe {}) => {
+                self.subscribe(caller, request_id, deferred)
+            }
+            RequestPayload::AgentStatusUnsubscribe(request) => {
+                // Releasing an id that has already gone is not an error, for the reason
+                // `StreamDetach` gives: it is the routine teardown race, and answering "no
+                // such subscription" would have clients retrying something already done.
+                if let Some(connection) = self.streams.current(&caller.client_id) {
+                    self.status.unsubscribe(connection, request.stream_id);
+                }
+                self.streams.detach(&caller.client_id, request.stream_id);
+                ResponsePayload::AgentStatusUnsubscribe
+            }
         }
+    }
+
+    /// Which pane a hook belongs to, proved rather than accepted (§3.2).
+    ///
+    /// The ancestry walk is the proof and `pane_hint` is only ever compared against it. A
+    /// caller descending from no session this daemon spawned is refused: the alternative is a
+    /// daemon that lets any process on the machine write status into any pane, which is what
+    /// `crates/nysia/tests/agent_status.rs` runs its hook inside the session to avoid having
+    /// to rely on.
+    ///
+    /// The two refusals say different things on purpose. "The kernel would not name you" is a
+    /// platform limitation — a Unix carrying no pid in its peer credentials — and "you descend
+    /// from nothing I own" is a caller in the wrong place. Told apart, a red CI leg says which
+    /// of the two happened; collapsed into one message it says neither.
+    fn ingest_pane(
+        &self,
+        caller: &Caller,
+        hint: Option<&PaneKey>,
+    ) -> Result<PaneKey, ErrorEnvelope> {
+        let Some(from) = caller.session.as_ref() else {
+            return Err(envelope(
+                ErrorCode::InvalidRequest,
+                if caller.pid.is_some() {
+                    "a hook may only report status for the session it runs in, and this caller \
+                     descends from no session this daemon owns"
+                } else {
+                    "this platform would not name the calling process, so the session a hook \
+                     runs in cannot be proved"
+                },
+                "run `nysia hook` from inside a Nysia session — Claude's installed hook \
+                 entries already do",
+                &[
+                    "§3.2: pane identity comes from peer credentials and the pty process \
+                     tree, and NYSIA_PANE_KEY is a hint that is never the proof",
+                ],
+            ));
+        };
+        let session = self
+            .sessions
+            .get(&from.handle)
+            .map_err(IntoEnvelope::into_envelope)?;
+        let pane = session.pane_key().clone();
+        if let Some(hinted) = hint.filter(|hinted| *hinted != &pane) {
+            // Logged and ignored, never honoured. A disagreement is worth seeing — a stale
+            // `NYSIA_PANE_KEY` inherited across a re-spawn looks exactly like this — but the
+            // hint is a hint, so the proof simply wins.
+            tracing::debug!(
+                proved = pane.as_str(),
+                hinted = hinted.as_str(),
+                "a hook's pane hint disagrees with the session it came from; using the session"
+            );
+        }
+        Ok(pane)
+    }
+
+    /// Reserve a stream id for status changes, leaving the subscription to the caller.
+    ///
+    /// The same shape as [`Self::attach`] and for the same reason: a client can only record
+    /// the id by parsing this answer, so nothing may be written to that id until the answer
+    /// has gone out. A change frame overtaking it names an id the client never assigned, which
+    /// proto's routing rule makes a desync that costs the whole connection.
+    fn subscribe(
+        &self,
+        caller: &Caller,
+        request_id: &RequestId,
+        deferred: &mut Option<Deferred>,
+    ) -> ResponsePayload {
+        let Some(attached) = self.streams.attach(&caller.client_id) else {
+            return ResponsePayload::Error(
+                envelope(
+                    ErrorCode::InvalidRequest,
+                    "this client has no stream connection to route status changes to",
+                    "open a second connection with `role: \"stream\"` and the same `clientId`, \
+                     then subscribe",
+                    &[
+                        "a subscription rides the stream connection terminal output already \
+                         uses; there is no second mechanism",
+                    ],
+                )
+                .retryable(true),
+            );
+        };
+        let stream_id = attached.sink.stream_id();
+        *deferred = Some(Deferred::Subscription(PendingSubscription {
+            connection: attached.connection,
+            sink: attached.sink,
+            stream_id,
+            request: request_id.clone(),
+        }));
+        ResponsePayload::AgentStatusSubscribe(AgentStatusSubscribed { stream_id })
     }
 
     /// Reserve a stream id for a session's output, leaving the replay to the caller.
@@ -696,7 +863,7 @@ impl Daemon {
         handle: &nysia_proto::SessionHandle,
         caller: &Caller,
         request_id: &RequestId,
-        deferred: &mut Option<PendingReplay>,
+        deferred: &mut Option<Deferred>,
     ) -> ResponsePayload {
         let session = match self.sessions.get(handle) {
             Ok(session) => session,
@@ -718,13 +885,13 @@ impl Daemon {
             );
         };
         let stream_id = attached.sink.stream_id();
-        *deferred = Some(PendingReplay {
+        *deferred = Some(Deferred::Replay(PendingReplay {
             session,
             connection: attached.connection,
             sink: attached.sink,
             stream_id,
             request: request_id.clone(),
-        });
+        }));
         ResponsePayload::StreamAttach(StreamAttached {
             handle: handle.clone(),
             stream_id,
@@ -778,6 +945,10 @@ impl Daemon {
         }
         pumping.abort();
         self.streams.unbind(key);
+        // Its subscriptions too. `unbind` closes the sinks, so a broadcast would notice on
+        // its next frame — but "notice eventually" is a list that grows for the life of a
+        // daemon every time a window reloads.
+        self.status.forget_connection(key);
     }
 
     /// Read credit acks until the client goes away.
@@ -856,6 +1027,70 @@ impl Drop for Daemon {
     }
 }
 
+/// Work that must not start until the answer naming its stream id has been written.
+///
+/// Both arms mint an id on the control connection and then write to the *stream* connection,
+/// and nothing orders those two sockets. A client can only record an id by parsing the
+/// answer, and proto's routing rule makes a frame naming an id at or beyond the next one to
+/// assign a desync that costs the whole connection — so the side that can supply the ordering
+/// has to, and this is that ordering made a type rather than a comment.
+#[derive(Debug)]
+enum Deferred {
+    /// A session attach owes an opening grant and a replay ring.
+    Replay(PendingReplay),
+    /// A status subscription owes nothing up front, and must simply not be in the broadcast
+    /// list while a change could still overtake its id.
+    Subscription(PendingSubscription),
+}
+
+impl Deferred {
+    /// The request whose answer names the id, so a failed write can forget its receipt.
+    fn request(&self) -> &RequestId {
+        match self {
+            Self::Replay(replay) => &replay.request,
+            Self::Subscription(subscription) => &subscription.request,
+        }
+    }
+
+    /// Begin, now that the client knows the id.
+    async fn start(self, status: &AgentStatusService) {
+        match self {
+            Self::Replay(replay) => replay.start().await,
+            Self::Subscription(subscription) => {
+                status.subscribe(subscription.connection, subscription.sink);
+            }
+        }
+    }
+
+    /// Give the id back, for an answer that never reached the client.
+    fn abandon(self, streams: &StreamRegistry) {
+        match self {
+            Self::Replay(replay) => replay.abandon(streams),
+            Self::Subscription(subscription) => {
+                streams.detach_on(subscription.connection, subscription.stream_id);
+            }
+        }
+    }
+}
+
+/// A subscription that holds an id the client has not been told about yet.
+///
+/// It is not in the broadcast list while it is here, which is the whole point: a hook
+/// arriving on another connection in this window would otherwise put a change frame ahead of
+/// the answer that explains its id.
+#[derive(Debug)]
+struct PendingSubscription {
+    /// The connection the id belongs to, so a rollback undoes the one that was attached even
+    /// if a newer connection has taken the client id over since.
+    connection: ConnectionKey,
+    /// Where the changes will go.
+    sink: Arc<StreamSink>,
+    /// The id that was reserved.
+    stream_id: StreamId,
+    /// The request whose answer names it.
+    request: RequestId,
+}
+
 /// An attach that holds an id but has not written a byte to the stream connection yet.
 ///
 /// It exists so that the two halves of an attach can be *ordered*: the id is reserved while
@@ -911,6 +1146,12 @@ impl PendingReplay {
 struct Caller {
     client_id: ClientId,
     fingerprint: String,
+    /// The pid the kernel reported, when it reported one.
+    ///
+    /// Kept only to tell two refusals apart: a platform that will not name the peer at all
+    /// and a peer that descends from nothing this daemon owns are different problems, and a
+    /// hook refusal that could not say which would send whoever reads it to the wrong file.
+    pid: Option<u32>,
     /// The session this caller descends from, when it descends from one (§3.2).
     ///
     /// Identification, never authorisation. It is `None` for the window and for a person at a
@@ -947,6 +1188,7 @@ impl Caller {
         Self {
             client_id: client_id.clone(),
             fingerprint: format!("{user}/{client_id}"),
+            pid: peer.as_ref().and_then(|peer| peer.pid),
             session,
         }
     }
@@ -991,6 +1233,32 @@ impl Receipts {
             }
         }
     }
+}
+
+/// Drain the disk spool into the store, before the daemon serves anybody.
+///
+/// A drain that fails is logged and not fatal. The rows are the ones a hook could not hand
+/// over while this daemon was away, so losing them costs the dots they carried — where
+/// refusing to start would cost every session the daemon was about to own.
+fn drain_spool(runtime_dir: &std::path::Path, status: &AgentStatusService) {
+    let drained = match crate::rpc::spool::drain(runtime_dir) {
+        Ok(drained) => drained,
+        Err(err) => {
+            tracing::warn!(%err, "could not drain the agent-status spool; carrying on without it");
+            return;
+        }
+    };
+    if drained.rows.is_empty() && drained.unreadable == 0 {
+        return;
+    }
+    let summary = status.restore(&drained.rows);
+    tracing::info!(
+        applied = summary.applied,
+        superseded = summary.superseded,
+        failed = summary.failed,
+        unreadable = drained.unreadable,
+        "drained the agent-status spool"
+    );
 }
 
 /// Run `work` on the blocking pool, answering with an internal error if the pool refuses.
