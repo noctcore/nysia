@@ -660,6 +660,26 @@ impl Daemon {
                 self.streams.detach(&caller.client_id, request.stream_id);
                 ResponsePayload::StreamDetach
             }
+            // The v0.2 agent-status verbs parse, route, and have nothing behind them in this
+            // build. `unsupported` is exactly what that code means — "a verb this daemon does
+            // not serve" — and saying so, with the milestone that serves it, is what the CLI
+            // already does for `nysia hook`. The alternative was a `_` arm, which would have
+            // let a later verb reach this quietly instead of failing the build here.
+            //
+            // `crates/nysia/tests/agent_status.rs` is the acceptance test that goes green
+            // when wave C replaces this arm with an implementation.
+            RequestPayload::AgentHook(_)
+            | RequestPayload::AgentStatusGet(_)
+            | RequestPayload::AgentStatusList(_)
+            | RequestPayload::AgentStatusSubscribe(_)
+            | RequestPayload::AgentStatusUnsubscribe(_) => ResponsePayload::Error(envelope(
+                ErrorCode::Unsupported,
+                "agent status is not served by this build; it lands in v0.2 wave C",
+                "wait for the daemon build that serves it, or read the pane's screen with                  `nysia terminal read`",
+                &[
+                    "see docs/plans/v0.2-delivery-plan.md wave C (W4) for what implements                      these verbs",
+                ],
+            )),
         }
     }
 
