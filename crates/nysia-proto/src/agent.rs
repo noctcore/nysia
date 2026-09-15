@@ -1022,6 +1022,27 @@ mod tests {
         let json = serde_json::to_value(&asking).unwrap();
         assert_eq!(json["tool_input"], *asking.tool_input.as_ref().unwrap());
         assert_eq!(serde_json::from_value::<HookEvent>(json).unwrap(), asking);
+
+        // `PermissionRequest` is the *other* event §2.1 maps to `waiting`, and the one this
+        // confinement is likeliest to bite: it reaches `waiting` without a `tool_name`, so a
+        // rule written around `AskUserQuestion` would strip the payload the window needs and
+        // nothing above would notice. Its shape is not verified against Claude's
+        // documentation — which is the reason to pin that the wire carries *whatever* it
+        // carries, rather than to assert anything about the fields inside.
+        let mut permission = event(HookEventName::PermissionRequest);
+        permission.tool_input = Some(serde_json::json!({ "tool": "Bash", "command": "rm -rf" }));
+        assert_eq!(permission.state(), Some(AgentState::Waiting));
+        assert_eq!(permission.question(), permission.tool_input.as_ref());
+        let json = serde_json::to_value(&permission).unwrap();
+        assert_eq!(json["tool_input"], *permission.tool_input.as_ref().unwrap());
+        assert_eq!(
+            serde_json::from_value::<HookEvent>(json).unwrap(),
+            permission
+        );
+        assert_eq!(
+            permission.to_row(pane(), at()).unwrap().question,
+            permission.tool_input
+        );
     }
 
     #[test]
