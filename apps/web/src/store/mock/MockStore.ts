@@ -1,5 +1,8 @@
+import type { AgentStatusChange } from '../../generated/AgentStatusChange';
 import type { PaneKey } from '../../generated/PaneKey';
 import type { SessionHandle } from '../../generated/SessionHandle';
+import { agentNotifications, type AgentNotificationSink } from '../agentNotifications';
+import { applyAgentStatus, retainAgentStatus } from '../agentStatus';
 import { StoreCommandError, type StoreCommandName, type StoreError } from '../errors';
 import type {
   LauncherId,
@@ -28,12 +31,20 @@ import { createSeedSnapshot } from './seed';
 export class MockStore implements Store {
   #snapshot: StoreSnapshot;
   readonly #listeners = new Set<() => void>();
+  readonly #notifications: AgentNotificationSink;
   #nextTab: number;
   #nextError = 1;
 
-  constructor(initial: StoreSnapshot = createSeedSnapshot()) {
+  constructor(
+    initial: StoreSnapshot = createSeedSnapshot(),
+    options: { readonly notifications?: AgentNotificationSink } = {},
+  ) {
     this.#snapshot = initial;
     this.#nextTab = initial.tabs.length + 1;
+    // The window's sink by default, its own on request. Two mock stores share the module
+    // one otherwise, and `MockStore.test.ts` asserts that two stores have independent
+    // state — a shared notice list would make that assertion quietly false for one field.
+    this.#notifications = options.notifications ?? agentNotifications;
   }
 
   getSnapshot = (): StoreSnapshot => this.#snapshot;
@@ -76,15 +87,21 @@ export class MockStore implements Store {
     this.#update((current) => {
       const index = current.tabs.findIndex((tab) => tab.paneKey === paneKey);
       const tabs = current.tabs.filter((tab) => tab.paneKey !== paneKey);
+      // A `PaneKey` is durable and therefore reusable, so a row that outlived its tab would
+      // eventually describe a different session under the same key.
+      const agentStatus = retainAgentStatus(
+        current.agentStatus,
+        new Set(tabs.map((tab) => tab.paneKey)),
+      );
       if (current.activeTab !== paneKey) {
-        return { ...current, tabs };
+        return { ...current, tabs, agentStatus };
       }
       // Closing the focused tab hands focus to its right-hand neighbour, or to the new
       // last tab when it was the rightmost — the behaviour every tabbed editor has. This
       // is *this* store's policy: the contract only requires that whatever ends up active
       // exists, because a daemon is entitled to choose differently.
       const next = tabs[Math.min(index, tabs.length - 1)];
-      return { ...current, tabs, activeTab: next?.paneKey ?? null };
+      return { ...current, tabs, agentStatus, activeTab: next?.paneKey ?? null };
     });
   };
 
@@ -102,6 +119,26 @@ export class MockStore implements Store {
       const tab: Tab = { paneKey, handle, kind: item.kind, title: item.label };
       return { ...current, tabs: [...current.tabs, tab], activeTab: paneKey };
     });
+  };
+
+  /**
+   * Deliver a status change, as the daemon's subscription will in wave C.
+   *
+   * **Not on `Store`.** Nothing in the chrome pushes status — it arrives, and a component
+   * that could call this would be a component that could invent one. It is on the class so
+   * a test can drive the dots and the notices without a socket, which is the whole reason
+   * the store boundary exists.
+   *
+   * The fold runs before the sink is offered the change, so a listener woken by a notice
+   * finds the dot already moved. The sink decides for itself whether a notice happens; this
+   * never inspects `notify`.
+   */
+  receiveAgentStatus = (change: AgentStatusChange): void => {
+    this.#update((current) => ({
+      ...current,
+      agentStatus: applyAgentStatus(current.agentStatus, change),
+    }));
+    this.#notifications.report(change);
   };
 
   dismissError = async (id: string): Promise<void> => {

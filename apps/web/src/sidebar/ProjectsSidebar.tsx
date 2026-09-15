@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 
+import { StatusDot } from '../chrome/StatusDot';
 import { formatAge } from '../format';
-import { useCommands, useSnapshot } from '../store/hooks';
+import { useAgentStatus, useCommands, useSnapshot } from '../store/hooks';
 import type { Project, SessionSummary, Worktree } from '../store/types';
 import { GLYPH } from '../ui/glyphs';
 import { SectionLabel } from '../ui/SectionLabel';
@@ -131,6 +132,7 @@ function SessionRow({
 }) {
   const commands = useCommands();
   const { activeTab } = useSnapshot();
+  const status = useAgentStatus(session.paneKey);
 
   return (
     <button
@@ -142,10 +144,11 @@ function SessionRow({
       }`}
     >
       {session.kind === 'agent' ? (
-        // The accent, not a status colour. design-spec.md §3 is specific about this: the
-        // dot says "an agent lives here", and the lifecycle palette belongs to the Tasks
-        // table, where a row has to be triaged at a glance among dozens.
-        <span aria-hidden="true" className="bg-acc size-1.5 flex-none rounded-full" />
+        // Live status, which is what design-spec.md §6.2 asks the sidebar for: sessions
+        // nest under projects and each shows live status and age. It was the flat accent
+        // in v0.1 because there was nothing to report; the wire carries an `AgentState`
+        // now, and an agent with no row yet still gets the accent — see `agentDot`.
+        <StatusDot status={status} now={now} />
       ) : (
         <span aria-hidden="true" className="font-mono text-[10px]">
           {GLYPH.shell}
