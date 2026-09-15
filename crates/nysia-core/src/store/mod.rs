@@ -522,10 +522,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_symlinked_database_path_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
         let (dir, path) = temp_db("open-symlink");
         // The file an attacker wants narrowed, or replaced, or read.
         let decoy = dir.join("decoy");
         std::fs::write(&decoy, b"not a database").expect("write the decoy");
+        // Sampled rather than assumed to be 0o644: under a 077 umask the decoy is born 0o600,
+        // and a test that asserts "not 0o600" would then fail with the check working. The
+        // property is that the target is left as it was, so that is what is recorded.
+        let mode_before = std::fs::metadata(&decoy)
+            .expect("stat the decoy")
+            .permissions()
+            .mode();
         std::os::unix::fs::symlink(&decoy, &path).expect("plant the link");
 
         let error = Store::open(&path).expect_err("a symlinked store path is refused");
@@ -534,21 +543,19 @@ mod tests {
             "unexpected error: {error}"
         );
 
-        // And the target was left exactly as it was: not narrowed to 0600, and not opened as
-        // a database — which is what following the link would have done to it.
-        use std::os::unix::fs::PermissionsExt;
+        // And the target was left exactly as it was: same bytes and same mode — which is both
+        // halves of what following the link would have done to it.
         assert_eq!(
             std::fs::read(&decoy).expect("read the decoy"),
             b"not a database",
             "the link's target was opened as a database"
         );
-        assert_ne!(
+        assert_eq!(
             std::fs::metadata(&decoy)
-                .expect("stat")
+                .expect("stat the decoy")
                 .permissions()
-                .mode()
-                & 0o777,
-            0o600,
+                .mode(),
+            mode_before,
             "the link's target was chmodded through the link"
         );
         let _ = std::fs::remove_dir_all(&dir);
