@@ -574,6 +574,14 @@ fn confine_cwd(cwd: Option<&PathBuf>) -> Result<Option<PathBuf>, SessionError> {
     Ok(Some(canonical))
 }
 
+/// The pane key every session carries in its environment.
+///
+/// §3.2 names it as the hint: a process inside a pane can read it without a round trip, and
+/// nothing may treat it as proof. `nysia hook` sends it as `pane_hint` and the daemon
+/// overrules it from the process tree; the one place it is load-bearing is the disk spool,
+/// where the daemon that could have proved anything is the daemon that was not there.
+pub const PANE_KEY_VAR: &str = "NYSIA_PANE_KEY";
+
 /// Every session the daemon holds, and the incarnation counter behind them.
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
@@ -643,6 +651,12 @@ impl SessionRegistry {
             // caller can undo is a suggestion, not a default.
             spec = spec.with_env(key.as_str(), value.as_str());
         }
+        // **After** the overrides, so the last word is the daemon's. §3.2 makes this a hint
+        // and never the proof — the daemon resolves a hook's pane from the process tree and
+        // only logs a hint that disagrees — but it is the hint `nysia hook` files a spooled
+        // row under when no daemon is listening, and a caller that could set it would be
+        // choosing which pane its own unreachable status is later restored into.
+        spec = spec.with_env(PANE_KEY_VAR, pane_key.as_str());
 
         let (pty, output) = PtySession::spawn(spec).map_err(SessionError::Spawn)?;
         let handle = pty.handle().clone();

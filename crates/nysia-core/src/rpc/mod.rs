@@ -97,7 +97,7 @@ pub use endpoint::{
 pub use lease::{LeaseError, PidRecordFile};
 pub use peer::{CallerSession, PeerCredentials, PeerError, ancestry, parent_of};
 pub use server::{Daemon, DaemonConfig, ServerError};
-pub use session::{OwnedSession, SessionError, SessionRegistry};
+pub use session::{OwnedSession, PANE_KEY_VAR, SessionError, SessionRegistry};
 pub use stream::{
     AttachedStream, BoundStream, ConnectionKey, CreditOutcome, SendOutcome, StreamRegistry,
     StreamSink,
