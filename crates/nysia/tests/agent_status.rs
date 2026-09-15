@@ -366,7 +366,6 @@ fn reported_state(run: &Run, pane: &str) -> Option<String> {
 }
 
 #[test]
-#[ignore = "fails until v0.2 wave C (W4): `nysia hook`, the daemon ingest and the status RPC"]
 fn a_stop_hook_fired_inside_a_session_turns_that_panes_dot_done() {
     let daemon = Nysiad::start("w1");
 
