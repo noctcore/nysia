@@ -96,6 +96,36 @@ export function describeStoreContract(name: string, create: StoreFactory): void 
         expect(new Set(projects).size).toBe(projects.length);
       });
 
+      it('carries an agent-status list, empty or not', async () => {
+        /*
+         * Shape and not content, deliberately. A provider with no status to report is not a
+         * provider that is wrong: the daemon's status RPC lands in v0.2 wave C, so the
+         * daemon-backed provider answers `[]` until then, and a fixture requirement here
+         * would make the contract untestable against the one provider that ships.
+         *
+         * What every provider does owe is that the field is *there* — before the handshake
+         * as well as after, because the chrome paints a dot from the first frame React asks
+         * for, and `undefined` would be a crash rather than an absent dot.
+         */
+        const cold = (await create()).getSnapshot();
+        expect(Array.isArray(cold.agentStatus)).toBe(true);
+
+        const snapshot = (await ready()).getSnapshot();
+        expect(Array.isArray(snapshot.agentStatus)).toBe(true);
+        for (const status of snapshot.agentStatus) {
+          expect(typeof status.lead.pane).toBe('string');
+          expect(Array.isArray(status.subagents)).toBe(true);
+        }
+      });
+
+      it('holds at most one status row per pane', async () => {
+        // The sidebar and the strip look a pane up by key and take the first answer. Two
+        // rows for one pane would make which dot is shown depend on insertion order — and
+        // the one that is *not* shown would be the newer.
+        const panes = (await ready()).getSnapshot().agentStatus.map((s) => s.lead.pane);
+        expect(new Set(panes).size).toBe(panes.length);
+      });
+
       it('points activeTab and activeProjectId at something that exists', async () => {
         const snapshot = (await ready()).getSnapshot();
         expect(snapshot.tabs.some((tab) => tab.paneKey === snapshot.activeTab)).toBe(true);

@@ -40,6 +40,17 @@ describe('observable', () => {
     expect(observable({ ...base, usage: [] })).toEqual(observable(base));
   });
 
+  it('ignores a status row that arrived mid-command', () => {
+    // A hook fires while a `selectTab` is in flight and the pane list legitimately moves
+    // under it. Requiring `agentStatus` to be frozen across an unrelated command would fail
+    // a correct provider on a dot that ticked — and unlike the metrics, this one is *never*
+    // a command's doing, so holding it still is the transport's business and not the
+    // contract's. `agentStatus.test.ts` is what holds the fold to replacing one pane.
+    const arrived = { ...base, agentStatus: [] };
+    expect(observable(arrived)).toEqual(observable(base));
+    expect(base.agentStatus.length).toBeGreaterThan(0);
+  });
+
   it('catches a command that reshaped the metrics object', () => {
     // A provider that replaced `daemon` with something of a different shape — the case
     // the plain omission stopped seeing.
