@@ -21,6 +21,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::ordered_json::Document;
 
@@ -70,6 +71,28 @@ pub enum HookError {
     /// shaped in a way this code does not understand, and the safe move is to say so.
     #[error("the settings file has a `hooks` key that is not an object")]
     HooksNotAnObject,
+    /// One of the agent's events holds something other than an array of hook groups.
+    ///
+    /// The same policy as [`HookError::HooksNotAnObject`], one level down, and it is here
+    /// because it was not: installing used to replace such a value outright, so a user whose
+    /// `hooks.Stop` held an object lost it without being told. Reachable only when the file
+    /// already disagrees with the agent's own schema, but it is still their file.
+    #[error("the settings file has a `hooks.{event}` that is not an array of hook groups")]
+    EventNotAnArray {
+        /// The event whose value could not be read.
+        event: &'static str,
+    },
+    /// The settings file begins with a byte-order mark.
+    ///
+    /// Its own variant because the parser's message for it — "expected value at line 1
+    /// column 1" — says where but not what, and a file saved by Notepad is a plausible way to
+    /// arrive here. Refused rather than stripped: `JSON.parse` rejects a BOM too, so the file
+    /// is already unreadable by the agent that owns it.
+    #[error("{path} begins with a UTF-8 byte-order mark, which is not valid JSON")]
+    ByteOrderMark {
+        /// The file in question.
+        path: PathBuf,
+    },
     /// The home directory could not be determined, so there is no settings file to edit.
     #[error("no home directory, so {0} cannot be located")]
     NoHome(&'static str),
@@ -171,6 +194,11 @@ fn read(settings: &Path) -> Result<Option<Document>, HookError> {
     if text.trim().is_empty() {
         return Ok(None);
     }
+    if text.starts_with('\u{feff}') {
+        return Err(HookError::ByteOrderMark {
+            path: settings.to_path_buf(),
+        });
+    }
     let document = Document::parse(&text).map_err(|source| HookError::Parse {
         path: settings.to_path_buf(),
         source,
@@ -183,12 +211,29 @@ fn read(settings: &Path) -> Result<Option<Document>, HookError> {
     Ok(Some(document))
 }
 
+/// Distinguishes two temp files written by the same process at the same moment.
+static WRITE_NONCE: AtomicU64 = AtomicU64::new(0);
+
 /// Write `contents` to `path` as a temp file plus a rename.
 ///
 /// The temp file is made in the **same directory** deliberately: a rename is only atomic
 /// within one filesystem, and `%TEMP%` is routinely on a different volume from a user's
 /// profile. `sync_all` before the rename is what makes the atomicity survive a power cut
 /// rather than only a crash — without it the rename can land while the bytes have not.
+///
+/// # What this does and does not make safe
+///
+/// The temp name carries a process id **and a per-process counter**, so two threads in one
+/// daemon writing the same settings file do not share a scratch file and clobber each
+/// other's half-written bytes.
+///
+/// That is not the same as making concurrent edits correct, and the difference matters to
+/// whoever wires this up. Each writer still reads, edits and renames independently, so two
+/// overlapping installs are a last-writer-wins race on the *file*: both succeed, and the
+/// loser's changes are gone. **Serialising calls is the caller's job** — for wave C, that
+/// means the daemon holding one lock across read-edit-write rather than assuming this
+/// function is a critical section. Nothing here can enforce it, because the thing to lock is
+/// the whole sequence and this function only sees the last step of it.
 fn write_atomically(path: &Path, contents: &str) -> Result<(), HookError> {
     use std::io::Write;
 
@@ -201,13 +246,14 @@ fn write_atomically(path: &Path, contents: &str) -> Result<(), HookError> {
     fs::create_dir_all(directory).map_err(failed)?;
 
     let temporary = directory.join(format!(
-        ".{}.nysia-{}.tmp",
+        ".{}.nysia-{}-{}.tmp",
         path.file_name()
             .map_or_else(|| "settings.json".into(), |name| name.to_string_lossy()),
-        std::process::id()
+        std::process::id(),
+        WRITE_NONCE.fetch_add(1, Ordering::Relaxed)
     ));
 
-    let mut file = fs::File::create(&temporary).map_err(failed)?;
+    let mut file = create_private(&temporary).map_err(failed)?;
     let result = file
         .write_all(contents.as_bytes())
         .and_then(|()| file.sync_all());
@@ -229,6 +275,30 @@ fn write_atomically(path: &Path, contents: &str) -> Result<(), HookError> {
         return Err(failed(source));
     }
     Ok(())
+}
+
+/// Create the scratch file owner-only from the first byte.
+///
+/// On Unix, `File::create` applies the process umask, so a file that is about to hold a
+/// user's settings exists as 0644 for the window between creation and the mode being copied
+/// from the original. Nothing in a hook command is a secret today, but the window is free to
+/// close and a settings file is exactly the kind of thing that grows one.
+#[cfg(unix)]
+fn create_private(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// Windows has no mode to set here; the directory's ACL is what governs.
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> io::Result<fs::File> {
+    fs::File::create(path)
 }
 
 /// Where the agent keeps the settings file these hooks go into.
@@ -547,6 +617,95 @@ mod tests {
             let expected = format!("'/opt/nysia/nysia' hook --event {event}");
             assert!(found.contains(&expected), "{event} is missing its hook");
         }
+    }
+
+    #[test]
+    fn an_event_value_this_code_cannot_read_is_refused_not_overwritten() {
+        // The policy `HookError::HooksNotAnObject` states, applied one level down. Installing
+        // used to replace such a value with a fresh array, so a user whose `hooks.Stop` held
+        // an object lost it and was told nothing — `Ok(removed: 0, wrote: true)`.
+        let scratch = Scratch::new("hooks-odd-event");
+        let target = scratch.join("settings.json");
+        let seed = "{\n  \"hooks\": {\n    \"Stop\": {\n      \"x\": 1\n    },\n    \"Keep\": \"me\"\n  }\n}\n";
+        fs::write(&target, seed).expect("seed");
+
+        let err = install(&target, Path::new("/opt/nysia/nysia")).expect_err("must refuse");
+        assert!(
+            matches!(err, HookError::EventNotAnArray { event: "Stop" }),
+            "{err:?}"
+        );
+        assert_eq!(fs::read_to_string(&target).expect("reads"), seed);
+
+        // Uninstall does not refuse: there is nothing of ours in a value we cannot read, so
+        // removing nothing from it is both correct and the only answer that lets a user turn
+        // the setting off at all.
+        let change = uninstall(&target).expect("uninstalls");
+        assert_eq!(change.removed, 0);
+        assert!(!change.wrote);
+        assert_eq!(fs::read_to_string(&target).expect("reads"), seed);
+    }
+
+    #[test]
+    fn an_event_nysia_does_not_write_may_hold_anything() {
+        // The refusal is scoped to the twelve this module installs. A key belonging to
+        // somebody else is none of our business whatever shape it is in, and refusing on it
+        // would block an install over a value we were never going to touch.
+        let scratch = Scratch::new("hooks-foreign-event");
+        let target = scratch.join("settings.json");
+        fs::write(
+            &target,
+            "{\n  \"hooks\": {\n    \"SomeFutureEvent\": \"whatever\"\n  }\n}\n",
+        )
+        .expect("seed");
+
+        assert_eq!(
+            install(&target, Path::new("/opt/nysia/nysia"))
+                .expect("installs")
+                .installed,
+            12
+        );
+        uninstall(&target).expect("uninstalls");
+        assert_eq!(
+            fs::read_to_string(&target).expect("reads"),
+            "{\n  \"hooks\": {\n    \"SomeFutureEvent\": \"whatever\"\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_named_rather_than_reported_as_a_column_number() {
+        // A Notepad-saved settings file. The parser's own message for this is "expected value
+        // at line 1 column 1", which says where and not what.
+        let scratch = Scratch::new("hooks-bom");
+        let target = scratch.join("settings.json");
+        fs::write(&target, "\u{feff}{\n  \"a\": 1\n}\n").expect("seed");
+
+        let err = install(&target, Path::new("/opt/nysia/nysia")).expect_err("must refuse");
+        assert!(matches!(err, HookError::ByteOrderMark { .. }), "{err:?}");
+        assert!(err.to_string().contains("byte-order mark"));
+    }
+
+    #[test]
+    fn a_crlf_settings_file_survives_install_and_uninstall_unchanged() {
+        // CRLF is what an editor on the primary development platform writes. "As if Nysia had
+        // never touched it" has to mean the line endings too, or every line shows as changed.
+        let scratch = Scratch::new("hooks-crlf");
+        let target = scratch.join("settings.json");
+        let seed = REALISTIC.replace('\n', "\r\n");
+        fs::write(&target, &seed).expect("seed");
+
+        install(&target, Path::new("/opt/nysia/nysia")).expect("installs");
+        let installed = fs::read_to_string(&target).expect("reads");
+        assert!(
+            !installed.contains("\n\n") && installed.contains("\r\n"),
+            "the install rewrote CRLF as LF"
+        );
+        assert_eq!(
+            installed.matches('\n').count(),
+            installed.matches("\r\n").count()
+        );
+
+        uninstall(&target).expect("uninstalls");
+        assert_eq!(fs::read_to_string(&target).expect("reads"), seed);
     }
 
     #[test]
