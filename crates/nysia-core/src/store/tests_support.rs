@@ -5,6 +5,8 @@
 
 use std::path::PathBuf;
 
+use nysia_proto::{AgentState, AgentStatusRow, PaneKey, UnixMillis};
+
 /// A directory of this test's own, and the database path inside it.
 ///
 /// Returns the directory too, so the caller can remove it: the `-wal` and `-shm` live beside
@@ -22,4 +24,49 @@ pub(super) fn temp_db(tag: &str) -> (PathBuf, PathBuf) {
     std::fs::create_dir_all(&dir).expect("create the test directory");
     let path = dir.join("nysia.sqlite3");
     (dir, path)
+}
+
+/// The pane every fixture row belongs to.
+pub(super) fn pane() -> PaneKey {
+    PaneKey::new("tab1", "leaf1").expect("a valid pane key")
+}
+
+/// A second pane, for the tests that prove one pane's cap is not another's.
+pub(super) fn other_pane() -> PaneKey {
+    PaneKey::new("tab2", "leaf1").expect("a valid pane key")
+}
+
+/// A live `working` row for the lead agent in `pane`, observed at `observed_at`.
+pub(super) fn row(pane: PaneKey, observed_at: u64) -> AgentStatusRow {
+    AgentStatusRow {
+        pane,
+        state: AgentState::Working,
+        question: None,
+        is_interrupt: false,
+        session_boundary: false,
+        agent_id: None,
+        observed_at: UnixMillis(observed_at),
+        restored_unconfirmed: false,
+    }
+}
+
+/// A `waiting` row carrying `question`, which is the only state that keeps one.
+pub(super) fn waiting(
+    pane: PaneKey,
+    observed_at: u64,
+    question: serde_json::Value,
+) -> AgentStatusRow {
+    AgentStatusRow {
+        state: AgentState::Waiting,
+        question: Some(question),
+        ..row(pane, observed_at)
+    }
+}
+
+/// A row belonging to the subagent `agent_id` rather than to the lead.
+pub(super) fn subagent(pane: PaneKey, observed_at: u64, agent_id: &str) -> AgentStatusRow {
+    AgentStatusRow {
+        agent_id: Some(agent_id.to_owned()),
+        ..row(pane, observed_at)
+    }
 }
