@@ -43,8 +43,10 @@
 //! - **`git` config is code execution.** `core.fsmonitor`, `core.hooksPath`, `core.pager`,
 //!   `diff.external`, `core.sshCommand` and `core.gitProxy` all name a program git runs, and
 //!   all of them can be set in a repository's own `.git/config` — which is a file an agent
-//!   Nysia launched can write. Every one is neutralised on the command line with `-c`, where
-//!   it outranks the config file (architecture §7.5).
+//!   Nysia launched can write. Every one is pinned on the command line with `-c`, where it
+//!   outranks the config file (architecture §7.5): to nothing where git is free to run no
+//!   program, and to git's own default where it is not. [`NEUTRALISED_CONFIG`] has the
+//!   difference, and the one key `-c` cannot reach.
 //! - **`GIT_*` in this process's environment redirects the answer.** `GIT_DIR` is the sharp
 //!   one, and it is not hypothetical: with `GIT_DIR` set, `git rev-parse` in a folder that
 //!   is not a repository at all **succeeds** and reports the other repository, so a plain
@@ -95,33 +97,79 @@ const DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// git's exit code for a usage error, as opposed to 128 for an operational failure.
 const USAGE_EXIT_CODE: i32 = 129;
 
-/// The config settings neutralised on every invocation, each of which names a program git
-/// would otherwise run.
+/// The config settings pinned on every invocation, each of which names a program git would
+/// otherwise run.
 ///
 /// Passed as `-c key=value` ahead of the verb, where they outrank `/etc/gitconfig`, the
 /// user's `~/.gitconfig` **and** the repository's own `.git/config` — which is the one that
 /// matters, because it is the file an agent working in a checkout can write.
 ///
-/// An empty value is how git spells "no program" for each of these. `core.pager` is the
-/// exception: an empty pager is not the same as no pager, so it is pinned to `cat`, and
-/// `--no-pager` is passed as well because it is the documented switch.
+/// # Empty is not always "no program"
+///
+/// An empty value is how git spells "run nothing" for a key it is free to skip. For a key git
+/// must satisfy, an empty value is how you break the feature instead, and two here are pinned
+/// to a program for that reason:
+///
+/// - **`core.pager`.** An empty pager is not "no pager", so it is pinned to `cat`, and
+///   `--no-pager` is passed as well because that is the documented switch.
+/// - **`core.sshCommand`, which is the sharp one.** git's `get_ssh_command()` returns the
+///   empty string as a *non-NULL* command, so it never falls back to `ssh` and every `ssh://`
+///   and `git@host:` remote dies before it reaches the network. Measured, rather than
+///   reasoned: `git -c core.sshCommand= ls-remote ssh://127.0.0.1:1/x` answers
+///   `error: cannot spawn : No such file or directory` and `fatal: ssh variant 'simple' does
+///   not support setting port`, while `core.sshCommand=ssh` — and no `-c` at all — both
+///   answer `ssh: connect to host 127.0.0.1 port 1: Connection refused`. So it is pinned to
+///   `ssh`, which is git's own default and what an empty value was meant to mean.
+///
+///   Pinning has a cost worth naming rather than discovering: a user whose `~/.gitconfig`
+///   sets `core.sshCommand` to plink, or to `ssh -i <key>`, does not get it here. That is the
+///   same stance [`SCRUBBED_VARS`] already takes by removing `GIT_SSH` and `GIT_SSH_COMMAND`
+///   — behind this chokepoint the transport is git's own ssh and not one a config file names
+///   — and it is the difference between overriding a preference and switching a transport off
+///   for everybody.
+///
+/// # The diff verb has to finish this job
+///
+/// Diff has two program-running knobs this list does not settle, so the first verb here that
+/// produces a diff — wave C's — must pass **`--no-ext-diff --no-textconv`**:
+///
+/// - **`diff.textconv` is not a git config key**, so an entry for it here would be inert and
+///   would make this list look one member more complete than it is. The real key is
+///   `diff.<driver>.textconv`, where `<driver>` is named by a `.gitattributes` line, and `-c`
+///   cannot wildcard it. Measured against a repository with a diff driver: the textconv
+///   program still runs with `-c diff.textconv=` present, and only `--no-textconv` stops it.
+/// - **`diff.external` is in the list and is not enough alone.** Empty is not "no external
+///   diff": git spawns the empty command and stops with `fatal: external diff died`, exit
+///   128. That failure is the *safe* one, and the difference from `core.sshCommand` is worth
+///   keeping straight — there, empty silently substitutes a broken transport for a working
+///   one; here, empty substitutes a loud error for running whatever a repository's config
+///   named. So a diff verb that forgets the flag breaks visibly instead of executing
+///   somebody's script. With `--no-ext-diff`, git never consults the key at all, the empty
+///   value is never spawned, and a real diff comes back.
+///
+/// So the claim that every config key naming a program is neutralised by `-c` alone is true
+/// of the keys below and not of diff.
 pub const NEUTRALISED_CONFIG: &[(&str, &str)] = &[
     // Runs a filesystem-monitor hook on almost every command.
     ("core.fsmonitor", ""),
-    // Relocates the hook directory, so a `post-checkout` can come from anywhere.
+    // Relocates the hook directory, so a `post-checkout` can come from anywhere. Empty
+    // disables hooks outright, the repository's own `.git/hooks` included.
     ("core.hooksPath", ""),
     // A pager is a program, and one that waits for a keypress is a hang.
     ("core.pager", "cat"),
-    // Replaces `diff` wholesale.
+    // Replaces `diff` wholesale. Empty is not "no external diff" here either — git spawns
+    // the empty command and stops — but unlike `core.sshCommand` that failure is the safe
+    // one, because the program a repository named does not run. See this list's
+    // documentation: wave C's diff verb finishes the job with `--no-ext-diff`.
     ("diff.external", ""),
-    // The transport for every `ssh://` and `user@host:` remote.
-    ("core.sshCommand", ""),
+    // The transport for every `ssh://` and `user@host:` remote. Pinned to git's own default
+    // rather than emptied: empty is taken as the command and switches the transport off. See
+    // this list's documentation for the measurement.
+    ("core.sshCommand", "ssh"),
     // The transport for `git://`.
     ("core.gitProxy", ""),
     // Asks for a password by running a program.
     ("core.askPass", ""),
-    // Runs a program to produce a commit's textual form.
-    ("diff.textconv", ""),
 ];
 
 /// The environment variables removed before every invocation.
@@ -790,14 +838,42 @@ mod tests {
                 "{key} names a program git runs and is not neutralised"
             );
         }
-        // Deliberately absent: credential helpers are how a user's existing authentication
-        // keeps working, and GIT_TERMINAL_PROMPT / GCM_INTERACTIVE are what make them
-        // non-interactive rather than removing them.
+        // Pinned, not emptied. `-c core.sshCommand=` is not "no ssh command": git takes the
+        // empty string as the command and never falls back, so every ssh:// remote dies
+        // before it connects. This shipped empty and is the reason the list's documentation
+        // now carries a measurement.
+        let pinned = |key: &str| {
+            NEUTRALISED_CONFIG
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| *value)
+        };
+        assert_eq!(
+            pinned("core.sshCommand"),
+            Some("ssh"),
+            "an empty core.sshCommand switches the ssh transport off rather than confining it"
+        );
+        assert_eq!(
+            pinned("core.pager"),
+            Some("cat"),
+            "an empty pager is not the same as no pager"
+        );
+
+        // Deliberately absent, each for its own reason.
         assert!(
             !NEUTRALISED_CONFIG
                 .iter()
                 .any(|(name, _)| *name == "credential.helper"),
             "neutralising credential.helper breaks authentication rather than confining it"
+        );
+        assert!(
+            !NEUTRALISED_CONFIG
+                .iter()
+                .any(|(name, _)| *name == "diff.textconv"),
+            "diff.textconv is not a git config key, so an entry for it would be inert and \
+             would make this list look one member more complete than it is; the real key is \
+             diff.<driver>.textconv, which -c cannot wildcard, and the mitigation is \
+             --no-textconv on wave C's diff verb"
         );
     }
 
