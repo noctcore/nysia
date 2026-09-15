@@ -14,10 +14,14 @@
 //! thing they call.
 //!
 //! - [`Git::locate`] resolves `git` once, up front, and says so when there is none.
+//! - [`inspect`] answers what a folder is: a repository, a folder of repositories, neither,
+//!   or a path that is not there. See [`Folder`].
+//! - [`Repository`] carries the worktrees, the branch each is on, and which one the folder
+//!   was registered from — [`crate::worktree`] owns those, keyed by branch and never by a
+//!   task id (D-6).
 //! - [`CanonicalPath`] is the path identity a project's id is derived from, and the type
 //!   every spawn takes as its working directory.
 //!
-//! What a folder *is* — a repository, a folder of repositories, neither — is the next commit.
 //! Status and diff, the watcher, and worktree creation are not here yet.
 //!
 //! # How the hardening is arranged
@@ -44,12 +48,14 @@
 
 pub(crate) mod command;
 mod error;
+mod inspect;
 mod path;
 #[cfg(test)]
 pub(crate) mod testing;
 
 pub use command::{DEFAULT_TIMEOUT, FORCED_VARS, Git, NEUTRALISED_CONFIG, SCRUBBED_VARS};
 pub use error::{GitError, PathError};
+pub use inspect::{Folder, Repository, inspect, inspect_folder};
 pub use path::CanonicalPath;
 
 /// The git options this module's questions are built on.
@@ -60,9 +66,8 @@ pub use path::CanonicalPath;
 /// [`GitError::Usage`] — git's exit code 129, which is what a missing option produces — can
 /// say what was expected instead of leaving somebody to guess.
 pub const REQUIRED_OPTIONS: &[&str] = &[
-    // The probe that decides whether a folder is a repository. Without
-    // `--path-format=absolute` a `.git` comes back relative to a working directory the caller
-    // does not have.
+    // `inspect`'s probe. Without `--path-format=absolute` a `.git` comes back relative to a
+    // working directory the caller does not have.
     "rev-parse --path-format=absolute --git-common-dir --git-dir --is-bare-repository",
     // The worktree list. `-z` rather than the line-oriented form because a worktree path may
     // contain a newline, and because without it git escapes and quotes a lock reason per

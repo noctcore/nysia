@@ -251,27 +251,9 @@ impl Git {
         at: &CanonicalPath,
     ) -> Result<Vec<u8>, GitError> {
         let output = self.capture(command, at)?;
-        let args = command.describe();
-        if output.timed_out {
-            return Err(GitError::TimedOut {
-                args,
-                at: at.as_path().to_path_buf(),
-                timeout: self.timeout,
-            });
-        }
-        let stderr = trim_stderr(&output.stderr);
-        match output.code {
-            Some(0) => Ok(output.stdout),
-            Some(USAGE_EXIT_CODE) => Err(GitError::Usage { args, stderr }),
-            code => Err(GitError::Failed {
-                args,
-                at: at.as_path().to_path_buf(),
-                status: code.map_or_else(
-                    || "killed by a signal".to_owned(),
-                    |code| format!("exit code {code}"),
-                ),
-                stderr,
-            }),
+        match output.failure(command, at, self.timeout) {
+            Some(err) => Err(err),
+            None => Ok(output.stdout),
         }
     }
 
@@ -311,6 +293,44 @@ impl Git {
             at: at.as_path().to_path_buf(),
             source,
         })
+    }
+}
+
+impl Finished {
+    /// What this ending amounts to, or `None` when git answered the question.
+    ///
+    /// The one place an exit code is judged. [`Git::run`] turns the answer straight into its
+    /// `Err`, and `inspect`'s probe needs the same judgement before it may treat a failure as
+    /// "this folder is not a repository" — a probe that classified on its own would read a
+    /// git too old for [`super::REQUIRED_OPTIONS`] as every folder being unreadable.
+    pub(crate) fn failure(
+        &self,
+        command: &GitCommand,
+        at: &CanonicalPath,
+        timeout: Duration,
+    ) -> Option<GitError> {
+        let args = command.describe();
+        if self.timed_out {
+            return Some(GitError::TimedOut {
+                args,
+                at: at.as_path().to_path_buf(),
+                timeout,
+            });
+        }
+        let stderr = trim_stderr(&self.stderr);
+        match self.code {
+            Some(0) => None,
+            Some(USAGE_EXIT_CODE) => Some(GitError::Usage { args, stderr }),
+            code => Some(GitError::Failed {
+                args,
+                at: at.as_path().to_path_buf(),
+                status: code.map_or_else(
+                    || "killed by a signal".to_owned(),
+                    |code| format!("exit code {code}"),
+                ),
+                stderr,
+            }),
+        }
     }
 }
 
