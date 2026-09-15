@@ -131,11 +131,18 @@ export const SEED_ACTIVE_TAB = KIREI_PANE;
  * this is store data and not a constant in the menu component.
  *
  * The four shell ids are the ones `DaemonStore.profileFor` switches on, spelled exactly as
- * it spells them. They had drifted — `shell.gitbash` against the daemon's `shell.git_bash`,
- * and a WSL row hinting `bash` rather than `wsl` — which cost nothing visible until the `+`
- * menu started keying its glyph off the id, and then only in the mock. The real cost was
- * always the other one: a fixture whose identifiers disagree with the thing it stands in
- * for makes every test that passes against it prove something slightly false.
+ * it spells them, in the order it lists them. They had drifted two ways: `shell.gitbash`
+ * against the daemon's `shell.git_bash`, and a WSL row hinting `bash` where the daemon
+ * hints `wsl`.
+ *
+ * The id was invisible — nothing rendered it until the `+` menu began keying its glyph off
+ * it. The hint was not: `NewTabButton` renders `item.hint` and always has, so the mock's
+ * WSL row sat on screen reading `bash`, which is Git Bash's answer, in the menu whose whole
+ * job is telling the two apart.
+ *
+ * Underneath both is the cost that does not depend on anything rendering: a fixture whose
+ * identifiers disagree with the thing it stands in for makes every test that passes against
+ * it prove something slightly false.
  */
 export const SEED_LAUNCHERS: readonly LauncherGroup[] = [
   {
