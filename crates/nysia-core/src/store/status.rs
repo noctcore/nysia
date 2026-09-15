@@ -228,6 +228,72 @@ impl Store {
         // `tx` rolls back on drop, which for a read is just releasing the snapshot.
     }
 
+    /// Every pane's whole status: one [`AgentStatus`] per pane whose lead has reported.
+    ///
+    /// The unfiltered read §2 has the sidebar render. Without it a daemon can only answer for
+    /// panes it has itself seen since it started, so every row a *previous* daemon persisted
+    /// is invisible until that pane's next hook — which after a restart is the whole sidebar,
+    /// including exactly the `restored_unconfirmed` rows the spool just went to the trouble of
+    /// rehydrating.
+    ///
+    /// **A pane whose lead has no row is absent**, which is [`Store::status`]'s rule applied
+    /// to the whole table rather than a second one: [`AgentStatus`] has a lead and not an
+    /// optional one, and inventing a `done` for the lead so a pane could be listed would be a
+    /// dot nothing observed. A pane whose only rows belong to subagents is therefore not in
+    /// this list, and its roster is not either — there is nowhere to hang it.
+    ///
+    /// **One statement, so one snapshot.** [`Store::status`] needs an explicit transaction
+    /// because it runs two queries and a CLI process writing status between them would hand
+    /// back a roster that never belonged to its lead. This is a single `SELECT`, which SQLite
+    /// already evaluates against one snapshot, so a transaction here would buy nothing and
+    /// would take a read lock across a longer scan.
+    ///
+    /// Ordered by pane, and each roster by `agent_id`, so two reads of an unchanged table
+    /// agree — the same guarantee [`Store::status`] gives for one pane.
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::current_status`].
+    pub fn statuses(&self) -> Result<Vec<AgentStatus>, StoreError> {
+        let conn = self.conn()?;
+        let mut statement = conn
+            .prepare_cached(&format!(
+                // `MAX(seq)` per `(pane, agent_id)` is the newest row for each agent, and
+                // SQLite groups every NULL `agent_id` together — which is the lead's group,
+                // one per pane. The `ORDER BY` puts that group first inside each pane, so the
+                // loop below can attach a roster entry to the entry it has just pushed rather
+                // than keeping a map from pane to position.
+                "SELECT {COLUMNS} FROM agent_status
+                  WHERE seq IN (
+                        SELECT MAX(seq) FROM agent_status GROUP BY pane, agent_id
+                    )
+                  ORDER BY pane, agent_id IS NOT NULL, agent_id"
+            ))
+            .map_err(self.sqlite("prepare the status list query"))?;
+        let raws = statement
+            .query_map([], RawRow::read)
+            .map_err(self.sqlite("read the status list"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(self.sqlite("read the status list"))?;
+
+        let mut statuses: Vec<AgentStatus> = Vec::new();
+        for raw in raws {
+            let row = raw.decode(&self.path)?;
+            if row.agent_id.is_none() {
+                statuses.push(AgentStatus::new(row));
+                continue;
+            }
+            match statuses.last_mut() {
+                Some(status) if status.lead.pane == row.pane => status.subagents.push(row),
+                // A subagent whose lead has never reported. Dropped rather than counted or
+                // logged: this module logs nothing at all (trap 14), and the pane it belongs
+                // to is absent for the reason on this function.
+                _ => {}
+            }
+        }
+        Ok(statuses)
+    }
+
     /// An agent's history, newest first.
     ///
     /// **No `LIMIT`.** The cap is enforced on the way in, and a read that silently returned
@@ -1270,6 +1336,118 @@ mod tests {
                 .expect("history")
                 .is_empty()
         );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- The unfiltered list ---------------------------------------------------------------
+
+    #[test]
+    fn an_empty_database_lists_no_statuses_rather_than_failing() {
+        // The first start, and the one a caller meets before any hook has fired. An empty
+        // table is an empty list: there is nothing exceptional about a daemon that has not
+        // been told anything yet.
+        let (dir, store) = store("list-empty");
+        assert_eq!(store.statuses().expect("list"), Vec::new());
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_list_holds_one_entry_per_pane_carrying_its_newest_row() {
+        let (dir, store) = store("list-panes");
+        store.record_status(&row(pane(), 1_000)).expect("older");
+        store.record_status(&row(pane(), 2_000)).expect("newer");
+        store
+            .record_status(&row(other_pane(), 1_500))
+            .expect("second pane");
+
+        let listed = store.statuses().expect("list");
+        let seen: Vec<_> = listed
+            .iter()
+            .map(|status| (status.lead.pane.as_str(), status.lead.observed_at))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (pane().as_str(), UnixMillis(2_000)),
+                (other_pane().as_str(), UnixMillis(1_500))
+            ],
+            "one entry per pane, newest row, ordered by pane"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_listed_entry_is_the_one_the_single_pane_read_answers_with() {
+        // The two reads held together rather than trusted to stay alike. They are separate
+        // queries — `status` runs two inside a transaction and `statuses` runs one — so
+        // "they agree" is exactly the kind of claim that stops being true quietly.
+        let (dir, store) = store("list-agrees");
+        store.record_status(&row(pane(), 1_000)).expect("lead");
+        store
+            .record_status(&subagent(pane(), 1_100, "sub-b"))
+            .expect("b");
+        store
+            .record_status(&subagent(pane(), 1_200, "sub-a"))
+            .expect("a");
+        store
+            .record_status(&waiting(other_pane(), 1_500, json!({ "question": "which?" })))
+            .expect("second pane");
+
+        for listed in store.statuses().expect("list") {
+            let single = store
+                .status(listed.pane())
+                .expect("status")
+                .expect("a pane in the list has a status");
+            assert_eq!(listed, single, "the list and the single read must agree");
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pane_with_only_subagent_rows_is_absent_from_the_list_too() {
+        // `status` already answers `None` for such a pane; this is the same rule applied to
+        // the whole table rather than a second one. The roster goes with it — there is no
+        // lead to hang it on — and the pane beside it is unaffected.
+        let (dir, store) = store("list-no-lead");
+        store
+            .record_status(&subagent(pane(), 1_000, "sub-a"))
+            .expect("subagent with no lead");
+        store.record_status(&row(other_pane(), 1_500)).expect("lead");
+
+        let listed = store.statuses().expect("list");
+        assert_eq!(listed.len(), 1, "the leaderless pane is not listed");
+        assert_eq!(listed[0].lead.pane, other_pane());
+        assert!(listed[0].subagents.is_empty());
+        assert!(
+            store.status(&pane()).expect("status").is_none(),
+            "and the single read says the same thing about it"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rehydrated_row_is_listed_and_still_says_it_is_unconfirmed() {
+        // The defect this function exists for, at the layer that holds it: a row the spool
+        // drained into a previous daemon is in the table, and a list that could not see it
+        // would leave the sidebar empty after every restart — while `restoredUnconfirmed`
+        // survives, so §2.3's "never counts as fresh" is not traded away for visibility.
+        let (dir, store) = store("list-restored");
+        store
+            .restore_status(&row(pane(), 1_000))
+            .expect("the drain applies");
+
+        // A second `Store` on the same path, which is what daemon #2 opening the database it
+        // inherited actually is.
+        let second = Store::open(store.path()).expect("reopen");
+        let listed = second.statuses().expect("list");
+        assert_eq!(listed.len(), 1, "the row a previous daemon wrote is listed");
+        assert!(listed[0].lead.restored_unconfirmed);
+        drop(second);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
