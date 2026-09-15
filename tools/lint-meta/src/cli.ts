@@ -58,9 +58,16 @@
  *   weaker than ESLint's AST.
  * - **Rule (f) is a module boundary, not a word.** It reports a path into
  *   `nysia-core/src/agent/claude`, so a Claude assumption hardcoded somewhere else — a
- *   literal `"claude"` in `rpc/`, a flag only that CLI accepts — is invisible to it. Rust
- *   privacy is the load-bearing half there too: `mod claude` is declared without a
- *   visibility modifier, so the import this rule reports does not compile either.
+ *   literal `"claude"` in `rpc/`, a flag only that CLI accepts — is invisible to it.
+ *   **Its two halves are not equally defended, and the difference decides where care is
+ *   worth spending.** From outside `agent/`, Rust privacy is load-bearing: `mod claude` has
+ *   no visibility modifier, so the import the rule reports does not compile either, and a
+ *   spelling the rule misses is caught by the compiler. From *inside* `agent/` — the module
+ *   that is allowed to name `claude` — the compiler permits everything, so this rule is the
+ *   only guard. That is why a path there is resolved through the file's own `use` aliases
+ *   rather than matched: `use claude as c; pub use c::Probe as NeutralProbe;` re-exports a
+ *   Claude type under a neutral name while writing the word nowhere, and the first version
+ *   of the rule reported zero for it.
  *
  * The allowlists themselves live in `tools/lint-meta/src/boundaries.ts`, which
  * `eslint.config.js` reads too. They used to be two hand-written copies described as
