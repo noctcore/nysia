@@ -35,7 +35,7 @@
 //!
 //! # The pane is in the row, not in the file name
 //!
-//! §2.3 asks for a per-pane JSONL, and a [`PaneKey`] is `<tabId>:<leafId>` where each half
+//! §2.3 asks for a per-pane JSONL, and a [`PaneKey`](nysia_proto::PaneKey) is `<tabId>:<leafId>` where each half
 //! may contain anything but `:`, `@`, whitespace and control characters — so `/`, `\`, `..`
 //! and every character Windows refuses are all legal in one. A file named after a pane key is
 //! therefore a path traversal with extra steps. The name is the key's bytes in hex, which
@@ -76,7 +76,7 @@
 //!
 //! | Mutate | To | Turns red |
 //! |---|---|---|
-//! | [`file_stem`]'s body | `pane.to_owned()` | `a_pane_key_never_becomes_a_path` |
+//! | `file_stem`'s body | `pane.to_owned()` | `a_pane_key_never_becomes_a_path` |
 //! | [`drain`]'s `remove_file` | never called | `a_row_spooled_is_a_row_drained_and_the_spool_is_then_empty` |
 //! | `hook::spool_it`'s `observed_at` | `UnixMillis(0)` | `a_status_no_daemon_will_take_is_spooled_rather_than_lost` |
 //! | `hook`'s `EXIT_FAILED` | `2` | `a_hook_never_exits_with_the_code_claude_reads_as_block` |
