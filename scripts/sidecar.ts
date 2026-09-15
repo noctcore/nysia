@@ -66,14 +66,14 @@
  * outlives the window by design, and idle retire needs `sessions.is_empty()`, so one that was
  * holding a tab is still there. Change anything `nysia` is built from while it is, and the
  * prepend **fails** — `failed to remove file target\<profile>\nysia.exe … os error 5`,
- * measured — so `&&` short-circuits and no window opens. That is the rule two paragraphs up,
- * reached through cargo's own uplift rather than through `copy_binaries`: rebuilding `nysia`
- * writes a fresh `deps/nysia.exe` at a **new inode**, which orphans the uplift copy the daemon
- * is running from, and a single-linked running image is the one Windows will not unlink. Same
- * remedy as §12 q5, then: stop the daemon holding that file. A build with nothing to do does
- * not trip it — measured with a daemon up — so an edit to the web app, or to the window
- * alone, is unaffected. What that sequence did before the prepend was open a window onto the
- * stale daemon and say nothing about it.
+ * measured — so `&&` short-circuits and no window opens. That is the single-linked rule from
+ * the section above, reached through cargo's own uplift rather than `copy_binaries`:
+ * rebuilding `nysia` writes a fresh `deps/nysia.exe` at a **new inode**, which orphans the
+ * uplift copy the daemon is running from, and a single-linked running image is the one
+ * Windows will not unlink. Same remedy as §12 q5, then: stop the daemon holding that file.
+ * A build with nothing to do does not trip it — measured with a daemon up — so an edit to the
+ * web app, or to the window alone, is unaffected. What that sequence did before the prepend
+ * was open a window onto the stale daemon and say nothing about it.
  *
  * Two commands:
  *
