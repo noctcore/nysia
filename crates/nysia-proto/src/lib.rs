@@ -8,6 +8,7 @@
 //! The generated TypeScript is committed under `apps/web/src/generated/` and a drift guard
 //! (`pnpm ts-drift`) fails the build when it stops matching what this crate produces.
 
+pub mod agent;
 pub mod bindings;
 pub mod credit;
 pub mod envelope;
@@ -21,6 +22,12 @@ pub mod stream;
 pub mod terminal;
 pub mod version;
 
+pub use agent::{
+    AGENT_STATUS_HISTORY_CAP, AGENT_STATUS_STALE_AFTER_MS, AgentError, AgentHook, AgentState,
+    AgentStatus, AgentStatusChange, AgentStatusGet, AgentStatusList, AgentStatusRow,
+    AgentStatusSubscribe, AgentStatusSubscribed, AgentStatusUnsubscribe, HookEvent, HookEventName,
+    Notify, NotifySuppressed, StatusTarget, UnixMillis,
+};
 pub use bindings::{CONSTANTS_FILE_NAME, typescript_constants};
 pub use credit::{CreditAck, CreditFrame, CreditGrant, CreditWindow};
 pub use envelope::{
