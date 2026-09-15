@@ -131,6 +131,14 @@ impl Store {
     /// Returns [`Restored::Superseded`] without writing when a live row for the same agent is
     /// at least as recent.
     ///
+    /// **It appends, and it is not idempotent.** The guard consults live rows only, so
+    /// replaying one spool entry twice writes it twice — and while a re-drain is in flight the
+    /// newest row by `seq` is whichever entry was replayed last, which for a re-run is the
+    /// oldest one. The alternative, refusing any row not strictly newer than everything
+    /// stored, would silently drop the second of two genuine events sharing a millisecond,
+    /// which a status history has no way to recover. So the drain owns not replaying what it
+    /// has already handed over (W4), and the cap bounds the damage if it does.
+    ///
     /// # Errors
     ///
     /// As [`Store::record_status`].
