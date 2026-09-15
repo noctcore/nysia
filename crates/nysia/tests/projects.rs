@@ -39,9 +39,11 @@
 //!
 //! - **The feature is absent** looks like clap refusing the argv: `unrecognized subcommand
 //!   'project'`, exit 2, nothing on stdout. That is the expected red.
-//! - **The harness is broken** looks like the daemon never answering, `git` not resolving,
-//!   or the second daemon failing to come up on the runtime directory the first one left
-//!   behind. Those are this file's bugs and the fix is in this file.
+//! - **The harness is broken** looks like the daemon never answering or `git` not
+//!   resolving. Those are this file's bugs and the fix is in this file — including the one
+//!   that is already handled: see [`Nysiad::restart`] for the stale Unix socket a killed
+//!   daemon leaves behind, which stops its replacement binding and is a defect in
+//!   `rpc/**` rather than in this test.
 //!
 //! The steps before the restart are captured rather than asserted, so the restart happens
 //! on every run — including today's. A `.ok()` on the register step would mean the half of
@@ -207,10 +209,25 @@ impl Nysiad {
     /// is stale by trying to reach what it names, never by the pid in it.
     /// It carries its own proof that it is a restart (traps register #12). With the first
     /// daemon killed and reaped and the second not yet started, a client verb has nothing
-    /// to answer it — so if this step succeeds, something outlived the kill and the
+    /// to answer it — so if that step succeeds, something outlived the kill and the
     /// `await_ready` below would be satisfied by the daemon that was supposed to have gone.
     /// A test that reported persistence it never measured would be worse than no test, and
     /// this half runs today, on a build where the project verbs do not exist.
+    ///
+    /// # The stale Unix socket, which is not this test's subject
+    ///
+    /// On Unix the endpoint is a file, and a killed daemon skips the `Drop` that unlinks
+    /// it — so the replacement's `bind` fails with `AddrInUse`, `nysia --daemon` reads that
+    /// as "another daemon already holds the endpoint", and exits zero without serving.
+    /// Nothing on the spawn path removes the file first. **That is a real defect on the
+    /// crash-recovery path**, it belongs to whoever owns `crates/nysia-core/src/rpc/**`
+    /// (v0.3 wave C), and this harness unlinks the file itself so that a red here means the
+    /// project was forgotten rather than that the second daemon never started. Windows is
+    /// unaffected: a pipe name *is* the object and stops existing when the last handle to
+    /// it closes, so there is no such thing as a stale pipe.
+    ///
+    /// The unlink happens **after** the proof above, not before, or the proof would be
+    /// measuring a socket this file had just deleted.
     fn restart(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -224,6 +241,14 @@ impl Nysiad {
             orphaned.stdout.trim(),
             orphaned.stderr.trim()
         );
+
+        #[cfg(unix)]
+        {
+            let socket = self.runtime_dir.join(nysia_proto::unix_socket_file_name(
+                nysia_proto::PROTOCOL_VERSION,
+            ));
+            let _ = std::fs::remove_file(&socket);
+        }
 
         self.child = spawn_daemon(&self.runtime_dir);
         self.await_ready();
