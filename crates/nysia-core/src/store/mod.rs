@@ -371,8 +371,14 @@ fn restrict_to_owner(path: &Path) {
     }
     #[cfg(not(unix))]
     {
-        // Windows inherits the profile directory's ACL, which is already owner-only for
-        // everything under `%LOCALAPPDATA%`.
+        // Not enforced. A new file inherits its parent directory's ACL, and the daemon's own
+        // state directory lives under `%LOCALAPPDATA%`, which is owner-only — so the default
+        // location is covered by inheritance rather than by anything this function does.
+        // `Store::open` accepts any path, though, and a caller that passes one somewhere else
+        // gets that directory's ACL, whatever it is. Narrowing it properly means building a
+        // DACL through `SetNamedSecurityInfo`, which is a `windows-sys` dependency and a
+        // manifest change; until that is worth taking, this is a disclosed gap and not a
+        // silent one. It is the same call `rpc::endpoint` makes.
         let _ = path;
     }
 }
