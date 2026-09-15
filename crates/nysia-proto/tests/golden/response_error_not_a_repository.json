@@ -1,0 +1,13 @@
+{
+  "code": "not_a_repository",
+  "message": "that folder is not a git repository",
+  "nextCommandArgs": null,
+  "nextSteps": [
+    "Choose the folder that has the `.git` in it — usually one level down from where you are looking.",
+    "If it should be a repository, run `git init` in it and register it again."
+  ],
+  "receipt": null,
+  "requestId": "req_11111111-1111-4111-8111-111111111111",
+  "retryable": false,
+  "type": "error"
+}

@@ -54,6 +54,10 @@ use nysia_proto::handshake::{
     PidRecord, RejectReason,
 };
 use nysia_proto::identity::{Incarnation, PaneKey, SessionHandle, SessionKind};
+use nysia_proto::project::{
+    Project, ProjectForget, ProjectId, ProjectList, ProjectRegister, ProjectRegistered,
+    RegisterRefusal, Worktree,
+};
 use nysia_proto::session::{
     ExitStatus, SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary,
     ShellProfile,
@@ -136,6 +140,46 @@ fn request_id() -> RequestId {
     REQUEST
         .parse()
         .expect("the fixture request id is well formed")
+}
+
+/// The fixture project's id, parsed rather than derived.
+///
+/// `ProjectId::from_canonical_path` folds case on Windows and deliberately does not on
+/// Unix, so a derived id is a different string on the two CI legs — and a fixture that
+/// differed by platform would be a fixture nobody could commit. What the derivation does is
+/// `project.rs`'s to prove; what this pins is the shape on the wire.
+fn project_id() -> ProjectId {
+    "proj_9a8b4bcdaa346c4da0fe52b7dd15df9f"
+        .parse()
+        .expect("the fixture project id is well formed")
+}
+
+/// A project with two worktrees: the primary one, and a branch carrying a session.
+fn project() -> Project {
+    Project {
+        id: project_id(),
+        name: "nysia".to_owned(),
+        group: Project::DEFAULT_GROUP.to_owned(),
+        worktrees: vec![
+            Worktree {
+                branch: "main".to_owned(),
+                is_primary: true,
+                sessions: Vec::new(),
+            },
+            Worktree {
+                branch: "Shironex/projects-on-the-wire".to_owned(),
+                is_primary: false,
+                sessions: vec![SessionSummary {
+                    handle: handle(),
+                    pane_key: pane(),
+                    kind: SessionKind::Agent,
+                    title: "claude".to_owned(),
+                    created_at_ms: CREATED_AT_MS,
+                    exit_status: None,
+                }],
+            },
+        ],
+    }
 }
 
 fn identity() -> DaemonIdentity {
@@ -562,6 +606,87 @@ goldens! {
         changed: StatusTarget::Subagent { agent_id: AGENT_ID.to_owned() },
         notify: Notify::Permitted,
     };
+
+    request_project_register: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::ProjectRegister(ProjectRegister {
+            // Forward slashes and no drive letter, so the fixture is one document on both
+            // runners. What a path *means* is the daemon's business; what the wire carries
+            // is a string, and that is what this pins.
+            path: "/src/nysia".into(),
+        }),
+    };
+
+    request_project_list: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::ProjectList(ProjectList {}),
+    };
+
+    request_project_forget: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::ProjectForget(ProjectForget { id: project_id() }),
+    };
+
+    response_project_register: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::ProjectRegister(ProjectRegistered {
+            project: project(),
+            already_registered: false,
+        }),
+    )
+    .with_receipt(MutationReceipt { request_id: request_id(), replayed: false });
+
+    // §3.2's idempotency, and the one fixture that shows `alreadyRegistered` and `replayed`
+    // are different questions: this is a *first* attempt — no retry id, `replayed: false` —
+    // that found the path already registered by somebody else, days ago.
+    response_project_register_already: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::ProjectRegister(ProjectRegistered {
+            project: project(),
+            already_registered: true,
+        }),
+    )
+    .with_receipt(MutationReceipt { request_id: request_id(), replayed: false });
+
+    response_project_list: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::ProjectList { projects: vec![project()] },
+    );
+
+    response_project_forget: ResponseEnvelope =
+        ResponseEnvelope::new(request_id(), ResponsePayload::ProjectForget)
+            .with_receipt(MutationReceipt { request_id: request_id(), replayed: false });
+
+    // The three refusals §3.2 asks to be tellable apart. Fixtures rather than unit
+    // assertions because "tellable apart" is a claim about what a *peer* reads: the code it
+    // branches on and the steps it shows are the whole answer, and a reworded step that
+    // dropped one is a change somebody should see in a diff.
+    response_error_not_a_repository: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::Error(RegisterRefusal::NotARepository.into_envelope()),
+    );
+
+    // Eight repositories with five named: the cap, and the total stated beside it.
+    response_error_many_repositories: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::Error(
+            RegisterRefusal::ManyRepositories {
+                found: ["nysia", "orca", "valve", "nightcore", "kirei", "pstack", "vt", "relay"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            }
+            .into_envelope(),
+        ),
+    );
+
+    response_error_path_unreadable: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::Error(RegisterRefusal::Unreadable.into_envelope()),
+    );
 
     // The rule §2.1 puts in bold, pinned where a client actually reads it.
     agent_status_frame_boundary: AgentStatusChange = AgentStatusChange {
