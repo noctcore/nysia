@@ -21,6 +21,7 @@
 //! Wave 0 scaffolding. Every module below is a documented placeholder that states what it
 //! will own and which wave fills it in. Nothing here reads a PTY yet.
 
+pub mod agent;
 pub mod git;
 pub mod pty;
 pub mod rpc;
