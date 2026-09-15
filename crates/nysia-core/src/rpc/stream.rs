@@ -511,6 +511,17 @@ impl StreamRegistry {
         })
     }
 
+    /// The connection a client id currently names, if it has one bound.
+    ///
+    /// For a caller that has to name a *connection* while holding only a client id — the
+    /// agent-status subscription keeps its list by connection, because an id means nothing
+    /// off its own connection and a client that reloaded must not have its new subscription
+    /// released by its old one's unsubscribe.
+    #[must_use]
+    pub fn current(&self, client: &ClientId) -> Option<ConnectionKey> {
+        self.lock().current.get(client.as_str()).copied()
+    }
+
     /// Close and forget a stream on `client`'s current connection, reporting whether it was
     /// there.
     pub fn detach(&self, client: &ClientId, stream_id: StreamId) -> bool {

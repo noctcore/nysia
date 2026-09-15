@@ -63,9 +63,50 @@ pub(crate) trait IntoEnvelope {
     fn into_envelope(self) -> ErrorEnvelope;
 }
 
+/// A store failure, as the caller of a status verb meets it.
+///
+/// This impl lives here rather than beside [`crate::store::StoreError`] — which is where the
+/// others live, and where this one belongs — because `store/**` is another worker's file. The
+/// trait is this crate's, so the orphan rule permits it; the reason it is not next to its
+/// type is ownership, not design, and it should move when the two are in one hand.
+///
+/// **Nothing in the message carries a row.** `StoreError`'s own variants name an action and a
+/// path and never a payload, and a `waiting` row's question is a secret the same way
+/// scrollback is (trap 13).
+impl IntoEnvelope for crate::store::StoreError {
+    fn into_envelope(self) -> ErrorEnvelope {
+        envelope(
+            ErrorCode::Internal,
+            self.to_string(),
+            "retry the verb; a hook that cannot be recorded is spooled and drained at the \
+             next daemon start",
+            &[
+                "check that the daemon's runtime directory is writable and not full",
+                "see docs/plans/v0.2-delivery-plan.md §2.3 for what the spool guarantees",
+            ],
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_store_failure_says_what_happens_to_the_status_that_was_lost() {
+        // §6.2 at the layer a hook meets: a caller told only "it failed" cannot tell whether
+        // the status is gone or merely late, and those need opposite reactions.
+        let envelope = crate::store::StoreError::Poisoned.into_envelope();
+        assert_eq!(envelope.code(), &ErrorCode::Internal);
+        assert!(
+            envelope
+                .next_steps()
+                .iter()
+                .any(|step| step.contains("spooled")),
+            "got {:?}",
+            envelope.next_steps()
+        );
+    }
 
     #[test]
     fn every_envelope_carries_at_least_one_step() {

@@ -19,11 +19,13 @@
 //! better than handing the caller a shape that happens to deserialise.
 
 use nysia_proto::{
-    ClientId, ClientRole, DaemonIdentity, ErrorCode, ErrorEnvelope, HelloRequest, HelloResponse,
-    PROTOCOL_VERSION, RejectReason, RequestEnvelope, RequestId, RequestPayload, ResponseEnvelope,
-    ResponsePayload, SessionClose, SessionCreate, SessionCreated, SessionHandle, SessionList,
-    SessionSummary, StreamAttach, StreamAttached, StreamDetach, StreamId, TerminalRead,
-    TerminalReadResult, TerminalResize, TerminalSend, TerminalWait, TerminalWaitResult,
+    AgentHook, AgentStatus, AgentStatusGet, AgentStatusList, AgentStatusSubscribe,
+    AgentStatusSubscribed, AgentStatusUnsubscribe, ClientId, ClientRole, DaemonIdentity, ErrorCode,
+    ErrorEnvelope, HelloRequest, HelloResponse, PROTOCOL_VERSION, PaneKey, RejectReason,
+    RequestEnvelope, RequestId, RequestPayload, ResponseEnvelope, ResponsePayload, SessionClose,
+    SessionCreate, SessionCreated, SessionHandle, SessionList, SessionSummary, StreamAttach,
+    StreamAttached, StreamDetach, StreamId, TerminalRead, TerminalReadResult, TerminalResize,
+    TerminalSend, TerminalWait, TerminalWaitResult,
 };
 
 use crate::rpc::control::{ControlError, ControlReader, ControlWriter};
@@ -390,6 +392,97 @@ impl Client {
         {
             ResponsePayload::StreamDetach => Ok(()),
             other => Err(mismatched("stream_detach", &other)),
+        }
+    }
+
+    /// Hand the daemon a hook event (§2.1).
+    ///
+    /// The answer is a receipt and nothing more: `nysia hook` has already printed `{}` and
+    /// the agent is no longer waiting on any of this. It is still worth having, because a
+    /// mutation that reported nothing could not be retried safely — and retrying, by way of
+    /// the disk spool, is what §2.3 is about.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`]. A failure here is the caller's cue to spool.
+    pub async fn agent_hook(&mut self, request: AgentHook) -> Result<(), ClientError> {
+        match self.request(RequestPayload::AgentHook(request)).await? {
+            ResponsePayload::AgentHook => Ok(()),
+            other => Err(mismatched("agent_hook", &other)),
+        }
+    }
+
+    /// One pane's status, or `None` when it has none.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`].
+    pub async fn agent_status_get(
+        &mut self,
+        pane: PaneKey,
+    ) -> Result<Option<AgentStatus>, ClientError> {
+        match self
+            .request(RequestPayload::AgentStatusGet(AgentStatusGet { pane }))
+            .await?
+        {
+            ResponsePayload::AgentStatusGet { status } => Ok(status),
+            other => Err(mismatched("agent_status_get", &other)),
+        }
+    }
+
+    /// Every pane's status.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`].
+    pub async fn agent_status_list(&mut self) -> Result<Vec<AgentStatus>, ClientError> {
+        match self
+            .request(RequestPayload::AgentStatusList(AgentStatusList {}))
+            .await?
+        {
+            ResponsePayload::AgentStatusList { statuses } => Ok(statuses),
+            other => Err(mismatched("agent_status_list", &other)),
+        }
+    }
+
+    /// Start receiving status changes on this client's stream connection.
+    ///
+    /// The same shape as [`Client::stream_attach`] and on the same connection: the id comes
+    /// back here and its frames arrive there, carrying
+    /// [`FrameKind::AgentStatus`](nysia_proto::FrameKind::AgentStatus). There is no second
+    /// mechanism to open.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`]. Subscribing without a stream connection bound under the same
+    /// client id is refused, with next steps saying to open one.
+    pub async fn agent_status_subscribe(&mut self) -> Result<AgentStatusSubscribed, ClientError> {
+        match self
+            .request(RequestPayload::AgentStatusSubscribe(AgentStatusSubscribe {}))
+            .await?
+        {
+            ResponsePayload::AgentStatusSubscribe(subscribed) => Ok(subscribed),
+            other => Err(mismatched("agent_status_subscribe", &other)),
+        }
+    }
+
+    /// Stop receiving status changes, retiring the id for the life of the connection.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`].
+    pub async fn agent_status_unsubscribe(
+        &mut self,
+        stream_id: StreamId,
+    ) -> Result<(), ClientError> {
+        match self
+            .request(RequestPayload::AgentStatusUnsubscribe(
+                AgentStatusUnsubscribe { stream_id },
+            ))
+            .await?
+        {
+            ResponsePayload::AgentStatusUnsubscribe => Ok(()),
+            other => Err(mismatched("agent_status_unsubscribe", &other)),
         }
     }
 }
