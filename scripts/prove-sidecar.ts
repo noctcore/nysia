@@ -108,7 +108,7 @@ try {
   mkdirSync(empty, { recursive: true });
   writeFileSync(join(empty, WINDOW), 'a window');
   writeFileSync(join(empty, RUNTIME), '');
-  expectTrips('a runtime that is an empty file', empty, 'empty');
+  expectTrips('a runtime that is an empty file', empty, 'is empty, so');
 
   // And the shape it is meant to accept, so the proof is not satisfied by a check that
   // refuses everything.
