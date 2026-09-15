@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
+    "dev": "cargo build -p nysia && tauri dev",
     "build": "tauri build --config src-tauri/tauri.bundle.conf.json",
     "tauri": "tauri"
   },
