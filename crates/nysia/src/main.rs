@@ -25,6 +25,7 @@
 mod cli;
 mod daemon;
 mod hook;
+mod log;
 mod verbs;
 
 use std::io::Write;
@@ -39,10 +40,9 @@ const EXIT_FAILED: u8 = 1;
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("NYSIA_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        // `NYSIA_LOG`, with the terminal crates held down afterwards so raising the level does
+        // not also switch off what keeps PTY bytes out of the file. See `log`.
+        .with_env_filter(crate::log::filter())
         // Logs never go to stdout. Stdout is the verb's result, and a log line in the middle
         // of it is a parse error for whoever is reading.
         .with_writer(std::io::stderr)

@@ -62,23 +62,68 @@
 //!   a rendered frame's contents;
 //! - **no keystrokes** — `TerminalSend.text` is what the user typed and may be a password;
 //! - **no `tool_input`** and no `question`, which is the same field by another name;
-//! - **no environment or working directory** — `SessionCreate.envOverrides` is where a token
-//!   reaches a shell, and `cwd` names a person's disk;
+//! - **no session environment or working directory** — `SessionCreate.envOverrides` is where
+//!   a token reaches a shell, and a session's `cwd` names what a person is working on. Nysia's
+//!   *own* runtime paths are exempt and are logged: the log says where it is, and a reader who
+//!   has the file already has the directory it is in. The exemption is that narrow on purpose
+//!   — it covers the endpoint, the runtime directory and the log, and nothing a session chose;
 //! - **no request or response bodies at all.** A verb's *name*, a handle, a pane key, a
 //!   stream id, a byte count and a boolean are the whole vocabulary.
 //!
-//! That is not a convention anybody has to remember. The window's log path takes a closed
-//! set of typed fields and no free-text string, so there is nowhere for a payload to be put
-//! — see `nysia-desktop`'s `commands` module, where
-//! `a_verbs_name_is_logged_and_its_payload_is_not` holds it.
+//! Nothing in Nysia has to remember that. The window's log path takes a closed set of typed
+//! fields and no free-text string, so there is nowhere for a payload to be put — see
+//! `nysia-desktop`'s `commands` module, where `a_verbs_name_is_logged_and_its_payload_is_not`
+//! holds it.
 //!
-//! The files are confined as well as scrubbed: the runtime directory is already owner-only,
-//! and [`restrict_to_owner`] puts `0600` on the log itself so the confinement does not rest
-//! on the directory alone.
+//! ## The rule binds the crates Nysia links, not only the code it writes
+//!
+//! A rule that covered only our own `tracing::` calls would have been a convention with a
+//! hole under it, and the hole was real. Nysia links a VT, and the VT's own logging prints
+//! terminal bytes:
+//!
+//! - `vte-0.15.0/src/ansi.rs:1341` — `debug!("[unhandled osc_dispatch]: [{}] …")`, which is
+//!   every byte of an OSC parameter the parser did not handle, verbatim.
+//! - `alacritty_terminal-0.26.0/src/term/mod.rs:2222` — `trace!("Setting title to '{title:?}'")`,
+//!   and a shell's window title is routinely the working directory.
+//!
+//! Both use the `log` crate, which reaches the subscriber through `tracing-log`. Both are
+//! silent at `info`, so the shipped default never leaked — but they are loud at `debug` and
+//! `trace`, which are the levels a person sets *because* they are debugging and are about to
+//! send somebody the file. That is the worst possible way round.
+//!
+//! [`CONFINED_TARGETS`] is the answer, and it is why the sentence above is a rule rather than
+//! an aspiration.
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+
+/// Targets whose own logging carries terminal bytes, and the level each is held to.
+///
+/// `tracing_subscriber::EnvFilter` directives, applied **after** the user's `NYSIA_LOG` by
+/// every binary that installs a subscriber. A target-specific directive is more specific than
+/// a bare level, so these win over `NYSIA_LOG=debug`; adding one that names the same target
+/// replaces the user's, so they win over `NYSIA_LOG=vte=trace` as well. Both halves are held
+/// by `the_confinement_survives_a_user_who_asks_for_everything` in `nysia`'s `log` module.
+///
+/// That ordering is the whole point, and it is CLAUDE.md §6: *a security default that an
+/// ordinary caller can undo is not a default, it is a suggestion.* The previous arrangement
+/// let `NYSIA_LOG` replace the filter wholesale, so raising the level to debug something
+/// silently switched off a confinement the person did not know was there.
+///
+/// # Why these two, and why at these levels
+///
+/// See the module docs for the two call sites and what they print. `vte` is `off` rather than
+/// `warn` because every line it emits at any level is parser diagnostics about bytes — there
+/// is nothing in it worth keeping. `alacritty_terminal` is `warn` rather than `off` because
+/// its errors are worth having and it is only `trace` that prints the title.
+///
+/// # Adding to this list
+///
+/// A crate belongs here when *its own* logging can print bytes that came off a PTY. That is a
+/// question about the dependency's source, not about how Nysia calls it, so the entry should
+/// arrive with a file and a line the way the two above did.
+pub const CONFINED_TARGETS: &[&str] = &["vte=off", "alacritty_terminal=warn"];
 
 /// How large one log file may get before it is rotated: 8 MiB.
 ///

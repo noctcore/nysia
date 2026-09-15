@@ -40,6 +40,14 @@
 //! bodies. On this side that is structural rather than remembered —
 //! [`crate::commands`] logs a verb's *name* and never its payload, and the one entry point
 //! the webview can reach takes a name from a closed list and two numbers.
+//!
+//! The rule binds the crates this process links as well as the code it writes, so
+//! [`log_file::CONFINED_TARGETS`] is layered over whatever `NYSIA_LOG` asked for. Under D-7
+//! the terminal state lives in the daemon and this process runs no VT, so nothing here is
+//! expected to reach those targets — the list is applied anyway, because "this binary happens
+//! not to call it today" is the kind of premise that stops being true without anybody
+//! noticing, and the whole point of the rule is that it does not depend on remembering.
+//! `nysia`'s own `log` module is where the confinement is tested; this applies the same list.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -64,8 +72,10 @@ const TRIM_INTERVAL: Duration = Duration::from_secs(30);
 /// diagnostics file would have turned a nuisance into an outage — and the first thing anybody
 /// would want in order to debug *that* is the log it declined to open.
 pub fn install() -> Option<PathBuf> {
-    let filter = tracing_subscriber::EnvFilter::try_from_env("NYSIA_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let filter = confine(
+        tracing_subscriber::EnvFilter::try_from_env("NYSIA_LOG")
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    );
 
     let opened = Endpoint::from_env()
         .map_err(|err| format!("the runtime directory could not be named: {err}"))
@@ -88,6 +98,9 @@ pub fn install() -> Option<PathBuf> {
             Some(path)
         }
         Err(why) => {
+            // The same filter, confinement included. A window that fell back to stderr is
+            // still a window whose terminal crates must not print bytes — and on a dev machine
+            // that stderr is a scrollback somebody may paste.
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_writer(std::io::stderr)
@@ -99,6 +112,19 @@ pub fn install() -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// Hold the terminal crates down, whatever `NYSIA_LOG` asked for.
+///
+/// Applied *after* the user's filter, so raising the level to debug something does not also
+/// switch off the rule that keeps PTY bytes out of the file (CLAUDE.md §6). A directive that
+/// does not parse is skipped rather than panicking a window at startup;
+/// `every_confined_directive_parses` in `nysia`'s `log` module is what stops one shipping.
+fn confine(filter: tracing_subscriber::EnvFilter) -> tracing_subscriber::EnvFilter {
+    log_file::CONFINED_TARGETS
+        .iter()
+        .filter_map(|directive| directive.parse().ok())
+        .fold(filter, tracing_subscriber::EnvFilter::add_directive)
 }
 
 /// Both sinks at once: the log file, and the stderr a developer is watching.
