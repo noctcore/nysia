@@ -236,13 +236,17 @@ fn next_word(rest: &str) -> Option<&str> {
 ///
 /// # Errors
 ///
-/// Returns [`HookError::HooksNotAnObject`] when `hooks` is present but is not an object, so
-/// that a settings file shaped in a way this code does not understand is reported rather
-/// than quietly not installed into.
+/// Returns [`HookError::HooksNotAnObject`] when `hooks` is present but is not an object, and
+/// [`HookError::EventNotAnArray`] when one of the twelve events holds something other than
+/// the array of groups the schema calls for — so that a settings file shaped in a way this
+/// code does not understand is reported rather than quietly overwritten.
 pub(in crate::agent) fn install(
     document: &mut Document,
     nysia: &Path,
 ) -> Result<HookChange, HookError> {
+    // Before anything is touched. `purge` mutates the document in place, so a refusal that
+    // came after it would leave a half-edited tree behind for the caller to write back.
+    refuse_unrecognised_events(&document.value)?;
     let Purged { removed, positions } = purge(document)?;
 
     let root = &mut document.value;
@@ -266,7 +270,11 @@ pub(in crate::agent) fn install(
                 let at = groups.len().min(was);
                 groups.insert(at, fresh);
             }
-            _ => table.set(event, Json::Array(vec![fresh])),
+            None => table.set(event, Json::Array(vec![fresh])),
+            // Refused above, and `purge` leaves a value it does not recognise alone, so this
+            // is unreachable. It is an error rather than a fallthrough because the
+            // fallthrough is what destroyed the value: `set` replaced whatever was there.
+            Some(_) => return Err(HookError::EventNotAnArray { event }),
         }
     }
     Ok(HookChange {
@@ -274,6 +282,31 @@ pub(in crate::agent) fn install(
         removed,
         wrote: false,
     })
+}
+
+/// Refuse a settings file whose events hold something this code would have to overwrite.
+///
+/// Only the twelve this module writes. An event Nysia knows nothing about may hold anything
+/// at all — it is none of our business and nothing here touches it.
+///
+/// Install refuses; uninstall does not, and the asymmetry is deliberate. Removing hooks from
+/// a value we do not recognise means removing nothing from it, which is both correct and
+/// harmless, and refusing there would leave a user unable to turn the setting off because of
+/// a key we were never going to edit.
+fn refuse_unrecognised_events(root: &Json) -> Result<(), HookError> {
+    let Some(table) = root.get(HOOKS) else {
+        return Ok(());
+    };
+    if !matches!(table, Json::Object(_)) {
+        return Err(HookError::HooksNotAnObject);
+    }
+    for event in EVENTS {
+        match table.get(event) {
+            None | Some(Json::Array(_)) => {}
+            Some(_) => return Err(HookError::EventNotAnArray { event }),
+        }
+    }
+    Ok(())
 }
 
 /// Remove every managed hook, and every container that only existed to hold one.
