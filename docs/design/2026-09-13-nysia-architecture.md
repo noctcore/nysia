@@ -391,10 +391,18 @@ Three screens are specified: **Session**, **Tasks**, **Settings › Agents**.
 |---|---|---|
 | **v0.1** | Daemon + socket protocol · PTY sessions (shells) · Rust VT state · one multiplexed Channel · projects sidebar · tabs · Ember/Graphite + accent · Settings: General + Appearance | **The walking skeleton**: kill the UI, the shell survives; reattach, scrollback replays. If this does not work, nothing else matters. |
 | **v0.2** | Claude agent sessions · hook install/uninstall · status → sidebar + tabs · notifications | The design's live status dots. |
-| **v0.3** | GitHub Issues view · `Start →` creates branch-keyed worktree + session + tab | The first thing that is not a terminal. |
+| **v0.3** | **Projects: register a folder, persist it, serve it** · GitHub Issues view · `Start →` creates branch-keyed worktree + session + tab | The first thing that is not a terminal. |
 | **v0.4** | Worktree manager · merge/diff/discard · usage meter (statusline shim) | |
 | **v0.5** | Orchestration verb surface · `nysia agent-context --json` · worker preamble · `land` | The differentiator. |
 | **v0.6+** | Second provider (Codex) → extract the trait · browser tab · relay + mobile approvals | |
+
+**Project registration moved into v0.3 (2026-09-15).** It was written into v0.4 beside the
+worktree manager, and the sidebar's disabled `+` still says so. That ordering was wrong: v0.3's
+`Start →` creates a **branch-keyed worktree in a project**, so it cannot be built before a
+project exists. Today the sidebar's list is the web mock's seed — `nysia-proto` carries no
+project type at all and the daemon has never heard of one. Registration is therefore the first
+thing v0.3 builds, and the Issues view sits on top of it. Browse-a-folder is the path that
+unblocks the rest; clone-from-URL and create-new-folder are follow-ons, not prerequisites.
 
 **v0.1 must include the daemon split.** Retrofitting a process boundary is the refactor measured on nightcore this morning: 98 of 322 files threading a god-object. A week now; a month later, and realistically never.
 
