@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 
 import { useCommands, useSnapshot } from '../store/hooks';
-import { GLYPH } from '../ui/glyphs';
+import { GLYPH, launcherGlyph } from '../ui/glyphs';
 import { SectionLabel } from '../ui/SectionLabel';
 import { useDismiss } from '../ui/useDismiss';
 
@@ -13,6 +13,13 @@ import { useDismiss } from '../ui/useDismiss';
  * store data, not a constant here — which shells exist on the machine is something only
  * the daemon can answer, and on Windows that answer is the difference between pwsh, cmd,
  * WSL and Git Bash being offered or not.
+ *
+ * Which is why the glyph comes from `launcherGlyph` and not from `kind`. Reading `kind`
+ * gave all four shells `>_` and left the hint at the far end of the row doing the entire
+ * job of telling them apart (#73) — in the one menu whose whole purpose is that
+ * distinction. The lookup keys off the launcher id, which is the same closed set
+ * `DaemonStore.profileFor` switches on; see `ui/glyphs.ts` for why each shell wears what
+ * it wears.
  */
 export function NewTabButton() {
   const { launchers } = useSnapshot();
@@ -61,7 +68,7 @@ export function NewTabButton() {
                     aria-hidden="true"
                     className="text-fg2 w-4 text-center font-mono text-[11px]"
                   >
-                    {item.kind === 'agent' ? GLYPH.agent : GLYPH.shell}
+                    {launcherGlyph(item.id, item.kind)}
                   </span>
                   <span className="flex-1">{item.label}</span>
                   <span className="text-fg3 font-mono text-[11px]">{item.hint}</span>
