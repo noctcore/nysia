@@ -47,7 +47,7 @@ pnpm install
 ### Running it
 
 ```
-pnpm dev          # the app: tauri dev, which starts the vite server for you
+pnpm dev          # the app: builds the runtime if it is missing, then tauri dev (which starts vite)
 pnpm dev:web      # just the webview, at http://localhost:5173
 pnpm build        # the web frontend into apps/web/dist
 pnpm build:app    # the bundled desktop app
