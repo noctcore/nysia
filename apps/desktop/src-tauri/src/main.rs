@@ -24,18 +24,17 @@ mod commands;
 mod daemon;
 #[cfg(test)]
 mod interop;
+mod log;
 mod state;
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("NYSIA_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    // Both a file beside the daemon's own log and stderr — a packaged Windows build has no
+    // stderr, so before this the window's half of a failure was unreadable in every release.
+    // It never fails: a window that would not start over a diagnostics file would be worse
+    // than one with no diagnostics. See `log`.
+    let _log = log::install();
 
     // The window chrome is drawn by the webview on every platform (decorations are off in
     // tauri.conf.json), because the design uses the same custom titlebar everywhere.
@@ -60,6 +59,7 @@ fn main() -> ExitCode {
             commands::terminal_send,
             commands::terminal_resize,
             commands::host_platform,
+            commands::client_log,
         ]);
 
     match app.run(tauri::generate_context!()) {
