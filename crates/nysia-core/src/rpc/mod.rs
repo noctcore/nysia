@@ -15,8 +15,6 @@
 //! | [`endpoint`] | where the daemon listens, and the lease, lock and log beside it |
 //! | [`spool`] | the per-pane JSONL a hook writes when no daemon will take its status |
 //! | [`agent_status`] | §2's ingest, persistence and subscription, over [`crate::store`] |
-//! | [`spool`] | the per-pane JSONL a hook writes when no daemon will take its status |
-//! | [`agent_status`] | §2's ingest, persistence and subscription, over [`crate::store`] |
 //! | [`discovery`] | connect, or spawn one daemon and only one (§12 Q5) |
 //! | [`transport`] | binding, dialling, and the platform difference between a socket and a pipe |
 //! | [`peer`] | who the kernel says is calling, and which session they descend from (§3.2) |
@@ -103,8 +101,7 @@ pub use endpoint::{
 };
 pub use lease::{LeaseError, PidRecordFile};
 pub use peer::{CallerSession, PeerCredentials, PeerError, ancestry, parent_of};
-pub use server::{Daemon, DaemonConfig, ServerError};
-pub use spool::{Drained, SpoolError};
+pub use server::{Daemon, DaemonConfig, STORE_FILE, ServerError};
 pub use spool::{Drained, SpoolError};
 pub use session::{OwnedSession, PANE_KEY_VAR, SessionError, SessionRegistry};
 pub use stream::{
