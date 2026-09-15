@@ -38,6 +38,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use nysia_proto::agent::{
+    AgentHook, AgentState, AgentStatus, AgentStatusChange, AgentStatusGet, AgentStatusList,
+    AgentStatusRow, AgentStatusSubscribe, AgentStatusSubscribed, AgentStatusUnsubscribe, HookEvent,
+    HookEventName, Notify, NotifySuppressed, StatusTarget, UnixMillis,
+};
 use nysia_proto::credit::{CreditAck, CreditFrame, CreditGrant, CreditWindow};
 use nysia_proto::envelope::{
     MutationReceipt, RequestEnvelope, RequestId, RequestPayload, ResponseEnvelope, ResponsePayload,
@@ -65,6 +70,59 @@ const REQUEST: &str = "req_11111111-1111-4111-8111-111111111111";
 const RETRY: &str = "req_22222222-2222-4222-8222-222222222222";
 const NONCE: &str = "9f8e7d6c-5b4a-4392-8180-7f6e5d4c3b2a";
 const CREATED_AT_MS: u64 = 1_757_721_600_000;
+
+/// The one subagent the roster fixtures carry.
+const AGENT_ID: &str = "agent_7";
+
+/// A `PreToolUse{tool_name:"AskUserQuestion"}` carrying a question, which is the one event
+/// that exercises every optional field at once: the tool name §2.1 branches on, the verbatim
+/// payload, and a subagent id.
+fn asking() -> HookEvent {
+    HookEvent {
+        hook_event_name: HookEventName::PreToolUse,
+        tool_name: Some("AskUserQuestion".to_owned()),
+        is_interrupt: false,
+        source: None,
+        trigger: None,
+        agent_id: Some(AGENT_ID.to_owned()),
+        tool_input: Some(serde_json::json!({
+            "question": "Which migration should run first?",
+            "options": ["0001_init", "0002_status"],
+        })),
+    }
+}
+
+/// The lead's row: the pane is `done`, with nothing waiting and nothing restored.
+fn lead_row() -> AgentStatusRow {
+    AgentStatusRow {
+        pane: pane(),
+        state: AgentState::Done,
+        question: None,
+        is_interrupt: false,
+        session_boundary: false,
+        agent_id: None,
+        observed_at: UnixMillis(CREATED_AT_MS),
+        restored_unconfirmed: false,
+    }
+}
+
+/// One roster entry, which is the same eight fields with an `agentId` filled in.
+fn subagent_row() -> AgentStatusRow {
+    AgentStatusRow {
+        state: AgentState::Waiting,
+        question: asking().tool_input,
+        agent_id: Some(AGENT_ID.to_owned()),
+        ..lead_row()
+    }
+}
+
+/// A pane's whole status: the lead, and one subagent waiting on a question.
+fn agent_status() -> AgentStatus {
+    AgentStatus {
+        lead: lead_row(),
+        subagents: vec![subagent_row()],
+    }
+}
 
 fn handle() -> SessionHandle {
     HANDLE.parse().expect("the fixture handle is well formed")
@@ -415,6 +473,105 @@ goldens! {
     });
 
     credit_ack: CreditFrame = CreditFrame::Ack(CreditAck { bytes: 196_608 });
+
+    // The one frame on this wire whose field names are Claude's rather than Nysia's. A
+    // fixture is the only thing that catches a well-meant `rename_all = "camelCase"`, which
+    // round-trips in Rust and stops reading every payload Claude writes.
+    request_agent_hook: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::AgentHook(AgentHook {
+            pane_hint: Some(pane()),
+            event: asking(),
+        }),
+    };
+
+    // The spool's case: a record that could not be sent when it was written, replayed with
+    // the id it was first attempted under, so the daemon records one state change.
+    request_agent_hook_retry: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: Some(RETRY.parse().expect("the fixture retry id is well formed")),
+        payload: RequestPayload::AgentHook(AgentHook {
+            pane_hint: None,
+            event: HookEvent {
+                hook_event_name: HookEventName::Stop,
+                is_interrupt: true,
+                ..HookEvent::new(HookEventName::Stop)
+            },
+        }),
+    };
+
+    request_agent_status_get: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::AgentStatusGet(AgentStatusGet { pane: pane() }),
+    };
+
+    request_agent_status_list: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::AgentStatusList(AgentStatusList {}),
+    };
+
+    request_agent_status_subscribe: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::AgentStatusSubscribe(AgentStatusSubscribe {}),
+    };
+
+    request_agent_status_unsubscribe: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::AgentStatusUnsubscribe(AgentStatusUnsubscribe {
+            stream_id: StreamId(4),
+        }),
+    };
+
+    response_agent_hook: ResponseEnvelope =
+        ResponseEnvelope::new(request_id(), ResponsePayload::AgentHook)
+            .with_receipt(MutationReceipt { request_id: request_id(), replayed: false });
+
+    response_agent_status_get: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::AgentStatusGet { status: Some(agent_status()) },
+    );
+
+    // A pane nothing has reported for. The ordinary case for a shell, and for an agent
+    // whose first hook has not fired — an absent answer rather than an error.
+    response_agent_status_get_absent: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::AgentStatusGet { status: None },
+    );
+
+    response_agent_status_list: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::AgentStatusList { statuses: vec![agent_status()] },
+    );
+
+    response_agent_status_subscribe: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::AgentStatusSubscribe(AgentStatusSubscribed { stream_id: StreamId(4) }),
+    )
+    .with_receipt(MutationReceipt { request_id: request_id(), replayed: false });
+
+    // The payload of a `FrameKind::AgentStatus` frame. It has no envelope, so this is the
+    // only fixture that pins what a subscriber reads — including the notification decision,
+    // which is on the wire precisely so the window does not have to re-derive it.
+    agent_status_frame: AgentStatusChange = AgentStatusChange {
+        status: agent_status(),
+        changed: StatusTarget::Subagent { agent_id: AGENT_ID.to_owned() },
+        notify: Notify::Permitted,
+    };
+
+    // The rule §2.1 puts in bold, pinned where a client actually reads it.
+    agent_status_frame_boundary: AgentStatusChange = AgentStatusChange {
+        status: AgentStatus::new(AgentStatusRow {
+            session_boundary: true,
+            ..lead_row()
+        }),
+        changed: StatusTarget::Lead,
+        notify: Notify::Suppressed { reason: NotifySuppressed::SessionBoundary },
+    };
 }
 
 /// Trap 12: every gate ships with a proof that it trips.
@@ -473,7 +630,8 @@ fn the_fixture_comparison_catches_a_wire_change() {
 /// multiplexed case rather than a single-session one, and the last of them is the replay
 /// boundary — nine bytes and no payload, which is the entire message. A marker whose kind
 /// byte moved would be read as some other kind by a peer and the boundary would land in the
-/// wrong place, so it is pinned here rather than left to the enum's own round trip.
+/// wrong place, so it is pinned here rather than left to the enum's own round trip. The
+/// status frame after it is pinned for the same reason, on its own stream id.
 #[test]
 fn the_framing_still_produces_the_committed_bytes() {
     let frames = [
@@ -485,6 +643,15 @@ fn the_framing_still_produces_the_committed_bytes() {
             br#"{"outcome":"exited","code":0}"#.as_slice(),
         ),
         Frame::empty(FrameKind::ReplayEnd, StreamId(11)),
+        // Byte 7, on a stream id a subscription minted rather than an attach. It is pinned
+        // here for `ReplayEnd`'s reason and one of its own: the kind is additive only as
+        // long as it stays off session streams, so the byte a router keys that rule on is
+        // worth a golden.
+        Frame::new(
+            FrameKind::AgentStatus,
+            StreamId(12),
+            br#"{"notify":{"decision":"permitted"}}"#.as_slice(),
+        ),
     ];
     let mut wire = Vec::new();
     for frame in &frames {
