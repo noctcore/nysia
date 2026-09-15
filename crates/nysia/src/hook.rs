@@ -204,8 +204,17 @@ fn event(payload: &str, flag: Option<&str>) -> Result<HookEvent, ErrorEnvelope> 
     object.insert(EVENT_NAME.to_owned(), serde_json::Value::String(name));
 
     serde_json::from_value(document).map_err(|err| {
+        // The error's *category*, never its text. Unlike the syntax error above — which only
+        // ever names a line and a column — serde's data errors quote the value that was
+        // wrong: a payload carrying `"is_interrupt": "<a secret>"` refuses with
+        // `invalid type: string "<a secret>", expected a boolean`, and stderr is somewhere
+        // Claude can capture. Trap 13 is about a `waiting` question, and this is the same
+        // payload by another route.
         refusal(
-            format!("the hook payload is not one this build can read: {err}"),
+            format!(
+                "the hook payload is not one this build can read ({:?} error)",
+                err.classify()
+            ),
             "check the hook entry passes Claude's payload through unmodified",
         )
     })
@@ -489,6 +498,39 @@ mod tests {
         let err = read(r#"{"hook_event_name":"Stop","#, None).expect_err("truncated JSON");
         assert!(
             !err.message().contains("hook_event_name\":\"Stop"),
+            "the payload must not be echoed, got {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn a_field_of_the_wrong_type_is_refused_without_quoting_what_was_in_it() {
+        // The second echo route, and the one that is easy to miss: serde's *syntax* errors
+        // name a line and a column, but its *data* errors quote the offending value. A
+        // payload carrying `"is_interrupt": "<a secret>"` refused with
+        // `invalid type: string "<a secret>", expected a boolean` until this was narrowed to
+        // the error's category — and stderr is somewhere Claude can capture.
+        let secret = "sk-ant-not-a-real-key";
+        let err = read(
+            &format!(r#"{{"hook_event_name":"Stop","is_interrupt":"{secret}"}}"#),
+            None,
+        )
+        .expect_err("a boolean field holding a string is not readable");
+        assert!(
+            !err.message().contains(secret),
+            "the payload must not be echoed, got {}",
+            err.message()
+        );
+        assert!(!err.next_steps().is_empty());
+
+        // The same rule for `tool_input`, which is the field trap 13 is actually named for.
+        let err = read(
+            &format!(r#"{{"hook_event_name":"Stop","agent_id":{{"nested":"{secret}"}}}}"#),
+            None,
+        )
+        .expect_err("an object where a string belongs is not readable");
+        assert!(
+            !err.message().contains(secret),
             "the payload must not be echoed, got {}",
             err.message()
         );
