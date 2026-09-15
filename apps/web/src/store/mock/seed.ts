@@ -129,6 +129,13 @@ export const SEED_ACTIVE_TAB = KIREI_PANE;
  *
  * Which shells exist on the machine is something only the daemon can answer, which is why
  * this is store data and not a constant in the menu component.
+ *
+ * The four shell ids are the ones `DaemonStore.profileFor` switches on, spelled exactly as
+ * it spells them. They had drifted — `shell.gitbash` against the daemon's `shell.git_bash`,
+ * and a WSL row hinting `bash` rather than `wsl` — which cost nothing visible until the `+`
+ * menu started keying its glyph off the id, and then only in the mock. The real cost was
+ * always the other one: a fixture whose identifiers disagree with the thing it stands in
+ * for makes every test that passes against it prove something slightly false.
  */
 export const SEED_LAUNCHERS: readonly LauncherGroup[] = [
   {
@@ -145,8 +152,8 @@ export const SEED_LAUNCHERS: readonly LauncherGroup[] = [
     items: [
       { id: 'shell.pwsh', label: 'PowerShell 7', hint: 'pwsh', kind: 'shell' },
       { id: 'shell.cmd', label: 'Command Prompt', hint: 'cmd', kind: 'shell' },
-      { id: 'shell.wsl', label: 'WSL · Ubuntu', hint: 'bash', kind: 'shell' },
-      { id: 'shell.gitbash', label: 'Git Bash', hint: '', kind: 'shell' },
+      { id: 'shell.git_bash', label: 'Git Bash', hint: 'bash', kind: 'shell' },
+      { id: 'shell.wsl', label: 'WSL', hint: 'wsl', kind: 'shell' },
     ],
   },
 ];
