@@ -10,8 +10,8 @@
 //!
 //! §3.2. An [`AgentHook`](nysia_proto::AgentHook)'s `pane_hint` is a hint and the ancestry
 //! walk is the proof, so the pane is resolved from the session the caller descends from and
-//! the hint is only ever compared against it. A daemon that took the hint when it had no ancestry would
-//! be one that lets any process on the machine write status into any pane — which is the
+//! the hint is only ever compared against it. A daemon that took the hint when it had no
+//! ancestry would let any process on the machine write status into any pane — which is the
 //! exact sentence `crates/nysia/tests/agent_status.rs` gives as its reason for running the
 //! hook *inside* the session rather than spawning it from the test harness.
 //!
