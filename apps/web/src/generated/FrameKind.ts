@@ -3,4 +3,4 @@
 /**
  * What a frame carries, named by its first byte.
  */
-export type FrameKind = "output" | "exit" | "bell" | "osc133" | "credit" | "replay_end";
+export type FrameKind = "output" | "exit" | "bell" | "osc133" | "credit" | "replay_end" | "agent_status";
