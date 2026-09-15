@@ -20,7 +20,9 @@ pane: PaneKey,
  */
 state: AgentState, 
 /**
- * The `waiting` payload, verbatim, or absent. See [`HookEvent::question`].
+ * The `waiting` payload, verbatim, or absent. See [`HookEvent::tool_input`], which is
+ * where it comes from, and [`HookEvent::question`], which is the rule that lets it
+ * through.
  */
 question: unknown, 
 /**

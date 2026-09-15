@@ -656,7 +656,9 @@ pub struct AgentStatusRow {
     pub pane: PaneKey,
     /// What the agent is doing.
     pub state: AgentState,
-    /// The `waiting` payload, verbatim, or absent. See [`HookEvent::question`].
+    /// The `waiting` payload, verbatim, or absent. See [`HookEvent::tool_input`], which is
+    /// where it comes from, and [`HookEvent::question`], which is the rule that lets it
+    /// through.
     #[ts(type = "unknown")]
     pub question: Option<serde_json::Value>,
     /// Distinguishes `interrupted` from `done`.
@@ -748,7 +750,12 @@ pub enum Notify {
 pub enum NotifySuppressed {
     /// `SessionStart`: §2.1 says a session boundary must never notify.
     SessionBoundary,
-    /// A row rehydrated from the spool that no live hook has confirmed (§2.3).
+    /// A row rehydrated from the spool that no live hook has confirmed.
+    ///
+    /// §2.3: such a row is `restored_unconfirmed` and **never counts as fresh** until a live
+    /// hook arrives. A notification is the freshest possible use of a row, so suppressing one
+    /// here is that sentence applied rather than a rule added — a daemon restart must not
+    /// replay every toast the person already dismissed.
     RestoredUnconfirmed,
 }
 
