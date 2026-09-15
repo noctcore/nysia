@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { GLYPH } from '../ui/glyphs';
 import { SETTINGS_TREE, type SettingsEntry } from './nav';
 
 /*
@@ -13,8 +14,8 @@ import { SETTINGS_TREE, type SettingsEntry } from './nav';
  */
 const entries: readonly SettingsEntry[] = SETTINGS_TREE.flatMap((group) => group.entries);
 
-/** The same rule `ui/glyphs.test.ts` holds the vocabulary to, applied where it is used. */
-const EMOJI_BY_DEFAULT = /\p{Emoji_Presentation}/u;
+/** Every character the vocabulary offers, which is the only place a mark may come from. */
+const VOCABULARY: readonly string[] = Object.values(GLYPH);
 
 describe('the settings tree', () => {
   it('is the three groups design-spec.md §5 names', () => {
@@ -54,16 +55,28 @@ describe('the settings tree', () => {
     expect(blank).toEqual(['nysia-account']);
   });
 
-  it('marks every entry with a character that follows the theme', () => {
+  it('marks every entry out of the vocabulary, never with a loose character', () => {
+    /*
+     * Membership, not a second copy of the emoji rule.
+     *
+     * This file used to re-declare `/\p{Emoji_Presentation}/u` under a comment calling it
+     * "the same rule" as `ui/glyphs.test.ts`. A comment is not a mechanism: two copies
+     * drift the moment one is tightened, and the one that stayed behind keeps passing.
+     *
+     * So the rule lives in one place — over the table, where `glyphs.test.ts` holds it —
+     * and this asserts the link that makes it apply here. It is the stronger claim of the
+     * two: an emoji written straight into this file fails, and so does a lookalike
+     * hand-typed beside the vocabulary rather than taken from it.
+     */
     for (const entry of entries) {
       if (entry.glyph === null) {
         continue;
       }
       expect(
-        EMOJI_BY_DEFAULT.test(entry.glyph),
-        `${entry.id} is marked ${JSON.stringify(entry.glyph)}, which paints its own ` +
-          'colour and will not follow the theme switcher',
-      ).toBe(false);
+        VOCABULARY,
+        `${entry.id} is marked ${JSON.stringify(entry.glyph)}, which is not in GLYPH — ` +
+          'a mark written here escapes the rule the vocabulary is held to',
+      ).toContain(entry.glyph);
     }
   });
 
