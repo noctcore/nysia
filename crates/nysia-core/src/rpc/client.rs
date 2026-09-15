@@ -458,7 +458,9 @@ impl Client {
     /// client id is refused, with next steps saying to open one.
     pub async fn agent_status_subscribe(&mut self) -> Result<AgentStatusSubscribed, ClientError> {
         match self
-            .request(RequestPayload::AgentStatusSubscribe(AgentStatusSubscribe {}))
+            .request(RequestPayload::AgentStatusSubscribe(
+                AgentStatusSubscribe {},
+            ))
             .await?
         {
             ResponsePayload::AgentStatusSubscribe(subscribed) => Ok(subscribed),
