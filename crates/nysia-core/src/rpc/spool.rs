@@ -66,6 +66,25 @@
 //! drained once, at start, which is what §2.3 specifies; a drain on every connection would be
 //! a disk read on the path of every verb to catch a case that only arises when the daemon is
 //! already failing to write.
+//!
+//! # Proving these rules trip
+//!
+//! Traps register #12: every gate ships a proof that it trips. Each row below was **run
+//! against the mutation beside it** rather than asserted to be capable of failing — apply the
+//! edit, run the test from the crate directory, revert. The `hook.rs` rows live in the
+//! `nysia` crate and are listed here because the rule they hold is this module's.
+//!
+//! | Mutate | To | Turns red |
+//! |---|---|---|
+//! | [`file_stem`]'s body | `pane.to_owned()` | `a_pane_key_never_becomes_a_path` |
+//! | [`drain`]'s `remove_file` | never called | `a_row_spooled_is_a_row_drained_and_the_spool_is_then_empty` |
+//! | `hook::spool_it`'s `observed_at` | `UnixMillis(0)` | `a_status_no_daemon_will_take_is_spooled_rather_than_lost` |
+//! | `hook`'s `EXIT_FAILED` | `2` | `a_hook_never_exits_with_the_code_claude_reads_as_block` |
+//! | `hook::event`'s `trim_start_matches` | dropped | `a_byte_order_mark_in_front_of_the_payload_costs_nothing` |
+//!
+//! The last one is the only row here that was red **before** its fix rather than after it:
+//! the byte-order mark was found by running the acceptance test's `pwsh` line by hand, which
+//! is why that row is evidence rather than a demonstration.
 
 use std::fs::OpenOptions;
 use std::io::Write;
