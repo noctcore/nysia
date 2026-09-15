@@ -173,7 +173,7 @@ pub struct Daemon {
     served_anyone: AtomicBool,
     shutting_down: AtomicBool,
     idle_since: Mutex<Option<Instant>>,
-    trimming_log: Arc<AtomicBool>,
+    trimming_log: AtomicBool,
 }
 
 impl Daemon {
@@ -230,7 +230,7 @@ impl Daemon {
                 served_anyone: AtomicBool::new(false),
                 shutting_down: AtomicBool::new(false),
                 idle_since: Mutex::new(None),
-                trimming_log: Arc::new(AtomicBool::new(false)),
+                trimming_log: AtomicBool::new(false),
             }),
             listener,
         ))
@@ -374,12 +374,16 @@ impl Daemon {
         if self.trimming_log.swap(true, Ordering::AcqRel) {
             return;
         }
-        let daemon = Arc::clone(self);
+        // A guard rather than a store at the end of the closure. Every path through
+        // `trim_log` is a `?`-propagated `io::Error`, so a panic there is unlikely rather
+        // than reachable — but the cost of being wrong is that the flag is never cleared and
+        // the daemon stops trimming for the rest of its life, which under D-1 is days. That
+        // is a worse failure than the one the flag exists to prevent, and it would be silent.
+        let guard = TrimInProgress(Arc::clone(self));
         tokio::task::spawn_blocking(move || {
-            if let Err(err) = daemon.trim_log() {
+            if let Err(err) = guard.0.trim_log() {
                 tracing::warn!(%err, "could not rotate the log; it will be tried again");
             }
-            daemon.trimming_log.store(false, Ordering::Release);
         });
     }
 
@@ -705,8 +709,25 @@ impl Daemon {
             RequestPayload::SessionCreate(request) => {
                 // Spawning opens a pty and starts three threads. On a runtime worker that
                 // would stall every other session sharing it.
+                let client = caller.client_id.clone();
                 blocking(move || match sessions.create(&request) {
-                    Ok(created) => ResponsePayload::SessionCreate(created),
+                    Ok(created) => {
+                        // **One of the daemon's two correlation lines**, and `info` rather
+                        // than `debug` on purpose: a join key only a reader who already knew
+                        // to raise the level would have is not a join key. Everything the
+                        // daemon says afterwards names a handle or a stream id and nothing
+                        // else; this is what binds those to a pane. All three come off the
+                        // *answer*, never the request — see `log_file` for why the request is
+                        // not logged at any level.
+                        tracing::info!(
+                            client = %client,
+                            pane_key = %created.pane_key,
+                            handle = %created.handle,
+                            incarnation = %created.incarnation,
+                            "opened a session"
+                        );
+                        ResponsePayload::SessionCreate(created)
+                    }
                     Err(err) => ResponsePayload::Error(err.into_envelope()),
                 })
                 .await
@@ -952,6 +973,18 @@ impl Daemon {
             );
         };
         let stream_id = attached.sink.stream_id();
+        // The second correlation line, and the one that makes a stream id mean something. An
+        // id is scoped to **one stream connection** and the counter restarts with it, so two
+        // panes across a reconnect can carry the same number and time order is all a reader
+        // would otherwise have. `client` is what tells those apart, and `handle` is the key
+        // that survives everything — the window records the same handle against the same id,
+        // so the two files join on it without either needing the other's vocabulary.
+        tracing::info!(
+            client = %caller.client_id,
+            handle = %handle,
+            stream = %stream_id,
+            "routed a session onto this client's stream connection"
+        );
         *deferred = Some(Deferred::Replay(PendingReplay {
             session,
             connection: attached.connection,
@@ -1307,6 +1340,18 @@ impl Receipts {
 /// A drain that fails is logged and not fatal. The rows are the ones a hook could not hand
 /// over while this daemon was away, so losing them costs the dots they carried — where
 /// refusing to start would cost every session the daemon was about to own.
+/// Clears the trim-in-progress flag however the trim ends, a panic included.
+///
+/// See [`Daemon::spawn_log_trim`]: leaving the flag set stops trimming for the daemon's whole
+/// life, so the clearing belongs somewhere unwinding cannot skip.
+struct TrimInProgress(Arc<Daemon>);
+
+impl Drop for TrimInProgress {
+    fn drop(&mut self) {
+        self.0.trimming_log.store(false, Ordering::Release);
+    }
+}
+
 fn drain_spool(runtime_dir: &std::path::Path, status: &AgentStatusService) {
     let drained = match crate::rpc::spool::drain(runtime_dir) {
         Ok(drained) => drained,
@@ -1469,6 +1514,41 @@ mod tests {
             "the daemon rotated a file that was not its own log"
         );
         assert!(log_file::rotation_path(&log, 1).exists());
+
+        daemon.shutdown();
+        drop(listener);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    #[tokio::test]
+    async fn a_panicking_trim_does_not_stop_the_daemon_trimming_for_ever() {
+        // The failure the guard exists for, and the reason it is a guard rather than a store
+        // at the end of the closure: leaving the flag set means `spawn_log_trim` returns early
+        // every tick from then on, so the log grows unbounded again — silently, and for the
+        // daemon's whole life, which under D-1 is days. That is a worse outcome than the
+        // double rotation the flag prevents.
+        let endpoint = crate::rpc::endpoint::scratch("trimpanic");
+        let (daemon, listener) = Daemon::bind(DaemonConfig::new(endpoint.clone())).expect("binds");
+        daemon.trimming_log.store(true, Ordering::Release);
+
+        // The hook is silenced for the duration: this panic is the input, not a failure, and
+        // a backtrace in the middle of a passing run reads like one.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = TrimInProgress(Arc::clone(&daemon));
+            panic!("a trim went wrong in a way `io::Error` does not cover");
+        }));
+        std::panic::set_hook(hook);
+
+        assert!(
+            unwound.is_err(),
+            "the panic was supposed to escape the closure"
+        );
+        assert!(
+            !daemon.trimming_log.load(Ordering::Acquire),
+            "the flag survived a panicking trim, so this daemon would never trim again"
+        );
 
         daemon.shutdown();
         drop(listener);
