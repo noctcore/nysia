@@ -39,6 +39,10 @@
 //!   sidecars — which SQLite creates with the mode of the main database — are owner-only
 //!   too. Creating it afterwards would leave the WAL, which holds the most recent rows,
 //!   wider than the database it belongs to.
+//! - The path is refused if it is a **symbolic link**. `create_new` cannot tell a planted
+//!   link from an existing database, and following one would chmod `0600` onto the link's
+//!   target and open that target as the store. See [`refuse_symlink`], which also says what
+//!   the check does not cover.
 //! - `question` reaches the disk **only on a `waiting` row**. `nysia-proto` already confines
 //!   `tool_input` to `waiting` on the wire; [`status`] applies the same rule on the way in,
 //!   on the one private path both entry points share, so a row built in process rather than
@@ -61,6 +65,7 @@
 //! | `status::insert`'s question filter | dropped | `only_a_waiting_row_keeps_its_question` |
 //! | `status::live_row_at_least_as_recent`'s `restored_unconfirmed = 0` | dropped | `an_out_of_order_drain_still_lands` |
 //! | `migrate::apply`'s `migration.version <= found` guard | dropped | `opening_a_current_store_takes_no_write_lock` |
+//! | `Store::open`'s `refuse_symlink` call | dropped | `a_symlinked_database_path_is_refused` (unix) |
 //!
 //! The tests assert **literal** numbers — twenty rows, `1_800_000` milliseconds — rather
 //! than recomputing them from the constants they are checking. A test that derives its
@@ -155,6 +160,7 @@ impl Store {
         // Before `Connection::open`, so the `-wal` and `-shm` SQLite is about to create
         // inherit the mode rather than a default one.
         create_owner_only(&path).map_err(io("create", &path))?;
+        refuse_symlink(&path)?;
         restrict_to_owner(&path);
 
         let mut conn = Connection::open(&path).map_err(|source| StoreError::Sqlite {
@@ -320,6 +326,37 @@ fn create_owner_only(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Refuse a database path that is a symbolic link.
+///
+/// [`create_owner_only`] cannot catch this on its own: `create_new` answers `AlreadyExists`
+/// for an existing symlink exactly as it does for an existing file, and that answer is mapped
+/// to success because the one thing it must never do is truncate a real database. What
+/// follows would then treat the link as the file — [`restrict_to_owner`] chmods through it, so
+/// the `0600` trap 14 asks for lands on the **target**, and `Connection::open` opens that
+/// target as the database.
+///
+/// Checked unconditionally rather than under `cfg(unix)`: Windows has symbolic links too, and
+/// a check that exists on one leg is a check whose error variant the other leg never builds.
+///
+/// Not a complete defence, and not claimed as one. It is a check-then-use, so a link swapped
+/// in between [`create_owner_only`] and this line is still followed; closing that needs
+/// `O_NOFOLLOW` on the open, which is not portable and which SQLite does not expose. Both the
+/// race and the plant need write access to the daemon's state directory, which is owner-only,
+/// so this narrows an already-narrow window rather than being the thing that holds the door.
+fn refuse_symlink(path: &Path) -> Result<(), StoreError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|source| StoreError::Io {
+        action: "read the file type of",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(StoreError::Symlink {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 /// Narrow a file to its owner, best effort.
 ///
 /// Applied to a database that already existed as well as to one just created, because a file
@@ -466,6 +503,45 @@ mod tests {
                 opened.expect("a concurrent open must succeed");
             }
         });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Trap 14 again: the path itself, not its mode. `cfg(unix)` because creating a symbolic
+    /// link on Windows needs a privilege the CI runner does not have, so a cross-platform
+    /// version of this would be a test that silently does nothing on one leg. The code it
+    /// checks is not `cfg`-gated.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_database_path_is_refused() {
+        let (dir, path) = temp_db("open-symlink");
+        // The file an attacker wants narrowed, or replaced, or read.
+        let decoy = dir.join("decoy");
+        std::fs::write(&decoy, b"not a database").expect("write the decoy");
+        std::os::unix::fs::symlink(&decoy, &path).expect("plant the link");
+
+        let error = Store::open(&path).expect_err("a symlinked store path is refused");
+        assert!(
+            matches!(&error, StoreError::Symlink { path: reported } if reported == &path),
+            "unexpected error: {error}"
+        );
+
+        // And the target was left exactly as it was: not narrowed to 0600, and not opened as
+        // a database — which is what following the link would have done to it.
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::read(&decoy).expect("read the decoy"),
+            b"not a database",
+            "the link's target was opened as a database"
+        );
+        assert_ne!(
+            std::fs::metadata(&decoy)
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "the link's target was chmodded through the link"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
