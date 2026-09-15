@@ -30,6 +30,13 @@
 //! write lock **before** the version is read, so the second daemon reads the version the
 //! first one committed and applies nothing. `two_daemons_opening_a_fresh_store_both_succeed`
 //! is that race.
+//!
+//! Every step that has **work to do**, that is. A step the recorded version already covers is
+//! skipped before any transaction opens, so the common case — an open of a database already at
+//! the newest schema — takes no lock at all. Leaving that to the re-read inside the
+//! transaction would make every open of a current database queue behind whatever else is
+//! writing, and then fail once it ran out of busy timeout.
+//! `opening_a_current_store_takes_no_write_lock` is that open.
 
 use std::path::Path;
 
@@ -140,6 +147,13 @@ pub(super) fn apply(
     }
 
     for migration in migrations {
+        // The step is already in place, so there is nothing to take the write lock for. Not
+        // an optimisation: without it an already-current open queues behind any other writer
+        // for `BUSY_TIMEOUT` and then fails, which is exactly the daemon restarting to drain
+        // the spool. `opening_a_current_store_takes_no_write_lock` is that open.
+        if migration.version <= found {
+            continue;
+        }
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|source| StoreError::Sqlite {

@@ -49,7 +49,9 @@
 //! Traps register #13 — every gate ships a proof that it trips. Each rule below has a named
 //! test, and each was **run against the mutation beside it** rather than asserted to be
 //! capable of failing. To repeat one: apply the edit, run
-//! `cargo test -p nysia-core store::status::tests::<name>` from the crate directory, revert.
+//! `cargo test -p nysia-core <module>::tests::<name>` from the crate directory, revert. The
+//! module is the one the test's row names — `store::status` for the four status rules,
+//! `store` for the open.
 //!
 //! | Mutate | To | Turns red |
 //! |---|---|---|
@@ -57,6 +59,7 @@
 //! | `status::insert`'s timestamp | `row.observed_at.get() / 1000` | `a_row_at_the_staleness_boundary_reads_back_exact` |
 //! | `Store::restore_status`'s provenance | `Provenance::Live` | `a_restored_row_is_unconfirmed_whatever_the_caller_said` |
 //! | `status::insert`'s question filter | dropped | `only_a_waiting_row_keeps_its_question` |
+//! | `migrate::apply`'s `migration.version <= found` guard | dropped | `opening_a_current_store_takes_no_write_lock` |
 //!
 //! The tests assert **literal** numbers — twenty rows, `1_800_000` milliseconds — rather
 //! than recomputing them from the constants they are checking. A test that derives its
@@ -116,8 +119,10 @@ impl Store {
     /// Open, or create, the database at `path`, and bring its schema up to date.
     ///
     /// Creates the parent directory if it is missing. Safe to call concurrently on the same
-    /// path from more than one process: the migration runner takes the write lock before it
-    /// reads the version, so the loser applies nothing rather than failing.
+    /// path from more than one process: for a step that is not yet in place the migration
+    /// runner takes the write lock before it reads the version, so the loser applies nothing
+    /// rather than failing. A database already at the newest schema has no such step, and so
+    /// takes no write lock and never waits for one.
     ///
     /// # Errors
     ///
@@ -408,6 +413,41 @@ mod tests {
         let store = Store::open(&nested).expect("open");
         assert!(nested.exists());
         drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_current_store_takes_no_write_lock() {
+        // The lock a daemon must not need. `Store::open` on an already-current schema has no
+        // migration to run, so it has no reason to want the write lock — and the path that
+        // needs this most is a daemon restarting to drain the spool (§2.3), which would
+        // otherwise fail to open the store whenever anything else held the lock.
+        //
+        // `two_writers_racing_the_cap_leave_exactly_the_cap` cannot catch it: both stores are
+        // opened before any write begins, so neither open is ever contended.
+        let (dir, path) = temp_db("open-contended");
+        Store::open(&path).expect("bring the schema up to date");
+
+        // Someone else holds the write lock for longer than the busy timeout would wait.
+        let mut holder = Connection::open(&path).expect("open the holder");
+        let held = holder
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("take the write lock");
+
+        let started = std::time::Instant::now();
+        let opened = Store::open(&path);
+        let elapsed = started.elapsed();
+
+        // Release before asserting, so a failure does not leave the lock held for the rest of
+        // the test binary.
+        drop(held);
+        drop(holder);
+
+        opened.expect("an already-current open must not need the write lock");
+        assert!(
+            elapsed < BUSY_TIMEOUT,
+            "opening waited {elapsed:?}, so it queued for a lock it had no work for"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
