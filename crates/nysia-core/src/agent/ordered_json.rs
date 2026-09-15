@@ -21,11 +21,22 @@
 //!
 //! # What it preserves, and what it does not
 //!
-//! Preserved: key order at every depth, the indent string, and whether the file ended in a
-//! newline. Not preserved: anything a JSON parser is entitled to discard — the spacing
-//! inside a line, the spelling of a number (`1e3` comes back as `1000.0`), and the escape
-//! form of a string. Nothing in `settings.json` is written that way, and the hook installer's
-//! own tests prove the round trip on a real-shaped document rather than claiming it here.
+//! Preserved: key order at every depth, the indent string, **the line ending**, and whether
+//! the file ended in a newline. Not preserved: anything a JSON parser is entitled to discard
+//! — the spacing inside a line, the spelling of a number (`1e3` comes back as `1000.0`), and
+//! the escape form of a string. Nothing in `settings.json` is written that way, and the hook
+//! installer's own tests prove the round trip on a real-shaped document rather than claiming
+//! it here.
+//!
+//! The line ending is on that list because of where this runs. Windows is the primary
+//! development platform and CRLF is what an editor there writes; a settings file that went in
+//! CRLF and came back LF would show every line as changed, which is the same defect as
+//! re-sorting the keys and just as far from "as if Nysia had never touched it".
+//!
+//! A leading byte-order mark is the one layout detail that is refused rather than kept.
+//! `JSON.parse` rejects a BOM too, so a settings file carrying one is already unreadable by
+//! the agent that owns it; accepting it here would make Nysia work where Claude Code does
+//! not, and the error names it rather than leaving the reader with a column number.
 
 use std::fmt;
 
@@ -246,6 +257,8 @@ pub struct Document {
     pub value: Json,
     /// One level of indentation, as the file spelled it.
     indent: String,
+    /// The line ending the file used.
+    newline: String,
     /// Whether the file ended with a newline.
     trailing_newline: bool,
 }
@@ -260,6 +273,7 @@ impl Document {
         Ok(Self {
             value: serde_json::from_str(text)?,
             indent: detect_indent(text),
+            newline: detect_newline(text),
             trailing_newline: text.ends_with('\n'),
         })
     }
@@ -269,6 +283,7 @@ impl Document {
         Self {
             value: Json::object(),
             indent: "  ".to_owned(),
+            newline: LF.to_owned(),
             trailing_newline: true,
         }
     }
@@ -283,7 +298,28 @@ impl Document {
         if self.trailing_newline {
             text.push('\n');
         }
+        if self.newline != LF {
+            // Safe as a blunt replacement: a newline inside a string value is escaped by the
+            // serializer, so the only bare ones left are the breaks the pretty-printer put
+            // between lines.
+            text = text.replace('\n', &self.newline);
+        }
         Ok(text)
+    }
+}
+
+/// The line ending this module treats as the default.
+const LF: &str = "\n";
+
+/// Which line ending `text` was written with.
+///
+/// Decided by the first break in the file rather than by counting. A settings file with
+/// mixed endings has already been through two tools that disagreed about it, and the first
+/// is both cheap to find and what an editor opening the file would show.
+fn detect_newline(text: &str) -> String {
+    match text.find('\n') {
+        Some(at) if at > 0 && text.as_bytes()[at - 1] == b'\r' => "\r\n".to_owned(),
+        _ => LF.to_owned(),
     }
 }
 
@@ -354,6 +390,35 @@ mod tests {
         let tabbed = "{\n\t\"a\": 1\n}\n";
         let rendered = Document::parse(tabbed).expect("valid json").render();
         assert_eq!(rendered.expect("renders"), tabbed);
+    }
+
+    #[test]
+    fn a_crlf_file_comes_back_crlf() {
+        // Windows is the primary development platform, so this is the ordinary case there,
+        // and an LF answer would show every line of a user's settings file as changed.
+        let text = "{\r\n  \"a\": {\r\n    \"b\": 1\r\n  }\r\n}\r\n";
+        let rendered = Document::parse(text).expect("valid json").render();
+        let rendered = rendered.expect("renders");
+        assert_eq!(rendered, text);
+        assert_eq!(rendered.matches("\r\n").count(), 5);
+        // And an LF file does not acquire carriage returns on the way back out.
+        let unix = "{\n  \"a\": 1\n}\n";
+        let rendered = Document::parse(unix).expect("valid json").render();
+        assert_eq!(rendered.expect("renders"), unix);
+    }
+
+    #[test]
+    fn a_newline_inside_a_string_is_not_a_line_break() {
+        // The CRLF pass is a blunt replacement over the rendered text, which is only safe
+        // because the serializer escapes a newline inside a value. If it ever stopped, this
+        // would come back with a carriage return inside the string.
+        let text = "{\r\n  \"a\": \"one\\ntwo\"\r\n}\r\n";
+        let document = Document::parse(text).expect("valid json");
+        assert_eq!(
+            document.value.get("a").and_then(Json::as_str),
+            Some("one\ntwo")
+        );
+        assert_eq!(document.render().expect("renders"), text);
     }
 
     #[test]
