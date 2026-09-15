@@ -279,43 +279,63 @@ where
 /// `Stop` has no `tool_name`, a `PreToolUse` has no `trigger`, and a type that demanded the
 /// fields an event does not have would fail the moment Claude stopped writing one.
 ///
-/// `hook_event_name` is the authority. `nysia hook --event <name>` exists for a caller whose
-/// payload omits it; when a payload carries one that disagrees with the flag, the daemon
-/// refuses the event rather than choosing. A hook entry wired to the wrong event name
-/// misclassifies every status it reports, and picking a winner would make that silent. That
-/// is a property of the wire rather than of one implementation, which is why it is written
-/// here rather than left to whichever caller is being read.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+/// # `--event` is the CLI's business and never reaches the daemon
+///
+/// `hook_event_name` is **required** here, so a payload that omits it does not deserialize
+/// into this type at all, and `nysia hook --event <name>` is not on the wire: [`AgentHook`]
+/// carries `pane_hint` and this event, and nothing else. The daemon therefore never sees the
+/// flag and cannot compare anything to it.
+///
+/// So the two rules below are the **CLI's**, not the wire's. They are written here because
+/// this is where they will be looked for, and they are written as instructions rather than
+/// guarantees because this type cannot enforce either:
+///
+/// 1. Fill a missing `hook_event_name` in from the flag *before* building this type.
+/// 2. Refuse when the payload and the flag both name an event and disagree. A hook entry
+///    wired to the wrong event name misclassifies every status it reports, and picking a
+///    winner would make that silent — but the CLI holds both values at the same instant and
+///    is the only place they can be compared at all.
+///
+/// # What the wire does guarantee
+///
+/// `tool_input` is dropped, in both directions, unless the event is one that maps to
+/// `waiting` — see [`HookEvent::question`]. A blank `agent_id` is read as absent, in both
+/// directions too — see [`HookEvent::subagent`].
+///
+/// Serde is hand-written here rather than derived, so those two rules have one home each;
+/// the private `HookEventWire` beneath this type says what else that bought. The
+/// consequence for a reader is that the
+/// `#[serde(default)]` this type used to carry on every optional field now lives there — the
+/// defaulting behaviour is unchanged, and a payload carrying nothing but an event name still
+/// reads.
+#[derive(Debug, Clone, PartialEq, TS)]
 #[ts(export)]
 pub struct HookEvent {
     /// Which event fired.
     pub hook_event_name: HookEventName,
     /// The tool, on the events that have one. `AskUserQuestion` is the one value §2.1
     /// branches on.
-    #[serde(default)]
     pub tool_name: Option<String>,
     /// Whether the agent was interrupted rather than stopping on its own.
     ///
     /// The only thing separating `interrupted` from `done` (§2.2). Defaults to `false`: an
     /// event that does not say it was interrupted was not.
-    #[serde(default)]
     pub is_interrupt: bool,
     /// `SessionStart`'s `source` — `startup`, `resume` or `clear`.
     ///
     /// Carried, never branched on: all three map alike, so a typed enum would buy nothing
     /// and would refuse a source a later Claude adds, on the critical path.
-    #[serde(default)]
     pub source: Option<String>,
     /// `PostCompact`'s `trigger`. §2.1 maps the compaction to `done` only when it is
     /// `"manual"`, because an automatic compaction is not the agent finishing.
-    #[serde(default)]
     pub trigger: Option<String>,
     /// The subagent this event is about, when it is about one.
     ///
     /// §2.1: any event carrying it updates the roster, and the lead keeps its own state.
     /// [`HookEvent::target`] is that rule as a shape, so a caller cannot write a subagent's
     /// state onto the lead's row by forgetting to look.
-    #[serde(default, deserialize_with = "blank_as_none")]
+    ///
+    /// Read it through [`HookEvent::subagent`], which is where a blank one becomes absent.
     pub agent_id: Option<String>,
     /// The tool's input, verbatim, and the source of the `waiting` question.
     ///
@@ -328,11 +348,90 @@ pub struct HookEvent {
     /// fields of a tool's input, and a type that claimed to know them would be a wire
     /// contract Nysia cannot hold up. A reader narrows it.
     ///
-    /// **It does not reach the row unless the row is `waiting`** — see
-    /// [`HookEvent::to_row`], which is where the reason is.
-    #[serde(default)]
+    /// **It does not reach the wire unless the event is one that maps to `waiting`.** Read
+    /// it through [`HookEvent::question`], which is where that rule and its reason are; the
+    /// field itself is what a caller who just read stdin is holding, before the wire has had
+    /// a say.
     #[ts(type = "unknown")]
     pub tool_input: Option<serde_json::Value>,
+}
+
+/// The shape serde actually reads and writes for a [`HookEvent`].
+///
+/// Private, and it does two jobs that happen to have one answer.
+///
+/// **It is where `tool_input` is confined.** §2.2 wants the `waiting` payload and nothing
+/// else, and doing that only in [`HookEvent::to_row`] would confine the *row* while leaving
+/// the *frame* fat: a `PreToolUse{tool_name:"Write"}` carries the whole file being written,
+/// the control line cap is a megabyte, and the status would be lost to
+/// `ControlError::Truncated` exactly where the payload was never wanted. Applying it here
+/// means a caller cannot fill the field wrongly and send it, because the value never reaches
+/// the socket — and the daemon applies the same rule on the way in, so neither end has to
+/// trust the other. [`HookEvent::to_row`] keeps its own check: a `HookEvent` built in
+/// process never passed through serde at all.
+///
+/// **It is also where `deserialize_with` lives.** ts-rs 12 cannot parse that attribute and
+/// prints `warning: failed to parse serde attribute` on every build of the crate carrying
+/// it. This struct derives no `TS`, so the warning has nowhere to come from, and the
+/// exported TypeScript is unchanged — it is derived from [`HookEvent`], which keeps the
+/// field list and the doc comments.
+///
+/// The field list is restated once, and the compiler holds the two together: every field of
+/// [`HookEvent`] is named in the conversions below, so adding one to either is a build
+/// failure rather than a field that silently stops crossing the wire.
+#[derive(Deserialize)]
+struct HookEventWire {
+    hook_event_name: HookEventName,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default)]
+    is_interrupt: bool,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    trigger: Option<String>,
+    #[serde(default, deserialize_with = "blank_as_none")]
+    agent_id: Option<String>,
+    #[serde(default)]
+    tool_input: Option<serde_json::Value>,
+}
+
+impl Serialize for HookEvent {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let mut event = serializer.serialize_struct("HookEvent", 7)?;
+        event.serialize_field("hook_event_name", &self.hook_event_name)?;
+        event.serialize_field("tool_name", &self.tool_name)?;
+        event.serialize_field("is_interrupt", &self.is_interrupt)?;
+        event.serialize_field("source", &self.source)?;
+        event.serialize_field("trigger", &self.trigger)?;
+        // The two confinements, applied on the way out rather than trusted to the caller.
+        event.serialize_field("agent_id", &self.subagent())?;
+        event.serialize_field("tool_input", &self.question())?;
+        event.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for HookEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = HookEventWire::deserialize(deserializer)?;
+        let event = Self {
+            hook_event_name: wire.hook_event_name,
+            tool_name: wire.tool_name,
+            is_interrupt: wire.is_interrupt,
+            source: wire.source,
+            trigger: wire.trigger,
+            agent_id: wire.agent_id,
+            tool_input: wire.tool_input,
+        };
+        Ok(Self {
+            // Again on the way in. A peer that did not confine is not a peer to trust with
+            // what it sent, and the cheap answer is to drop it rather than to refuse a hook.
+            tool_input: event.question().cloned(),
+            ..event
+        })
+    }
 }
 
 impl HookEvent {
@@ -354,6 +453,41 @@ impl HookEvent {
     #[must_use]
     pub fn is_session_boundary(&self) -> bool {
         self.hook_event_name == HookEventName::SessionStart
+    }
+
+    /// The `waiting` payload §2.2 asks for: `tool_input`, but only on an event that maps to
+    /// `waiting`.
+    ///
+    /// **The confinement is the point, and it is about size before it is about secrets.**
+    /// A `PreToolUse{tool_name:"Write"}` maps to `working` and its `tool_input` is the whole
+    /// file being written. The control line cap is a megabyte, so an unconfined event does
+    /// not merely carry a payload nobody wanted — past the cap it is refused as
+    /// `ControlError::Truncated` and **the status is lost**, exactly where the payload was
+    /// never needed. The row would also have persisted it, which is trap 13, but that is the
+    /// second problem rather than the first.
+    ///
+    /// This is what the wire uses in both directions, so the field cannot be filled wrongly
+    /// and sent. `PermissionRequest` maps to `waiting` too and keeps its input; its payload
+    /// shape is not verified against Claude's documentation, which is worth knowing before
+    /// anything depends on the fields inside.
+    #[must_use]
+    pub fn question(&self) -> Option<&serde_json::Value> {
+        if self.state() == Some(AgentState::Waiting) {
+            self.tool_input.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// The subagent this event is about, with a blank id read as absent.
+    ///
+    /// The only reader of the field, because the id is a **key**: one blank id would collapse
+    /// every subagent in a pane into a single row flickering between their states. Normalised
+    /// rather than refused, because refusing would fail the hook on the agent's critical path
+    /// (§5.2) and lose a status to protect a field nothing else reads.
+    #[must_use]
+    pub fn subagent(&self) -> Option<&str> {
+        self.agent_id.as_deref().filter(|id| !id.trim().is_empty())
     }
 
     /// The state §2.1 maps this event to, or `None` when it maps to nothing.
@@ -413,9 +547,9 @@ impl HookEvent {
     /// field that is `None` most of the time.
     #[must_use]
     pub fn target(&self) -> StatusTarget {
-        match &self.agent_id {
+        match self.subagent() {
             Some(agent_id) => StatusTarget::Subagent {
-                agent_id: agent_id.clone(),
+                agent_id: agent_id.to_owned(),
             },
             None => StatusTarget::Lead,
         }
@@ -430,28 +564,24 @@ impl HookEvent {
     /// The row is always fresh: `restored_unconfirmed` is what a rehydrated row carries, and
     /// there is no way to reach this function without a live event.
     ///
-    /// **`tool_input` reaches the row only when the row is `waiting`.** §2.2 calls the field
-    /// "the `waiting` payload, verbatim, or absent", and the confinement is load-bearing
-    /// rather than tidy: a `PreToolUse{tool_name:"Write"}` maps to `working`, and its
-    /// `tool_input` is the whole file being written. Copying it unconditionally would put
-    /// file contents — credentials among them — into a row the daemon persists, the window
-    /// renders and the spool writes to disk, which is trap 13 arriving through a field
-    /// nobody would think to look at.
+    /// **`tool_input` reaches the row only when the row is `waiting`**, through
+    /// [`HookEvent::question`]. The wire applies the same rule, so an event that arrived over
+    /// the socket has already been confined — this check is for the one that did not: a
+    /// `HookEvent` built in process never passed through serde at all, and the row is what
+    /// the daemon persists, the window renders and the spool writes to disk (trap 13).
     #[must_use]
     pub fn to_row(&self, pane: PaneKey, observed_at: UnixMillis) -> Option<AgentStatusRow> {
         let state = self.state()?;
         Some(AgentStatusRow {
             pane,
             state,
-            question: (state == AgentState::Waiting)
-                .then(|| self.tool_input.clone())
-                .flatten(),
+            question: self.question().cloned(),
             // Derived, never copied off the event: §2.2 says this field distinguishes
             // `interrupted` from `done`, so a row whose flag disagrees with its state is a
             // row two readers would disagree about.
             is_interrupt: state == AgentState::Interrupted,
             session_boundary: self.is_session_boundary(),
-            agent_id: self.agent_id.clone(),
+            agent_id: self.subagent().map(str::to_owned),
             observed_at,
             restored_unconfirmed: false,
         })
@@ -850,6 +980,77 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_input_that_is_not_a_question_never_reaches_the_wire() {
+        // The correction this test exists for. Confining `tool_input` in `to_row` alone
+        // confines the *row* and leaves the *frame* fat: the control line cap is a megabyte,
+        // so a `Write` with a large input is refused as `ControlError::Truncated` and the
+        // status is lost exactly where the payload was never wanted. So the wire drops it,
+        // in both directions, and a caller cannot fill the field wrongly and send it.
+        let mut writing = event(HookEventName::PreToolUse);
+        writing.tool_name = Some("Write".to_owned());
+        writing.tool_input = Some(serde_json::json!({ "content": "x".repeat(4096) }));
+
+        // Out: the value is in the Rust struct and not in the JSON.
+        assert!(writing.tool_input.is_some());
+        assert_eq!(writing.question(), None);
+        let json = serde_json::to_value(&writing).unwrap();
+        assert_eq!(json["tool_input"], serde_json::Value::Null);
+        assert!(serde_json::to_string(&writing).unwrap().len() < 200);
+
+        // In: a peer that did not confine gets confined here rather than refused, because
+        // refusing would lose the status this whole path exists to deliver.
+        let unconfined = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": { "content": "x".repeat(4096) },
+        });
+        let parsed: HookEvent = serde_json::from_value(unconfined).unwrap();
+        assert_eq!(parsed.tool_input, None);
+        assert_eq!(parsed.state(), Some(AgentState::Working));
+
+        // And the question still crosses, so this is not "always absent" wearing a disguise.
+        let mut asking = writing;
+        asking.tool_name = Some(ASK_USER_QUESTION.to_owned());
+        assert!(asking.question().is_some());
+        let json = serde_json::to_value(&asking).unwrap();
+        assert_eq!(json["tool_input"], *asking.tool_input.as_ref().unwrap());
+        assert_eq!(serde_json::from_value::<HookEvent>(json).unwrap(), asking);
+    }
+
+    #[test]
+    fn a_hook_event_still_defaults_every_field_an_event_does_not_carry() {
+        // Hand-written serde replaced the derive, and `#[serde(default)]` moved to the
+        // private wire struct with it. This is what holds that move honest: a payload
+        // carrying nothing but an event name still reads, which is the property every event
+        // with a different field set depends on.
+        let parsed: HookEvent = serde_json::from_str(r#"{"hook_event_name":"Stop"}"#).unwrap();
+        assert_eq!(parsed, HookEvent::new(HookEventName::Stop));
+
+        // And the serialised form still names all seven fields, so a reader sees the same
+        // shape whichever event produced it.
+        let json = serde_json::to_value(&parsed).unwrap();
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "agent_id",
+                "hook_event_name",
+                "is_interrupt",
+                "source",
+                "tool_input",
+                "tool_name",
+                "trigger",
+            ]
+        );
+    }
+
+    #[test]
     fn a_tool_input_reaches_the_row_only_when_the_row_is_waiting() {
         // Trap 13 arriving through a field nobody would look at. A `Write`'s `tool_input`
         // is the whole file being written, and that event maps to `working` — so an
@@ -1127,8 +1328,22 @@ mod tests {
             let json = format!("{{\"hook_event_name\":\"PostToolUse\",\"agent_id\":{blank}}}");
             let parsed: HookEvent = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.agent_id, None, "{blank} should read as absent");
+            assert_eq!(parsed.subagent(), None);
             assert_eq!(parsed.target(), StatusTarget::Lead);
         }
+
+        // And one built in process rather than read off the wire, which is the case a
+        // deserialise-only guard would have missed: every reader goes through `subagent`,
+        // so a blank id is absent there too and cannot become a roster key or a row.
+        let mut blank = event(HookEventName::PostToolUse);
+        blank.agent_id = Some("   ".to_owned());
+        assert_eq!(blank.subagent(), None);
+        assert_eq!(blank.target(), StatusTarget::Lead);
+        assert_eq!(blank.to_row(pane(), at()).unwrap().agent_id, None);
+        assert_eq!(
+            serde_json::to_value(&blank).unwrap()["agent_id"],
+            serde_json::Value::Null
+        );
     }
 
     // ----------------------------------------------------------- the stdin envelope
