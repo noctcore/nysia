@@ -46,7 +46,12 @@ struct Run {
 fn run(args: &[&str]) -> Run {
     // No runtime directory is shared with anything: none of these verbs reaches a socket, and
     // pointing them somewhere harmless means a stray one cannot touch a real daemon.
-    run_in(&std::env::temp_dir().join("nysia-exit-codes"), args, None, None)
+    run_in(
+        &std::env::temp_dir().join("nysia-exit-codes"),
+        args,
+        None,
+        None,
+    )
 }
 
 /// Run the binary against `runtime_dir`, optionally writing `stdin` and setting a pane hint.

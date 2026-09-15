@@ -457,7 +457,10 @@ mod tests {
         );
         // And the pane survives anyway, because it travels in the row rather than in the name.
         let drained = drain(&dir).expect("the drain runs");
-        assert_eq!(drained.rows.first().map(|row| row.pane.clone()), Some(hostile));
+        assert_eq!(
+            drained.rows.first().map(|row| row.pane.clone()),
+            Some(hostile)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -501,8 +504,11 @@ mod tests {
         let orphan = row(pane("tab_1"), 1_000);
         let mut line = serde_json::to_vec(&orphan).expect("a row renders");
         line.push(b'\n');
-        std::fs::write(spool.join(format!("{}.7.{DRAINING}", file_stem(orphan.pane.as_str()))), line)
-            .expect("a leftover claim");
+        std::fs::write(
+            spool.join(format!("{}.7.{DRAINING}", file_stem(orphan.pane.as_str()))),
+            line,
+        )
+        .expect("a leftover claim");
 
         let drained = drain(&dir).expect("the drain runs");
         assert_eq!(drained.rows, vec![orphan]);

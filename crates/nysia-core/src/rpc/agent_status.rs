@@ -158,7 +158,7 @@ impl AgentStatusService {
         };
         self.store.record_status(&row)?;
         self.remember(pane);
-        Ok(self.change(pane, event.target(), &row)?)
+        self.change(pane, event.target(), &row)
     }
 
     /// One pane's whole status.
@@ -219,8 +219,8 @@ impl AgentStatusService {
         let mut subscribers = lock(&self.subscribers);
         let before = subscribers.len();
         subscribers.retain(|subscription| {
-            let matched = subscription.connection == connection
-                && subscription.sink.stream_id() == stream_id;
+            let matched =
+                subscription.connection == connection && subscription.sink.stream_id() == stream_id;
             if matched {
                 subscription.sink.close();
             }
@@ -428,7 +428,14 @@ mod tests {
             restored_unconfirmed: false,
         };
         let summary = service.restore(&[spooled]);
-        assert_eq!(summary, RestoreSummary { applied: 1, superseded: 0, failed: 0 });
+        assert_eq!(
+            summary,
+            RestoreSummary {
+                applied: 1,
+                superseded: 0,
+                failed: 0
+            }
+        );
 
         let status = service
             .status(&pane())
@@ -469,7 +476,11 @@ mod tests {
         };
         assert_eq!(
             service.restore(&[older]),
-            RestoreSummary { applied: 0, superseded: 1, failed: 0 }
+            RestoreSummary {
+                applied: 0,
+                superseded: 1,
+                failed: 0
+            }
         );
         assert_eq!(
             service
@@ -526,7 +537,9 @@ mod tests {
             .expect("a mapped event is a change");
         assert_eq!(
             change.changed,
-            StatusTarget::Subagent { agent_id: "sub_1".to_owned() }
+            StatusTarget::Subagent {
+                agent_id: "sub_1".to_owned()
+            }
         );
         assert_eq!(
             change.status.lead.state,

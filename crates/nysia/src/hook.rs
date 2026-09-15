@@ -414,7 +414,11 @@ mod tests {
         // picking a winner would make that silent. This is the only place both values exist.
         let err = read(r#"{"hook_event_name":"PreToolUse"}"#, Some("Stop"))
             .expect_err("a disagreement is refused");
-        assert!(err.message().contains("PreToolUse"), "got {}", err.message());
+        assert!(
+            err.message().contains("PreToolUse"),
+            "got {}",
+            err.message()
+        );
         assert!(err.message().contains("Stop"), "got {}", err.message());
         assert!(!err.next_steps().is_empty());
     }
@@ -500,6 +504,9 @@ mod tests {
             .to_row(pane, UnixMillis(1_757_721_600_000))
             .expect("Stop maps to done");
         assert_eq!(row.observed_at, UnixMillis(1_757_721_600_000));
-        assert!(!row.restored_unconfirmed, "the store flags it, not the hook");
+        assert!(
+            !row.restored_unconfirmed,
+            "the store flags it, not the hook"
+        );
     }
 }
