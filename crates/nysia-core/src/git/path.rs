@@ -10,9 +10,14 @@
 //!
 //! - **Symbolic links and junctions**, by resolving them. This is [`std::fs::canonicalize`],
 //!   which is `GetFinalPathNameByHandleW` on Windows and `realpath(3)` elsewhere.
-//! - **Case, on Windows.** `GetFinalPathNameByHandleW` reports the spelling the filesystem
-//!   actually holds, so `c:\users\kacpe` comes back as `C:\Users\kacpe` whatever the caller
-//!   typed. This is the case the plan's trap names.
+//! - **Case, on both platforms**, wherever the volume is case-insensitive. On Windows
+//!   `GetFinalPathNameByHandleW` reports the spelling the filesystem actually holds, so
+//!   `c:\users\kacpe` comes back as `C:\Users\kacpe` whatever the caller typed — the case
+//!   the plan's trap names. macOS turned out to do the same on APFS: its `realpath(3)`
+//!   reports the on-disk spelling rather than the one it was handed. That was measured on
+//!   the CI runner rather than assumed, because the manual page does not promise it. On a
+//!   case-sensitive volume nothing is corrected and nothing needs to be — the two spellings
+//!   are genuinely two directories there.
 //! - **8.3 short names, on Windows.** `C:\Users\RUNNER~1\AppData` expands to the long form.
 //!   It is not a curiosity: GitHub's Windows runner sets `TEMP` to a short-name path, so a
 //!   test comparing a raw `temp_dir()` join against a canonicalised path fails there and
@@ -26,12 +31,6 @@
 //! Stated rather than discovered, because each of these is a folder that will register
 //! twice and look like a bug:
 //!
-//! - **Case on macOS.** `realpath(3)` does not correct case, so on a case-insensitive APFS
-//!   volume `/Users/k/Projekty` and `/Users/k/projekty` are the same directory and two
-//!   canonical paths. Correcting it needs a per-component directory scan or a macOS-only
-//!   `F_GETPATH`, and the v0.3 plan asks for the Windows case specifically. The
-//!   `case_is_not_corrected_on_macos` test holds the behaviour so that a change to it is a
-//!   decision rather than a surprise.
 //! - **`subst` drives and mapped network drives.** `GetFinalPathNameByHandleW` reports the
 //!   drive the handle was opened through, so a folder reached through `subst X: C:\Projekty`
 //!   canonicalises under `X:\` and does not merge with its target.
@@ -401,27 +400,28 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn case_is_not_corrected_on_macos() {
-        // Stated rather than discovered. `realpath(3)` resolves links but does not report
-        // the spelling on disk, so on a case-insensitive APFS volume one directory has as
-        // many canonical paths as it has casings, and registering it twice makes two
-        // projects. The v0.3 plan asks for the Windows case; this test exists so that
-        // fixing the macOS one is a deliberate change with a failing test to delete.
+    fn case_is_normalised_on_a_case_insensitive_volume() {
+        // Measured on the runner rather than assumed. `realpath(3)`'s manual page does not
+        // promise to report the spelling held on disk, and this shipped asserting that macOS
+        // did *not* correct case — the CI leg said otherwise, so the doc comment and this test
+        // were turned around rather than the behaviour being worked around.
+        //
+        // The consequence is the one the plan cares about: registering `/Users/k/Projekty` and
+        // `/Users/k/projekty` is one project on macOS as well as on Windows.
         let dir = temp_dir("macos-case");
         let mixed = dir.join("MixedCase");
         std::fs::create_dir_all(&mixed).expect("mixed case");
-        let shouted = dir.join("MIXEDCASE");
 
-        let Ok(shouted) = CanonicalPath::of(&shouted) else {
-            // A case-sensitive volume, where the two really are different directories and
-            // one of them does not exist. Nothing to say.
+        let Ok(shouted) = CanonicalPath::of(dir.join("MIXEDCASE")) else {
+            // A case-sensitive volume, where the two really are different directories and one
+            // of them does not exist. Nothing to correct, and nothing to assert.
             std::fs::remove_dir_all(&dir).ok();
             return;
         };
         let mixed = CanonicalPath::of(&mixed).expect("mixed case resolves");
-        assert_ne!(
+        assert_eq!(
             mixed, shouted,
-            "macOS started correcting case; the doc comment and this test are now wrong"
+            "two casings of one folder must be one canonical path"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
