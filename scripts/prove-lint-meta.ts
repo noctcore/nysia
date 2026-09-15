@@ -289,10 +289,54 @@ const AGENT_MOD = 'crates/nysia-core/src/agent/mod.rs';
 expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 14); // pub use claude::ClaudeLaunch;
 expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 15); // ...self::claude::hooks::EVENTS as HOOK_EVENTS
 expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 16); // the grouped re-export
-expectMessage(trips, 'no-claude-specifics-outside-agent', 'out of the Claude module');
-// `pub(crate) mod claude;` — any visibility modifier disarms the compiler's half.
+expectMessage(trips, 'no-claude-specifics-outside-agent', 'under a neutral name');
+// `pub(crate) mod claude;` — a visibility that leaves the module disarms the compiler's half.
 expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 20);
 expectMessage(trips, 'no-claude-specifics-outside-agent', 'publishes `mod claude`');
+
+// And the laundering that names no `claude` at all, which is how the boundary was walkable
+// from the inside while `pnpm lint` reported zero and `cargo clippy -D warnings` agreed.
+// Privacy is no help here — this is the module that is *allowed* to name `claude` — so this
+// rule is the only guard, which is why a hole on this side is worth more than one outside.
+//
+// Line 34 binds `use claude as c;` and the three statements that launder through it never
+// write the word. Each is pinned individually: the alias, the glob, and a second hop through
+// a module alias declared twenty lines further down.
+expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 35); // pub use c::Probe as NeutralProbe;
+expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 36); // pub use c::*;
+expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 47); // pub use h::EVENTS; via `hooks as h`
+
+// The same laundering without a `use`: a public type alias and a public signature put a
+// Claude type in the neutral surface exactly as a re-export does.
+expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 40); // pub type AliasProbe = claude::Probe;
+expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 41); // pub fn probe() -> claude::launch::T
+expectMessage(trips, 'no-claude-specifics-outside-agent', 'exposes');
+
+// Nesting, which `pub` on its own says nothing about. A public module and an inherent impl on
+// a public type do hand their contents out; an item inside a private module and a public field
+// on a private struct hand nothing to anybody, and a scan that matched `pub` tokens without
+// tracking what encloses them reported all four alike.
+expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 74); // in `pub(crate) mod exported`
+expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 77); // in `impl AgentLaunch`
+
+// And the shapes the same fixture must stay silent about, asserted here rather than only in
+// the clean tree because they sit in the file that reports. lint-meta has no suppression
+// mechanism, so each of these would be a report with no way out: a `claude` module under a
+// different parent (52), two visibilities that cannot leave `agent/` (53, 54), a plain `use`
+// that binds a Claude name without handing it anywhere (55), and the two nested items that
+// reach nobody (65, 68).
+for (const silent of [52, 53, 54, 55, 65, 68]) {
+  if (
+    trips.some(
+      (v) =>
+        v.rule === 'no-claude-specifics-outside-agent' &&
+        v.file === AGENT_MOD &&
+        v.line === silent,
+    )
+  ) {
+    failures.push(`rule \`no-claude-specifics-outside-agent\` falsely reported ${AGENT_MOD}:${silent}`);
+  }
+}
 
 // The exemption, asserted where it is meaningful: `agent/claude/mod.rs` sits in this same
 // tripping tree, names `claude` far more often than the file above it, re-exports out of its

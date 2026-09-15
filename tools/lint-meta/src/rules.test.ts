@@ -418,7 +418,7 @@ describe('Claude specifics leaving the module they are allowed to live in', () =
     ]) {
       const violations = check(`${AGENT}/mod.rs`, laundering);
       expect(violations, laundering).toHaveLength(1);
-      expect(violations[0]?.message).toContain('out of the Claude module');
+      expect(violations[0]?.message).toContain('under a neutral name');
     }
     // A grouped re-export reports once per laundered path, because each names a different
     // item and a reader fixing one needs to see the other.
@@ -429,6 +429,97 @@ describe('Claude specifics leaving the module they are allowed to live in', () =
 
   it('says nothing about a re-export that passes through nothing Claude', () => {
     expect(check(`${AGENT}/mod.rs`, 'pub use launch::{AgentLaunch, LaunchError};')).toEqual([]);
+  });
+
+  it('resolves an alias declared in the same file before checking a re-export', () => {
+    // The hole that made the boundary walkable from the inside. Not one of these laundering
+    // statements contains the word `claude`, and privacy cannot help — this is the module
+    // that is allowed to name it.
+    for (const laundering of [
+      ['use claude as c;', 'pub use c::Probe as NeutralProbe;'],
+      ['use claude as c;', 'pub use c::*;'],
+      ['use self::claude::hooks as h;', 'pub use h::EVENTS;'],
+      ['use crate::agent::claude::launch as l;', 'pub use l::PROGRAM;'],
+    ]) {
+      const violations = check(`${AGENT}/mod.rs`, laundering.join('\n'));
+      expect(violations, laundering.join(' ')).toHaveLength(1);
+      expect(violations[0]?.message).toContain('claude');
+    }
+  });
+
+  it('reports a public signature that names a Claude type, not only a re-export', () => {
+    for (const exposed of [
+      'pub type AliasProbe = claude::Probe;',
+      'pub fn probe() -> claude::launch::T { unimplemented!() }',
+      'pub fn take(p: claude::Probe) {}',
+      'pub const P: claude::Probe = claude::Probe;',
+      'pub struct S { pub inner: claude::Probe }',
+    ]) {
+      expect(check(`${AGENT}/mod.rs`, exposed), exposed).not.toEqual([]);
+    }
+  });
+
+  it('reads a signature up to the body, so a call inside one is not a report', () => {
+    // How `agent/` legitimately uses the module it owns, and the shape that would make this
+    // rule unusable if it reported: `agent/hooks.rs` calls into `claude` on every verb.
+    const source = [
+      'pub fn install(settings: &Path) -> Result<HookChange, HookError> {',
+      '    super::claude::hooks::install(settings)',
+      '}',
+    ].join('\n');
+    expect(check(`${AGENT}/hooks.rs`, source)).toEqual([]);
+  });
+
+  it('says nothing about a private item, whatever its signature names', () => {
+    for (const private_ of [
+      'type PrivateProbe = claude::Probe;',
+      'fn probe() -> claude::launch::T { unimplemented!() }',
+      'pub(self) mod claude;',
+      'pub(in crate::agent) mod claude;',
+      'pub(in crate::agent) fn probe() -> claude::Probe { unimplemented!() }',
+      'use claude::hooks::EVENTS as INTERNAL;',
+    ]) {
+      expect(check(`${AGENT}/mod.rs`, private_), private_).toEqual([]);
+    }
+  });
+
+  it('knows pub(super) escapes from mod.rs and not from a file beside it', () => {
+    // `super` of `agent/mod.rs` is the crate root, so the name leaves the module. `super` of
+    // `agent/launch.rs` is `agent` itself, so it does not.
+    expect(check(`${AGENT}/mod.rs`, 'pub(super) use claude::Probe;')).toHaveLength(1);
+    expect(check(`${AGENT}/launch.rs`, 'pub(super) use super::claude::Probe;')).toEqual([]);
+  });
+
+  it('knows whether a nested public item can be reached at all', () => {
+    // `pub` on its own says nothing about reach. Reporting the first four would be the same
+    // defect as the `vendor::claude` report this rule already shipped once, in a checker with
+    // no way to silence a wrong answer.
+    for (const unreachable of [
+      'mod private { pub type T = claude::Probe; }',
+      'struct S { pub inner: claude::Probe }',
+      'struct Thing; impl Thing { pub fn f() -> claude::Probe { todo!() } }',
+      'fn outer() { pub type T = claude::Probe; }',
+    ]) {
+      expect(check(`${AGENT}/mod.rs`, unreachable), unreachable).toEqual([]);
+    }
+    // And the same nesting where it does escape, so the tracking cannot simply go quiet. The
+    // last one is an impl on a type declared in another file: unknown reach is reported, not
+    // assumed away.
+    for (const reachable of [
+      'pub(crate) mod internal { pub type T = claude::Probe; }',
+      'pub struct S { pub inner: claude::Probe }',
+      'pub struct Thing; impl Thing { pub fn f() -> claude::Probe { todo!() } }',
+      'impl Elsewhere { pub fn f() -> claude::Probe { todo!() } }',
+    ]) {
+      expect(check(`${AGENT}/mod.rs`, reachable), reachable).toHaveLength(1);
+    }
+  });
+
+  it('says nothing about a claude module under a different parent, from inside agent', () => {
+    // The outside check has always matched the `agent::claude` pair; the inside one matched
+    // any segment called `claude`, so this was a false report with no way to silence it.
+    expect(check(`${AGENT}/mod.rs`, 'pub use crate::vendor::claude::Whatever;')).toEqual([]);
+    expect(check(`${AGENT}/mod.rs`, 'pub type W = crate::vendor::claude::Whatever;')).toEqual([]);
   });
 
   it('reports any visibility on the module declaration, and only on that name', () => {
