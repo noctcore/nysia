@@ -9,7 +9,7 @@ which is why the proof points at it explicitly.
 
 | Tree | What it proves |
 |---|---|
-| `trips/` | Rule (a). A Tauri import from the webview in TypeScript and in JavaScript, and the Rust `use` spellings a line-anchored regex walked past. Rule (f): a crate outside `agent/**` naming `agent::claude` in six spellings, plus the two ways the boundary dissolves from inside it — a `pub use` that launders a Claude item into the neutral namespace, and a `pub(crate) mod claude` that disarms the compiler's half. |
+| `trips/` | Rule (a). A Tauri import from the webview in TypeScript and in JavaScript, and the Rust `use` spellings a line-anchored regex walked past. Rule (f): a crate outside `agent/**` naming `agent::claude` in six spellings, plus the ways the boundary dissolves from inside it — a `pub use` that launders a Claude item into the neutral namespace, the same laundering through an alias that never writes the word, a `pub type` and a `pub fn` signature that do it without a `use` at all, and a `pub(crate) mod claude` that disarms the compiler's half. The same file also holds the shapes the rule must stay silent about, each pinned by line in the proof. |
 | `clean/` | Rule (a)'s carve-outs: `apps/desktop` and `apps/web/src/transport` may import Tauri, and a `nysia-core` whose doc comments, nested block comment and `crate::tauri_helpers` import must all stay silent. Rule (f)'s: `agent/**` may name `claude` freely, and outside it a `claude` module under a different parent, a doc comment quoting the banned path and a string holding it are all silent. |
 | `cargo/violating/` | Rules (b) and (c), through **real cargo resolution**: a quoted dependency key, a `[ dependencies ]` header with whitespace and a trailing comment, a rename under a quoted table header, and a `[package]` with a trailing comment. Every one of those was a silent hole in the hand-written parser. |
 | `cargo/clean/` | Rules (b) and (c) stay silent when only `apps/desktop` links tauri. |
@@ -49,3 +49,26 @@ Its line numbers are asserted too: `agent_leak.rs:27` is the fully-qualified pat
 wrong lookbehind — copied from rule (a), where a crate root must not follow `::`, into a rule
 about a path segment that always does. That half matched nothing at all while every other
 assertion passed.
+
+## The two halves of rule (f) are not equally defended
+
+Outside `agent/**`, Rust privacy is the load-bearing half: `mod claude` carries no visibility
+modifier, so an import the rule misses does not compile either. Inside `agent/**` the compiler
+permits everything — it is the module that is *allowed* to name `claude` — so the rule is the
+only guard, and a hole there is worth much more than a hole outside.
+
+That is what `agent/mod.rs` lines 34-47 are for. `use claude as c;` binds an alias, and the
+statements that hand Claude types out through it never write the word `claude` at all:
+`pub use c::Probe as NeutralProbe;`, `pub use c::*;`, and a second hop through
+`use self::claude::hooks as h; pub use h::EVENTS;`. A `pub type` alias and a `pub fn` return
+type do the same thing without a `use`. Every one of those reported nothing until paths were
+resolved through the file's own bindings instead of being matched on spelling.
+
+Lines 52-55 are the other side of it, asserted in the tripping tree rather than the clean one
+because they sit in a file that reports: a `claude` module under a different parent,
+two visibilities that cannot leave `agent/` (`pub(self)`, `pub(in crate::agent)`), a plain
+`use` that binds a Claude name without handing it anywhere, and — further down — a `pub` item
+inside a private module and a `pub` field on a private struct, neither of which hands anything
+to anybody. lint-meta has no suppression mechanism, so each of those would be a report a file
+could not get out of, which is why the proof pins them by line rather than trusting the clean
+tree to cover them.
