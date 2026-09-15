@@ -241,6 +241,67 @@ expectMessage(trips, 'renderer-must-mute-replies', 're-exports Terminal');
 expectLine(trips, 'renderer-must-mute-replies', 'apps/web/src/transport/surface/lazy.ts', 6);
 expectMessage(trips, 'renderer-must-mute-replies', 'loads @xterm/xterm at runtime');
 
+// ---------------------------------------------------------------------------------------
+// Rule (f) — Claude's specifics leaving the one module they are allowed to live in.
+//
+// D-3/D-4: Claude is the only agent and there is no provider trait, so the protection is a
+// boundary rather than an abstraction. Rust privacy is the load-bearing half — `mod claude`
+// carries no visibility modifier, so the import a crate outside `agent/**` would write does
+// not compile — and this rule is the half that reports a file and a line, plus the half that
+// covers what the compiler permits.
+//
+// It was also the rule that shipped with one of its two halves matching nothing, which is
+// why these lines are pinned individually rather than by a single `expectRule`. See the
+// fully-qualified-path case at the end.
+// ---------------------------------------------------------------------------------------
+expectRule(trips, 'no-claude-specifics-outside-agent');
+
+// A crate outside the module, in every spelling of the import. Exact lines, because the
+// locator is half of what makes a rule usable — and because the fixture's doc comment and a
+// string literal both name `crate::agent::claude`, so a rule that searched the text rather
+// than the blanked code would report those too and `agent/mod.rs`'s own documentation with
+// them.
+const LEAK = 'crates/nysia/src/agent_leak.rs';
+expectLine(trips, 'no-claude-specifics-outside-agent', LEAK, 14); // use crate::agent::claude::PROGRAM;
+expectLine(trips, 'no-claude-specifics-outside-agent', LEAK, 15); // ...::claude as shim;
+// The two grouped forms, which are the point. Neither writes `agent::claude` next to itself,
+// so a rule matching that text reports neither — the same shape rule (a) met in
+// `use {tauri, serde};`. The use-tree is expanded instead, so the nested group on line 17
+// reports for `claude::{install, uninstall}` while `launch` beside it stays silent.
+expectLine(trips, 'no-claude-specifics-outside-agent', LEAK, 16); // use crate::agent::{claude, hooks};
+expectLine(trips, 'no-claude-specifics-outside-agent', LEAK, 17); // the multi-line nested form
+expectLine(trips, 'no-claude-specifics-outside-agent', LEAK, 21); // use ::nysia_core::agent::claude::EVENTS;
+// A fully-qualified path with no `use` anywhere, which is the case that caught the rule's
+// own defect: the pattern carried rule (a)'s `(?<![\w:])` lookbehind, correct for a crate
+// root that must not follow `::` and exactly wrong for a path segment that always does. It
+// matched nothing at all, and the use-tree half was reporting the same file for its own
+// reasons, so every other assertion here still passed.
+expectLine(trips, 'no-claude-specifics-outside-agent', LEAK, 27);
+expectMessage(trips, 'no-claude-specifics-outside-agent', 'imports Claude specifics');
+
+// And the two ways the boundary dissolves from inside `agent/**`, both of which compile.
+//
+// The re-export is the one that matters most: `pub use claude::ClaudeLaunch;` hands a Claude
+// type on as `agent::ClaudeLaunch`, so callers get Claude's shape while the word `claude`
+// disappears from the path and the rule stops seeing it. Rule (e) reports a laundering
+// re-export outright for the same reason.
+const AGENT_MOD = 'crates/nysia-core/src/agent/mod.rs';
+expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 14); // pub use claude::ClaudeLaunch;
+expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 15); // ...self::claude::hooks::EVENTS as HOOK_EVENTS
+expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 16); // the grouped re-export
+expectMessage(trips, 'no-claude-specifics-outside-agent', 'out of the Claude module');
+// `pub(crate) mod claude;` — any visibility modifier disarms the compiler's half.
+expectLine(trips, 'no-claude-specifics-outside-agent', AGENT_MOD, 20);
+expectMessage(trips, 'no-claude-specifics-outside-agent', 'publishes `mod claude`');
+
+// The exemption, asserted where it is meaningful: `agent/claude/mod.rs` sits in this same
+// tripping tree, names `claude` far more often than the file above it, re-exports out of its
+// own submodules and declares `pub mod launch` — and reports nothing. A rule that had banned
+// the word would report both files, and the module is the whole point of the boundary.
+if (trips.some((v) => v.file.startsWith('crates/nysia-core/src/agent/claude/'))) {
+  failures.push('rule `no-claude-specifics-outside-agent` reported the Claude module itself');
+}
+
 expectClean(runSourceRules(fixture('clean')), 'the clean source fixture');
 process.stdout.write('  clean: apps/desktop and apps/web/src/transport carve-outs hold\n');
 // The clean fixture also reaches StoreContext by call from store/ and from main.tsx. If
@@ -264,6 +325,13 @@ process.stdout.write('  clean: a muted terminal passes, and a stylesheet builds 
 // no suppression mechanism, so a module reported here has no way out but to stop importing
 // the thing it needs.
 process.stdout.write('  clean: a type-only import and a lone parser oblige nothing\n');
+// And rule (f)'s two carve-outs, which are the reports it must not make. Inside `agent/**`
+// the module may be named on a `use` and on a path; inside `agent/claude/**` anything goes.
+// Outside it, a `claude` module belonging to a different parent, a doc comment explaining the
+// ban in the words of the ban, and a string holding the banned path are all silent — lint-meta
+// has no suppression mechanism, so a file reported here has no way out but to stop importing
+// what it needs.
+process.stdout.write('  clean: agent/** may name claude, and a foreign claude is not ours\n');
 
 // ---------------------------------------------------------------------------------------
 // Rules (b) and (c) — cargo's own resolution of a real workspace.
