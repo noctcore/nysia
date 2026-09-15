@@ -347,6 +347,14 @@ mod tests {
 
     #[test]
     fn a_stepped_database_matches_a_fresh_one() {
+        // "Fresh" means the same list applied in one run — not an independently written
+        // consolidated schema. That is deliberate and it is the whole property a forward-only
+        // runner has: there is no hand-maintained "current schema" DDL for the list to drift
+        // from, so the only thing worth holding is that arriving at version N one step at a
+        // time is indistinguishable from arriving in one go. What it would catch is a step
+        // that is not self-contained — one whose `ALTER` depends on state an earlier step left
+        // behind rather than on the schema that step declares — which is why `STEP_TWO` alters
+        // what `STEP_ONE` created rather than adding an unrelated table.
         let (dir, stepped_path) = temp_db("migrate-stepped");
         let fresh_path = dir.join("fresh.sqlite3");
 
