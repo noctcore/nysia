@@ -9,12 +9,35 @@ import type { HookEventName } from "./HookEventName";
  * `Stop` has no `tool_name`, a `PreToolUse` has no `trigger`, and a type that demanded the
  * fields an event does not have would fail the moment Claude stopped writing one.
  *
- * `hook_event_name` is the authority. `nysia hook --event <name>` exists for a caller whose
- * payload omits it; when a payload carries one that disagrees with the flag, the daemon
- * refuses the event rather than choosing. A hook entry wired to the wrong event name
- * misclassifies every status it reports, and picking a winner would make that silent. That
- * is a property of the wire rather than of one implementation, which is why it is written
- * here rather than left to whichever caller is being read.
+ * # `--event` is the CLI's business and never reaches the daemon
+ *
+ * `hook_event_name` is **required** here, so a payload that omits it does not deserialize
+ * into this type at all, and `nysia hook --event <name>` is not on the wire: [`AgentHook`]
+ * carries `pane_hint` and this event, and nothing else. The daemon therefore never sees the
+ * flag and cannot compare anything to it.
+ *
+ * So the two rules below are the **CLI's**, not the wire's. They are written here because
+ * this is where they will be looked for, and they are written as instructions rather than
+ * guarantees because this type cannot enforce either:
+ *
+ * 1. Fill a missing `hook_event_name` in from the flag *before* building this type.
+ * 2. Refuse when the payload and the flag both name an event and disagree. A hook entry
+ *    wired to the wrong event name misclassifies every status it reports, and picking a
+ *    winner would make that silent — but the CLI holds both values at the same instant and
+ *    is the only place they can be compared at all.
+ *
+ * # What the wire does guarantee
+ *
+ * `tool_input` is dropped, in both directions, unless the event is one that maps to
+ * `waiting` — see [`HookEvent::question`]. A blank `agent_id` is read as absent, in both
+ * directions too — see [`HookEvent::subagent`].
+ *
+ * Serde is hand-written here rather than derived, so those two rules have one home each;
+ * the private `HookEventWire` beneath this type says what else that bought. The
+ * consequence for a reader is that the
+ * `#[serde(default)]` this type used to carry on every optional field now lives there — the
+ * defaulting behaviour is unchanged, and a payload carrying nothing but an event name still
+ * reads.
  */
 export type HookEvent = { 
 /**
@@ -51,6 +74,8 @@ trigger: string | null,
  * §2.1: any event carrying it updates the roster, and the lead keeps its own state.
  * [`HookEvent::target`] is that rule as a shape, so a caller cannot write a subagent's
  * state onto the lead's row by forgetting to look.
+ *
+ * Read it through [`HookEvent::subagent`], which is where a blank one becomes absent.
  */
 agent_id: string | null, 
 /**
@@ -65,7 +90,9 @@ agent_id: string | null,
  * fields of a tool's input, and a type that claimed to know them would be a wire
  * contract Nysia cannot hold up. A reader narrows it.
  *
- * **It does not reach the row unless the row is `waiting`** — see
- * [`HookEvent::to_row`], which is where the reason is.
+ * **It does not reach the wire unless the event is one that maps to `waiting`.** Read
+ * it through [`HookEvent::question`], which is where that rule and its reason are; the
+ * field itself is what a caller who just read stdin is holding, before the wire has had
+ * a say.
  */
 tool_input: unknown, };
