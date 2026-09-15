@@ -437,11 +437,9 @@ impl RegisterRefusal {
                     .iter()
                     .take(MAX_LISTED_REPOSITORIES)
                     // The confinement, applied where the name is written rather than where
-                    // it was collected: `Path::file_name` keeps the last component and
-                    // nothing else, so an absolute path passed here reaches the envelope as
-                    // a folder name or not at all.
-                    .filter_map(|name| Path::new(name).file_name())
-                    .map(|name| name.to_string_lossy().into_owned())
+                    // it was collected.
+                    .filter_map(|name| last_component(name))
+                    .map(str::to_owned)
                     .collect();
                 let listed = names.join(", ");
                 let message = if total == 1 {
@@ -505,6 +503,28 @@ pub fn unsupported_envelope() -> ErrorEnvelope {
         ),
     )
     .with_next_command_args(["nysia", "--version"])
+}
+
+/// The last segment of `name`, cut at `/` and `\` on **every** platform.
+///
+/// Not [`Path::file_name`], and the difference is a leak. `Path` splits on the separators
+/// of the platform it is compiled for, so on Unix a backslash is an ordinary character:
+/// `Path::new(r"C:\Users\someone\Projekty\nysia").file_name()` hands back the whole string,
+/// and a Windows-shaped path offered to a daemon running on Unix would reach the envelope
+/// intact. The macOS CI leg caught exactly that, on the test written to prove the
+/// confinement holds.
+///
+/// So the rule is the conservative one rather than the faithful one: a confinement must not
+/// depend on which platform it is running on any more than it depends on the caller being
+/// careful (CLAUDE.md §6). The cost is that a Unix folder genuinely named `my\dir` is
+/// written down as `dir` — a worse error message, which is the right side to be wrong on.
+///
+/// `None` when nothing is left, so a name that was only separators is dropped rather than
+/// listed as an empty string.
+fn last_component(name: &str) -> Option<&str> {
+    let trimmed = name.trim_end_matches(['/', '\\']);
+    let last = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+    (!last.is_empty()).then_some(last)
 }
 
 /// Build a [`NextSteps`] from literals this module owns.
@@ -838,21 +858,43 @@ mod tests {
         // because a security default an ordinary caller can undo is not a default
         // (CLAUDE.md §6). A daemon that collected absolute paths and passed them straight
         // through leaks nothing.
+        //
+        // **Both spellings on both platforms**, which is what this test is for. It was
+        // written with `Path::file_name`, which splits on the separators of the platform it
+        // was compiled for — so the Windows path below survived intact on the macOS leg and
+        // the confinement held on exactly one of the two runners. See `last_component`.
         let envelope = RegisterRefusal::ManyRepositories {
             found: vec![
                 r"C:\Users\someone\Projekty\nysia".to_owned(),
                 "/home/someone/src/orca".to_owned(),
+                // A trailing separator leaves nothing after the last one, and a name that
+                // is only separators leaves nothing at all: neither may reach the envelope
+                // as an empty entry in the list.
+                "/home/someone/src/valve/".to_owned(),
+                "//".to_owned(),
             ],
         }
         .into_envelope();
         let written = format!("{}|{}", envelope.message(), envelope.next_steps().join("|"));
         assert!(written.contains("nysia"), "{written}");
         assert!(written.contains("orca"), "{written}");
+        assert!(written.contains("valve"), "{written}");
         assert!(!written.contains("someone"), "{written}");
         assert!(
             !written.contains('/') && !written.contains('\\'),
             "{written}"
         );
+        // The list is three names, not four: the entry that was only separators is dropped
+        // rather than written down as nothing. Both numbers stay facts about the list —
+        // four were found, three are named, and the remainder is stated as one more, which
+        // is what "found and not named here" means whether the reason is the cap or a name
+        // that reduced to nothing. Under the cap and still carrying a remainder is the case
+        // that would otherwise be spelled as an exact list and quietly be short one.
+        assert!(
+            written.contains("nysia, orca, valve — and 1 more inside it."),
+            "{written}"
+        );
+        assert!(written.contains("4 of the folders"), "{written}");
     }
 
     #[test]
