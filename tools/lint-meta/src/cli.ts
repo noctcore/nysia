@@ -1,13 +1,14 @@
 /**
  * The architecture-rule runner, wired into `pnpm lint`.
  *
- * Five rules today (D-14 keeps the set minimal and lets it ratchet):
+ * Six rules today (D-14 keeps the set minimal and lets it ratchet):
  *
  *   a. nothing outside `apps/desktop` and `apps/web/src/transport` may import tauri;
  *   b. no Rust crate outside `apps/desktop` may depend on tauri;
  *   c. `nysia-core` must not reach tauri through anything;
  *   d. nothing outside the store may reach `StoreContext` through a call;
- *   e. a module that builds a terminal must mute the replies it would otherwise send.
+ *   e. a module that builds a terminal must mute the replies it would otherwise send;
+ *   f. nothing outside `nysia-core/src/agent` may import Claude's specifics.
  *
  * (b) is the load-bearing one: if no crate outside `apps/desktop` depends on tauri then
  * `use tauri::…` there cannot compile, which makes (a) belt and braces. (a) is kept anyway
@@ -55,6 +56,11 @@
  *   though a glob carried a URL query, where it is the single-character wildcard.
  * - **A file ESLint's `ignores` excludes is covered only by rule (a)'s line scan**, which is
  *   weaker than ESLint's AST.
+ * - **Rule (f) is a module boundary, not a word.** It reports a path into
+ *   `nysia-core/src/agent/claude`, so a Claude assumption hardcoded somewhere else — a
+ *   literal `"claude"` in `rpc/`, a flag only that CLI accepts — is invisible to it. Rust
+ *   privacy is the load-bearing half there too: `mod claude` is declared without a
+ *   visibility modifier, so the import this rule reports does not compile either.
  *
  * The allowlists themselves live in `tools/lint-meta/src/boundaries.ts`, which
  * `eslint.config.js` reads too. They used to be two hand-written copies described as
@@ -74,7 +80,7 @@ import { runAllRules, runSourceRules } from './rules.ts';
 const argument = process.argv[2];
 const root = argument === undefined ? findRepoRoot() : resolve(argument);
 const includeFixtures = process.argv.includes('--include-fixtures');
-/** The source rules alone — (a), (d) and (e) — for a tree that is not a cargo workspace. */
+/** The source rules alone — (a), (d), (e), (f) — for a tree that is not a cargo workspace. */
 const sourceOnly = process.argv.includes('--source-only');
 
 let violations;
@@ -93,9 +99,9 @@ try {
 }
 
 if (violations.length === 0) {
-  // Three source rules (tauri imports, store-context calls, an unmuted renderer); the cargo
-  // rules add two more.
-  process.stdout.write(`lint-meta: ${sourceOnly ? 3 : 5} rules, 0 violations\n`);
+  // Four source rules (tauri imports, store-context calls, an unmuted renderer, Claude
+  // specifics outside the agent module); the cargo rules add two more.
+  process.stdout.write(`lint-meta: ${sourceOnly ? 4 : 6} rules, 0 violations\n`);
   process.exit(0);
 }
 

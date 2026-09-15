@@ -99,6 +99,26 @@ export const WEB_ENTRY: Boundary = { kind: 'file', path: 'apps/web/src/main' };
 export const TAURI_ALLOWED: readonly Boundary[] = [DESKTOP, TRANSPORT];
 
 /**
+ * The agent module: the only place Claude's specifics may be named (D-3, D-4).
+ *
+ * Rust-only, so ESLint never reads this one — it has no `import` to restrict. It lives here
+ * anyway because this module is where a boundary is written down, and a second list kept
+ * somewhere else is the defect this file exists to have removed (#20).
+ */
+export const AGENT: Boundary = { kind: 'directory', path: 'crates/nysia-core/src/agent' };
+
+/**
+ * The Claude module inside it: the specifics themselves.
+ *
+ * `agent/**` may name these; nothing else may, and nothing in `agent/**` outside this
+ * directory may re-export them back out under a neutral name.
+ */
+export const AGENT_CLAUDE: Boundary = {
+  kind: 'directory',
+  path: 'crates/nysia-core/src/agent/claude',
+};
+
+/**
  * Where the raw store provider may be reached.
  *
  * Two carve-outs and only two: the store module itself, and the entry point that composes
