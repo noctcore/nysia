@@ -1,5 +1,6 @@
 /**
- * The `nysia` runtime that ships inside the app bundle — staged, and checked for.
+ * The `nysia` runtime the window starts — ensured for a dev run, staged into a bundle, and
+ * checked for once the bundle is laid out.
  *
  * D-11 says one binary is both the daemon and the CLI, selected by argv. D-1 says killing
  * the window must never interrupt a session, which means the window is a *client* of a
@@ -44,11 +45,11 @@
  * be called `nysia` and has to land beside the window, which is the file the daemon runs
  * from. §12 q5 of the architecture doc carries that with the line numbers in it.
  *
- * ## What a dev run needs, and why it is not this file
+ * ## What a dev run needs
  *
  * The window resolves its runtime **beside its own executable**, which in development is
- * `target/<profile>/nysia` — the binary cargo just built, never the copy in `binaries/`.
- * `tauri dev` merges only `build.devUrl` into `TAURI_CONFIG` and never the `externalBin`
+ * `target/<profile>/nysia` — the binary cargo built, never the copy in `binaries/`. `tauri
+ * dev` merges only `build.devUrl` into `TAURI_CONFIG` and never the `externalBin`
  * declaration, so nothing on the dev path reads `binaries/` at all: staging for a dev run
  * would copy a file no window opens.
  *
@@ -56,26 +57,39 @@
  * builds `nysia-desktop` without ever building `nysia`. That was #74: a fresh clone's first
  * `pnpm dev` opened a window whose runtime was not there, and the notice it raised said to
  * reinstall, which is honest about the missing file and useless advice for a missing build.
- * So `pnpm dev` is `cargo build -p nysia && tauri dev`, and what decides whether anything
- * needs rebuilding is cargo's own fingerprint rather than a hand-rolled staleness test that
- * cannot see a feature, a profile, or a dependency that moved underneath it. Measured on
- * Windows with everything warm: ~0.3s when nothing changed with no daemon up and ~0.8s with
- * one, against the ~0.5s `tauri dev` already spends deciding `nysia-desktop` is current.
  *
- * **What that costs when the last run's daemon is still up**, which is not exotic: it
- * outlives the window by design, and idle retire needs `sessions.is_empty()`, so one that was
- * holding a tab is still there. Change anything `nysia` is built from while it is, and the
- * prepend **fails** — `failed to remove file target\<profile>\nysia.exe … os error 5`,
- * measured — so `&&` short-circuits and no window opens. That is the single-linked rule from
- * the section above, reached through cargo's own uplift rather than `copy_binaries`:
- * rebuilding `nysia` writes a fresh `deps/nysia.exe` at a **new inode**, which orphans the
- * uplift copy the daemon is running from, and a single-linked running image is the one
- * Windows will not unlink. Same remedy as §12 q5, then: stop the daemon holding that file.
- * A build with nothing to do does not trip it — measured with a daemon up — so an edit to the
- * web app, or to the window alone, is unaffected. What that sequence did before the prepend
- * was open a window onto the stale daemon and say nothing about it.
+ * So `pnpm dev` runs [`ensure`] first, and **`ensure` builds only when the file is absent**.
+ * Absent is the whole condition: no mtime, no size, nothing compared against sources. The two
+ * richer answers are both worse. Comparing the binary to its sources re-implements cargo's
+ * fingerprint and cannot see a feature, a profile or a moved dependency. Running `cargo build
+ * -p nysia` unconditionally is worse still, because it **fails** in an ordinary sequence: a
+ * daemon from the last run that is still up is running from `target/<profile>/nysia`, and
+ * rewriting that file means unlinking a single-linked running image, which Windows refuses
+ * (`os error 5`, measured). A daemon outliving its window is **D-1 working as designed**, not
+ * an edge case — idle retire needs `sessions.is_empty()`, so one that held a tab is still
+ * there — so a dev command that breaks there breaks in the ordinary case. Building only what
+ * is missing cannot reach that failure at all: it never rewrites a file that exists.
  *
- * Two commands:
+ * **What that costs, and it is a real cost.** A runtime that is present is never rebuilt, so
+ * editing the daemon and running `pnpm dev` starts the *old* one and says nothing. Stopping
+ * the daemon does not refresh it either; only `cargo build -p nysia`, or deleting
+ * `target/<profile>/nysia`, does. That gap is not #74 and not a regression — today's `pnpm
+ * dev` builds nothing at all — but it is the price of never failing in the D-1 path, and
+ * somebody reading this later should know it was bought rather than overlooked.
+ *
+ * **Why one entry point and not a `&&`.** pnpm appends the arguments of `pnpm dev -- --release`
+ * to the end of the whole script, so a prepended command never sees the flag: it would build
+ * `debug` while the window it then opens is `target/release/nysia-desktop.exe`, which looks
+ * beside *itself* — #74 again, verbatim, in the one place nobody would look for it. Reading
+ * the arguments and then handing them on is what makes the profile the one actually run.
+ *
+ * Four commands:
+ *
+ * - `dev [tauri args…]` is what `pnpm dev` runs: `ensure`, then `tauri dev` with the same
+ *   arguments and the same exit code.
+ *
+ * - `ensure [--release]` builds `nysia` if `target/<profile>/nysia` is not there, and does
+ *   nothing whatsoever if it is.
  *
  * - `stage [--profile debug|release]` copies the freshly built `nysia` into `binaries/`.
  *   Needed **before bundling** — `pnpm build:app`, or the bundle job in CI — and never
@@ -90,9 +104,10 @@
  */
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { findRepoRoot } from '../tools/lint-meta/src/repoRoot.ts';
 
@@ -132,6 +147,94 @@ function hostTriple(): string {
     throw new Error(`rustc -vV printed no host line:\n${rustc.stdout}`);
   }
   return host.slice('host: '.length).trim();
+}
+
+/** A cargo profile, as both the directory it lands in and the flags that select it. */
+export interface Profile {
+  /** The directory under `target/`. */
+  readonly directory: string;
+  /** What to pass cargo to build into it — empty for the default. */
+  readonly cargoFlags: readonly string[];
+}
+
+/**
+ * The profile a `tauri dev` invocation will run, read from the arguments it was given.
+ *
+ * **Every argument is read, including the ones after a `--`, and that is deliberate.** The
+ * obvious rule — stop at `--`, because what follows belongs to the runner rather than to
+ * tauri — is wrong twice over. pnpm forwards `pnpm dev -- --release` as the two words `--`
+ * `--release`, so stopping at the separator throws away the flag in exactly the invocation a
+ * developer would type; and tauri hands its runner arguments to `cargo run`, so a `--release`
+ * that *is* on the far side of a `--` still selects the release profile. Both were measured.
+ *
+ * `--profile <name>` is read too, though `tauri dev` has no such switch of its own, because
+ * it reaches cargo the same way and is the only other thing that moves the output directory.
+ * The `dev` profile lands in `target/debug` — cargo's own spelling quirk, and the one case
+ * where the directory is not the profile's name. Anything else is a custom profile in
+ * `target/<name>`. `scripts/sidecar.test.ts` pins every direction of this.
+ */
+export function profileFor(args: readonly string[]): Profile {
+  const flag = args.indexOf('--profile');
+  const named = flag === -1 ? undefined : args[flag + 1];
+  if (named !== undefined) {
+    return { directory: named === 'dev' ? 'debug' : named, cargoFlags: ['--profile', named] };
+  }
+  return args.includes('--release')
+    ? { directory: 'release', cargoFlags: ['--release'] }
+    : { directory: 'debug', cargoFlags: [] };
+}
+
+/** Where the window built under `profile` will look for its runtime. */
+export function runtimeFor(profile: Profile, repoRoot = findRepoRoot()): string {
+  return join(repoRoot, 'target', profile.directory, RUNTIME);
+}
+
+/**
+ * Build the runtime for `profile` **if it is not already there**, and otherwise do nothing.
+ *
+ * Returns whether it built. The "otherwise do nothing" is the load-bearing half: it is what
+ * keeps this off the file a surviving daemon is running from, which is the whole reason the
+ * condition is existence rather than freshness. See the header.
+ */
+export function ensure(profile: Profile, repoRoot = findRepoRoot()): boolean {
+  const runtime = runtimeFor(profile, repoRoot);
+  if (existsSync(runtime)) {
+    return false;
+  }
+  const flags = ['build', '-p', 'nysia', ...profile.cargoFlags];
+  process.stdout.write(`${runtime} is absent — building it once: cargo ${flags.join(' ')}\n`);
+  const cargo = spawnSync('cargo', flags, { stdio: 'inherit', cwd: repoRoot });
+  if (cargo.error !== undefined) {
+    throw new Error(`cargo ${flags.join(' ')} could not start: ${cargo.error.message}`);
+  }
+  if (cargo.status !== 0) {
+    throw new Error(
+      `cargo ${flags.join(' ')} failed, so the window would have no runtime to start`,
+    );
+  }
+  return true;
+}
+
+/**
+ * The tauri CLI's own entry point, run with this node rather than through its `.bin` shim.
+ *
+ * The shim is a `.CMD` on Windows, which node refuses to spawn without a shell, and handing a
+ * developer's arguments to a shell is a quoting problem nobody needs. `tauri.js` is what that
+ * shim execs anyway, so running it directly is the same program with one less layer.
+ *
+ * Resolved from `apps/desktop`, because that is the package `@tauri-apps/cli` is a dependency
+ * of; pnpm's `node_modules` is strict, so it is not resolvable from the root.
+ */
+function tauriCli(repoRoot: string): string {
+  const from = createRequire(pathToFileURL(join(repoRoot, 'apps', 'desktop', 'package.json')));
+  try {
+    return from.resolve('@tauri-apps/cli/tauri.js');
+  } catch (error) {
+    throw new Error(
+      '@tauri-apps/cli is not installed, so there is no `tauri dev` to run — `pnpm install` first',
+      { cause: error },
+    );
+  }
 }
 
 /** Copy the built runtime into `binaries/`, named for the triple. */
@@ -180,6 +283,28 @@ export function verify(directory: string): void {
 function main(argv: readonly string[]): void {
   const [command, ...rest] = argv;
   switch (command) {
+    case 'dev': {
+      const repoRoot = findRepoRoot();
+      ensure(profileFor(rest), repoRoot);
+      const tauri = spawnSync(process.execPath, [tauriCli(repoRoot), 'dev', ...rest], {
+        stdio: 'inherit',
+        cwd: join(repoRoot, 'apps', 'desktop'),
+      });
+      if (tauri.error !== undefined) {
+        throw new Error(`tauri dev could not start: ${tauri.error.message}`);
+      }
+      // A signal leaves `status` null — Ctrl-C on the dev loop is the ordinary way out, and
+      // reporting it as success would tell a script the window exited cleanly.
+      process.exitCode = tauri.status ?? 1;
+      return;
+    }
+    case 'ensure': {
+      const profile = profileFor(rest);
+      if (!ensure(profile)) {
+        process.stdout.write(`${runtimeFor(profile)} is already there\n`);
+      }
+      return;
+    }
     case 'stage': {
       const flag = rest.indexOf('--profile');
       const profile = flag === -1 ? 'debug' : (rest[flag + 1] ?? 'debug');
@@ -197,7 +322,10 @@ function main(argv: readonly string[]): void {
       return;
     }
     default:
-      throw new Error(`usage: sidecar.ts stage [--profile <p>] | verify <directory>`);
+      throw new Error(
+        'usage: sidecar.ts dev [tauri args…] | ensure [--release] | ' +
+          'stage [--profile <p>] | verify <directory>',
+      );
   }
 }
 
