@@ -158,6 +158,34 @@ export interface Profile {
 }
 
 /**
+ * Where each of cargo's built-in profiles builds to, which is not simply its name.
+ *
+ * `dev` and `test` share `target/debug`; `release` and `bench` share `target/release`. Only a
+ * profile declared in a manifest gets a directory of its own, `target/<name>` — and this
+ * workspace declares none, so the four below are the whole of what `pnpm dev` can reach.
+ *
+ * Written out rather than special-cased because the short version is wrong and reads right.
+ * An earlier revision of this file said `dev` was "the one case where the directory is not the
+ * profile's name", which is what tauri-cli 2.11.4's own `get_profile_dir` believes as well —
+ * agreeing with the tool being wrapped is how the mistake survived a review. Measured against
+ * cargo 1.97.1 with a throwaway crate, one `--profile` per build:
+ *
+ * | `--profile` | directory   |
+ * |-------------|-------------|
+ * | `dev`       | `debug`     |
+ * | `test`      | `debug`     |
+ * | `release`   | `release`   |
+ * | `bench`     | `release`   |
+ * | anything    | `<name>`    |
+ */
+const BUILT_IN_DIRECTORY: Readonly<Record<string, string>> = {
+  dev: 'debug',
+  test: 'debug',
+  release: 'release',
+  bench: 'release',
+};
+
+/**
  * The profile a `tauri dev` invocation will run, read from the arguments it was given.
  *
  * **Every argument is read, including the ones after a `--`, and that is deliberate.** The
@@ -167,17 +195,23 @@ export interface Profile {
  * developer would type; and tauri hands its runner arguments to `cargo run`, so a `--release`
  * that *is* on the far side of a `--` still selects the release profile. Both were measured.
  *
- * `--profile <name>` is read too, though `tauri dev` has no such switch of its own, because
- * it reaches cargo the same way and is the only other thing that moves the output directory.
- * The `dev` profile lands in `target/debug` — cargo's own spelling quirk, and the one case
- * where the directory is not the profile's name. Anything else is a custom profile in
- * `target/<name>`. `scripts/sidecar.test.ts` pins every direction of this.
+ * `--profile <name>` is read too, though `tauri dev` has no such switch of its own, because it
+ * reaches cargo the same way and is the only other thing that moves the output directory.
+ * Measured: `pnpm dev -- --profile test` runs `cargo run --profile test` and opens a window.
+ * Which directory it lands in comes from [`BUILT_IN_DIRECTORY`], because **half of cargo's
+ * built-in profiles are not named after the directory they build into** and guessing costs
+ * more than it looks: a profile whose directory is guessed wrong is one `ensure` rebuilds on
+ * every single run, since the path it checks is one cargo never writes — absent-only quietly
+ * degrading back into the unconditional build this file exists to avoid.
  */
 export function profileFor(args: readonly string[]): Profile {
   const flag = args.indexOf('--profile');
   const named = flag === -1 ? undefined : args[flag + 1];
   if (named !== undefined) {
-    return { directory: named === 'dev' ? 'debug' : named, cargoFlags: ['--profile', named] };
+    return {
+      directory: BUILT_IN_DIRECTORY[named] ?? named,
+      cargoFlags: ['--profile', named],
+    };
   }
   return args.includes('--release')
     ? { directory: 'release', cargoFlags: ['--release'] }
