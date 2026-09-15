@@ -28,6 +28,10 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::agent::{
+    AgentHook, AgentStatus, AgentStatusGet, AgentStatusList, AgentStatusSubscribe,
+    AgentStatusSubscribed, AgentStatusUnsubscribe,
+};
 use crate::error::ErrorEnvelope;
 use crate::newtype::deserialize_via_from_str;
 use crate::session::{SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary};
@@ -100,7 +104,13 @@ impl fmt::Display for RequestId {
 deserialize_via_from_str!(RequestId);
 
 /// What a request asks for.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+///
+/// `PartialEq` but not `Eq`: [`AgentHook`] carries Claude's question payload verbatim as
+/// arbitrary JSON, and `serde_json::Value` is not `Eq` because a float could be `NaN`. The
+/// same goes for [`ResponsePayload`] and both envelopes. Nothing here is a map key, so the
+/// weaker bound costs nothing and keeping the stronger one would have meant re-shaping a
+/// payload this crate has no authority over.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
 pub enum RequestPayload {
@@ -122,6 +132,16 @@ pub enum RequestPayload {
     StreamAttach(StreamAttach),
     /// Stop routing a stream id.
     StreamDetach(StreamDetach),
+    /// Hand the daemon a Claude hook event (D-16).
+    AgentHook(AgentHook),
+    /// Read one pane's agent status.
+    AgentStatusGet(AgentStatusGet),
+    /// Read every pane's agent status.
+    AgentStatusList(AgentStatusList),
+    /// Start receiving status changes on this client's stream connection.
+    AgentStatusSubscribe(AgentStatusSubscribe),
+    /// Stop receiving status changes.
+    AgentStatusUnsubscribe(AgentStatusUnsubscribe),
 }
 
 impl RequestPayload {
@@ -138,14 +158,21 @@ impl RequestPayload {
             Self::TerminalWait(_) => "terminal_wait",
             Self::StreamAttach(_) => "stream_attach",
             Self::StreamDetach(_) => "stream_detach",
+            Self::AgentHook(_) => "agent_hook",
+            Self::AgentStatusGet(_) => "agent_status_get",
+            Self::AgentStatusList(_) => "agent_status_list",
+            Self::AgentStatusSubscribe(_) => "agent_status_subscribe",
+            Self::AgentStatusUnsubscribe(_) => "agent_status_unsubscribe",
         }
     }
 
     /// Whether this verb changes daemon state, and so may carry `retryRequest`.
     ///
     /// A read carrying a retry id is not an error — the daemon ignores it — but it is not
-    /// idempotency either, because there is no effect to deduplicate. Only the four verbs
-    /// that change something get a receipt.
+    /// idempotency either, because there is no effect to deduplicate. Only the verbs that
+    /// change something get a receipt, and
+    /// `only_the_verbs_that_change_something_are_mutations` is what holds this list to the
+    /// enum above rather than to a number in this sentence.
     #[must_use]
     pub fn is_mutation(&self) -> bool {
         match self {
@@ -154,14 +181,26 @@ impl RequestPayload {
             | Self::TerminalSend(_)
             | Self::TerminalResize(_)
             | Self::StreamAttach(_)
-            | Self::StreamDetach(_) => true,
-            Self::SessionList(_) | Self::TerminalRead(_) | Self::TerminalWait(_) => false,
+            | Self::StreamDetach(_)
+            // Ingest writes a row, and the spool replays what it could not send — a record
+            // drained twice must record one state change, not two.
+            | Self::AgentHook(_)
+            // Subscribing and unsubscribing move a stream id, exactly as attaching and
+            // detaching do, and ids are never reused: a retried subscribe that ran twice
+            // would leak one for the life of the connection.
+            | Self::AgentStatusSubscribe(_)
+            | Self::AgentStatusUnsubscribe(_) => true,
+            Self::SessionList(_)
+            | Self::TerminalRead(_)
+            | Self::TerminalWait(_)
+            | Self::AgentStatusGet(_)
+            | Self::AgentStatusList(_) => false,
         }
     }
 }
 
 /// One control request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct RequestEnvelope {
@@ -228,7 +267,9 @@ pub struct MutationReceipt {
 /// the question. Verbs whose whole answer is "it happened" are unit variants: the
 /// `requestId` already says which request they answer, and inventing a body to hold nothing
 /// would be a shape to maintain forever.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+///
+/// `PartialEq` but not `Eq`, for [`RequestPayload`]'s reason.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
 pub enum ResponsePayload {
@@ -253,6 +294,26 @@ pub enum ResponsePayload {
     StreamAttach(StreamAttached),
     /// The id was released.
     StreamDetach,
+    /// The hook event was recorded.
+    AgentHook,
+    /// The pane's status, or `null` when no agent has ever reported one for it.
+    ///
+    /// A pane with no status is the ordinary case — a shell, or an agent that has not run a
+    /// hook yet — so it is an absent answer rather than an error. `unknown_session` here
+    /// would have a caller treating "nothing has happened" as a fault.
+    AgentStatusGet {
+        /// The status, or `null`.
+        status: Option<AgentStatus>,
+    },
+    /// Every pane the daemon holds a status for.
+    AgentStatusList {
+        /// The rows.
+        statuses: Vec<AgentStatus>,
+    },
+    /// The id the daemon assigned to the subscription.
+    AgentStatusSubscribe(AgentStatusSubscribed),
+    /// The subscription was released.
+    AgentStatusUnsubscribe,
     /// The verb failed.
     Error(ErrorEnvelope),
 }
@@ -271,6 +332,11 @@ impl ResponsePayload {
             Self::TerminalWait(_) => "terminal_wait",
             Self::StreamAttach(_) => "stream_attach",
             Self::StreamDetach => "stream_detach",
+            Self::AgentHook => "agent_hook",
+            Self::AgentStatusGet { .. } => "agent_status_get",
+            Self::AgentStatusList { .. } => "agent_status_list",
+            Self::AgentStatusSubscribe(_) => "agent_status_subscribe",
+            Self::AgentStatusUnsubscribe => "agent_status_unsubscribe",
             Self::Error(_) => "error",
         }
     }
@@ -286,7 +352,7 @@ impl ResponsePayload {
 }
 
 /// One control response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct ResponseEnvelope {
@@ -335,6 +401,7 @@ impl ResponseEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{AgentState, AgentStatusRow, HookEvent, HookEventName, UnixMillis};
     use crate::error::{ErrorCode, NextSteps};
     use crate::identity::{Incarnation, PaneKey, SessionHandle, SessionKind};
     use crate::terminal::{LineCursor, ReadMode};
@@ -413,6 +480,18 @@ mod tests {
             RequestPayload::StreamDetach(StreamDetach {
                 stream_id: crate::stream::StreamId(3),
             }),
+            RequestPayload::AgentHook(AgentHook {
+                pane_hint: Some(PaneKey::new("tab_1", "leaf_1").unwrap()),
+                event: HookEvent::new(HookEventName::Stop),
+            }),
+            RequestPayload::AgentStatusGet(AgentStatusGet {
+                pane: PaneKey::new("tab_1", "leaf_1").unwrap(),
+            }),
+            RequestPayload::AgentStatusList(AgentStatusList {}),
+            RequestPayload::AgentStatusSubscribe(AgentStatusSubscribe {}),
+            RequestPayload::AgentStatusUnsubscribe(AgentStatusUnsubscribe {
+                stream_id: crate::stream::StreamId(4),
+            }),
         ];
         for payload in payloads {
             let envelope = RequestEnvelope::new(payload);
@@ -461,6 +540,110 @@ mod tests {
             })
             .is_mutation()
         );
+
+        // Ingest writes a row, and the spool exists to send again what it could not send
+        // the first time. Without a receipt a drained record would be indistinguishable
+        // from a second hook firing, and the history §2.3 caps would fill with duplicates.
+        assert!(
+            RequestPayload::AgentHook(AgentHook {
+                pane_hint: None,
+                event: HookEvent::new(HookEventName::Stop),
+            })
+            .is_mutation()
+        );
+        // A subscription moves a stream id exactly as an attach does, and ids are never
+        // reused — so a retried subscribe that ran twice would leak one permanently.
+        assert!(RequestPayload::AgentStatusSubscribe(AgentStatusSubscribe {}).is_mutation());
+        assert!(
+            RequestPayload::AgentStatusUnsubscribe(AgentStatusUnsubscribe {
+                stream_id: crate::stream::StreamId(4),
+            })
+            .is_mutation()
+        );
+
+        // Reading a status changes nothing, so neither read carries a receipt.
+        assert!(
+            !RequestPayload::AgentStatusGet(AgentStatusGet {
+                pane: PaneKey::new("tab_1", "leaf_1").unwrap(),
+            })
+            .is_mutation()
+        );
+        assert!(!RequestPayload::AgentStatusList(AgentStatusList {}).is_mutation());
+    }
+
+    #[test]
+    fn the_agent_status_verbs_are_matched_to_their_answers() {
+        let get = RequestEnvelope::new(RequestPayload::AgentStatusGet(AgentStatusGet {
+            pane: PaneKey::new("tab_1", "leaf_1").unwrap(),
+        }));
+        assert_eq!(get.payload.verb(), "agent_status_get");
+
+        // A pane nothing has reported for answers `null`, not an error: a shell, or an
+        // agent whose first hook has not fired, is the ordinary case rather than a fault.
+        let empty = ResponseEnvelope::new(
+            get.request_id.clone(),
+            ResponsePayload::AgentStatusGet { status: None },
+        );
+        assert!(empty.answers(&get));
+        let json = serde_json::to_value(&empty).unwrap();
+        assert_eq!(json["type"], "agent_status_get");
+        assert_eq!(json["status"], serde_json::Value::Null);
+        assert_eq!(
+            serde_json::from_value::<ResponseEnvelope>(json).unwrap(),
+            empty
+        );
+
+        let row = AgentStatusRow {
+            pane: PaneKey::new("tab_1", "leaf_1").unwrap(),
+            state: AgentState::Done,
+            question: None,
+            is_interrupt: false,
+            session_boundary: false,
+            agent_id: None,
+            observed_at: UnixMillis(1_757_721_600_000),
+            restored_unconfirmed: false,
+        };
+        let listed = ResponseEnvelope::new(
+            RequestId::generate(),
+            ResponsePayload::AgentStatusList {
+                statuses: vec![AgentStatus::new(row)],
+            },
+        );
+        let json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(json["type"], "agent_status_list");
+        assert_eq!(json["statuses"][0]["lead"]["state"], "done");
+        assert_eq!(
+            serde_json::from_value::<ResponseEnvelope>(json).unwrap(),
+            listed
+        );
+
+        // The subscription's answer carries the id its frames will arrive under, exactly as
+        // a `stream_attach` does — the same id space, the same rules.
+        let subscribe = RequestEnvelope::new(RequestPayload::AgentStatusSubscribe(
+            AgentStatusSubscribe {},
+        ));
+        let subscribed = ResponseEnvelope::new(
+            subscribe.request_id.clone(),
+            ResponsePayload::AgentStatusSubscribe(AgentStatusSubscribed {
+                stream_id: crate::stream::StreamId(4),
+            }),
+        );
+        assert!(subscribed.answers(&subscribe));
+
+        // A subscribe answered by an unsubscribe is a routing bug, not a valid reply.
+        let released = ResponseEnvelope::new(
+            subscribe.request_id.clone(),
+            ResponsePayload::AgentStatusUnsubscribe,
+        );
+        assert!(!released.answers(&subscribe));
+
+        let hook = RequestEnvelope::new(RequestPayload::AgentHook(AgentHook {
+            pane_hint: None,
+            event: HookEvent::new(HookEventName::Stop),
+        }));
+        let recorded = ResponseEnvelope::new(hook.request_id.clone(), ResponsePayload::AgentHook);
+        assert!(recorded.answers(&hook));
+        assert_eq!(hook.payload.verb(), "agent_hook");
     }
 
     #[test]
