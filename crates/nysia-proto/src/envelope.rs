@@ -34,6 +34,7 @@ use crate::agent::{
 };
 use crate::error::ErrorEnvelope;
 use crate::newtype::deserialize_via_from_str;
+use crate::project::{Project, ProjectForget, ProjectList, ProjectRegister, ProjectRegistered};
 use crate::session::{SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary};
 use crate::stream::{StreamAttach, StreamAttached, StreamDetach};
 use crate::terminal::{
@@ -142,6 +143,12 @@ pub enum RequestPayload {
     AgentStatusSubscribe(AgentStatusSubscribe),
     /// Stop receiving status changes.
     AgentStatusUnsubscribe(AgentStatusUnsubscribe),
+    /// Register a folder as a project.
+    ProjectRegister(ProjectRegister),
+    /// List every registered project.
+    ProjectList(ProjectList),
+    /// Forget a project's registration.
+    ProjectForget(ProjectForget),
 }
 
 impl RequestPayload {
@@ -163,6 +170,9 @@ impl RequestPayload {
             Self::AgentStatusList(_) => "agent_status_list",
             Self::AgentStatusSubscribe(_) => "agent_status_subscribe",
             Self::AgentStatusUnsubscribe(_) => "agent_status_unsubscribe",
+            Self::ProjectRegister(_) => "project_register",
+            Self::ProjectList(_) => "project_list",
+            Self::ProjectForget(_) => "project_forget",
         }
     }
 
@@ -189,12 +199,19 @@ impl RequestPayload {
             // detaching do, and ids are never reused: a retried subscribe that ran twice
             // would leak one for the life of the connection.
             | Self::AgentStatusSubscribe(_)
-            | Self::AgentStatusUnsubscribe(_) => true,
+            | Self::AgentStatusUnsubscribe(_)
+            // Registration writes a row and forgetting removes one. Registering is
+            // idempotent by path, so a retry that ran twice would not make two projects —
+            // but it would answer `alreadyRegistered: true` the second time, telling the
+            // caller its own first attempt had beaten it there.
+            | Self::ProjectRegister(_)
+            | Self::ProjectForget(_) => true,
             Self::SessionList(_)
             | Self::TerminalRead(_)
             | Self::TerminalWait(_)
             | Self::AgentStatusGet(_)
-            | Self::AgentStatusList(_) => false,
+            | Self::AgentStatusList(_)
+            | Self::ProjectList(_) => false,
         }
     }
 }
@@ -314,6 +331,15 @@ pub enum ResponsePayload {
     AgentStatusSubscribe(AgentStatusSubscribed),
     /// The subscription was released.
     AgentStatusUnsubscribe,
+    /// The project, and whether the path was already one.
+    ProjectRegister(ProjectRegistered),
+    /// Every project the daemon has registered.
+    ProjectList {
+        /// The rows.
+        projects: Vec<Project>,
+    },
+    /// The registration is gone. The folder is not.
+    ProjectForget,
     /// The verb failed.
     Error(ErrorEnvelope),
 }
@@ -337,6 +363,9 @@ impl ResponsePayload {
             Self::AgentStatusList { .. } => "agent_status_list",
             Self::AgentStatusSubscribe(_) => "agent_status_subscribe",
             Self::AgentStatusUnsubscribe => "agent_status_unsubscribe",
+            Self::ProjectRegister(_) => "project_register",
+            Self::ProjectList { .. } => "project_list",
+            Self::ProjectForget => "project_forget",
             Self::Error(_) => "error",
         }
     }
@@ -409,6 +438,13 @@ mod tests {
 
     fn handle() -> SessionHandle {
         "sess_0e2fa1f4-4f3e-4c5f-9f2a-1b2c3d4e5f60".parse().unwrap()
+    }
+
+    /// A literal id rather than a derived one, so the test says the same thing on both CI
+    /// legs: `ProjectId::from_canonical_path` folds case on Windows and does not on Unix,
+    /// which is correct and would make a derived id platform-dependent.
+    fn project_id() -> crate::project::ProjectId {
+        "proj_9a8b4bcdaa346c4da0fe52b7dd15df9f".parse().unwrap()
     }
 
     fn create() -> RequestPayload {
@@ -492,6 +528,11 @@ mod tests {
             RequestPayload::AgentStatusUnsubscribe(AgentStatusUnsubscribe {
                 stream_id: crate::stream::StreamId(4),
             }),
+            RequestPayload::ProjectRegister(ProjectRegister {
+                path: "C:/src/nysia".into(),
+            }),
+            RequestPayload::ProjectList(ProjectList {}),
+            RequestPayload::ProjectForget(ProjectForget { id: project_id() }),
         ];
         for payload in payloads {
             let envelope = RequestEnvelope::new(payload);
@@ -569,6 +610,75 @@ mod tests {
             .is_mutation()
         );
         assert!(!RequestPayload::AgentStatusList(AgentStatusList {}).is_mutation());
+
+        // Registering writes a row and forgetting removes one. Reading the list changes
+        // nothing, so it carries no receipt.
+        assert!(
+            RequestPayload::ProjectRegister(ProjectRegister {
+                path: "C:/src/nysia".into(),
+            })
+            .is_mutation()
+        );
+        assert!(RequestPayload::ProjectForget(ProjectForget { id: project_id() }).is_mutation());
+        assert!(!RequestPayload::ProjectList(ProjectList {}).is_mutation());
+    }
+
+    #[test]
+    fn the_project_verbs_are_matched_to_their_answers() {
+        let register = RequestEnvelope::new(RequestPayload::ProjectRegister(ProjectRegister {
+            path: "C:/src/nysia".into(),
+        }));
+        assert_eq!(register.payload.verb(), "project_register");
+
+        let project = Project {
+            id: project_id(),
+            name: "nysia".to_owned(),
+            group: Project::DEFAULT_GROUP.to_owned(),
+            worktrees: vec![crate::project::Worktree {
+                branch: "main".to_owned(),
+                is_primary: true,
+                sessions: Vec::new(),
+            }],
+        };
+        let registered = ResponseEnvelope::new(
+            register.request_id.clone(),
+            ResponsePayload::ProjectRegister(ProjectRegistered {
+                project: project.clone(),
+                already_registered: false,
+            }),
+        );
+        assert!(registered.answers(&register));
+        let json = serde_json::to_value(&registered).unwrap();
+        assert_eq!(json["type"], "project_register");
+        assert_eq!(json["project"]["worktrees"][0]["isPrimary"], true);
+        assert_eq!(json["alreadyRegistered"], false);
+        assert_eq!(
+            serde_json::from_value::<ResponseEnvelope>(json).unwrap(),
+            registered
+        );
+
+        let listed = ResponseEnvelope::new(
+            RequestId::generate(),
+            ResponsePayload::ProjectList {
+                projects: vec![project],
+            },
+        );
+        let json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(json["type"], "project_list");
+        assert_eq!(json["projects"][0]["group"], "Dev");
+        assert_eq!(
+            serde_json::from_value::<ResponseEnvelope>(json).unwrap(),
+            listed
+        );
+
+        let forget = RequestEnvelope::new(RequestPayload::ProjectForget(ProjectForget {
+            id: project_id(),
+        }));
+        let forgotten =
+            ResponseEnvelope::new(forget.request_id.clone(), ResponsePayload::ProjectForget);
+        assert!(forgotten.answers(&forget));
+        // A register answered by a forget is a routing bug, not a valid reply.
+        assert!(!forgotten.answers(&register));
     }
 
     #[test]
