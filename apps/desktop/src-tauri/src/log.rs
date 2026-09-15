@@ -78,14 +78,10 @@ pub fn install() -> Option<PathBuf> {
 
     match opened {
         Ok((path, file)) => {
-            // `Arc<File>` is a `MakeWriter` because `&File` is `io::Write`, and `.and` layers
-            // the two sinks. Every event therefore reaches the file *and* the terminal a
-            // developer is watching, rather than one or the other depending on the build.
-            let writer = Arc::new(file).and(std::io::stderr);
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_ansi(false)
-                .with_writer(writer)
+                .with_writer(sink(file))
                 .init();
             spawn_trim(path.clone());
             tracing::info!(path = %path.display(), "the window is logging here");
@@ -103,6 +99,19 @@ pub fn install() -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// Both sinks at once: the log file, and the stderr a developer is watching.
+///
+/// `Arc<File>` is a `MakeWriter` because `&File` is `io::Write`, and `.and` layers the two, so
+/// an event reaches both rather than one or the other depending on the build.
+///
+/// Its own function so the test can build the writer [`install`] builds. `install` itself is
+/// unreachable from a test — it calls `.init()`, which installs a *global* subscriber and can
+/// only happen once in a process — and a composition nothing exercises is exactly where a
+/// silent "the file stayed empty" would live.
+fn sink(file: std::fs::File) -> impl for<'a> tracing_subscriber::fmt::MakeWriter<'a> + 'static {
+    Arc::new(file).and(std::io::stderr)
 }
 
 /// Keep the window's own log inside the cap for as long as the window runs.
@@ -139,4 +148,64 @@ fn spawn_trim(path: PathBuf) {
         .unwrap_or_else(|err| {
             tracing::warn!(%err, "the window log will not be trimmed while this window runs");
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    #[test]
+    fn an_event_reaches_the_file_and_not_only_stderr() {
+        // The one thing about this module that could fail silently. `install` cannot be
+        // called from a test — `.init()` is global and once per process — so the writer it
+        // builds is built here instead, through the same function, and asked whether an event
+        // actually landed. A packaged Windows build has no stderr at all, so "it appeared in
+        // the terminal" is not evidence of anything.
+        let dir = std::env::temp_dir().join(format!("nysia-window-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("nysiad.window.log");
+
+        let file = log_file::open_for_append(&path).expect("a log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink(file))
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(verb = "stream_attach", stream = 4, "served");
+        });
+
+        let written = std::fs::read_to_string(&path).expect("the log");
+        assert!(
+            written.contains("stream_attach") && written.contains("stream=4"),
+            "the event did not reach the window's log file: {written}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_window_log_is_rotated_by_the_same_policy_as_the_daemons() {
+        // Not a second cap with the same numbers by coincidence — literally `log_file`'s, so
+        // the two files cannot drift into different retention.
+        let dir = std::env::temp_dir().join(format!("nysia-window-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("nysiad.window.log");
+
+        std::fs::File::create(&path)
+            .expect("a log")
+            .set_len(log_file::MAX_LOG_BYTES + 1)
+            .expect("a size over the cap");
+        let mut opened = log_file::open_for_append(&path).expect("a log");
+        opened.write_all(b"this window\n").expect("a write");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the log"),
+            "this window\n"
+        );
+        assert!(log_file::rotation_path(&path, 1).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
