@@ -371,11 +371,11 @@ fn now() -> UnixMillis {
 
 /// Something the hook was asked to do and could not.
 ///
-/// [`VerbError::argument`] rather than a hand-built [`ErrorEnvelope`], and the reason is a
-/// rule rather than a preference. `NextSteps::new` is fallible — it refuses a blank first
-/// step — and it has no infallible sibling, so a function here that had to return an envelope
-/// whatever happened needed an arm for a case its own literals make impossible. That arm was
-/// an `unreachable!`, which is a panic outside tests and `main`, and the rule has no
+/// [`VerbError::argument`] rather than a hand-built [`ErrorEnvelope`](nysia_proto::ErrorEnvelope),
+/// and the reason is a rule rather than a preference. `NextSteps::new` is fallible — it refuses
+/// a blank first step — and has no infallible sibling, so a function here that had to return an
+/// envelope whatever happened needed an arm for a case its own literals make impossible. That
+/// arm was an `unreachable!`, which is a panic outside tests and `main`, and the rule has no
 /// exemption for a provably dead one.
 ///
 /// Routing through the error type every other verb already uses removes the arm rather than
