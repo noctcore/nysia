@@ -1,7 +1,7 @@
 /**
  * The settings information architecture from design-spec.md §5.
  *
- * The whole tree is rendered, not just the two panes v0.1 implements. That is deliberate:
+ * The whole tree is rendered, not just the entries a pane exists for. That is deliberate:
  * the nav is the clearest statement of what Nysia intends to be — Orchestration,
  * Automations, Task sources, per-project overrides — and hiding the unbuilt entries would
  * make each one look like a surprise when it lands. Every unimplemented entry opens a pane
