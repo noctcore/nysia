@@ -54,6 +54,7 @@ use crate::rpc::control::{ControlError, ControlReader, ControlWriter};
 use crate::rpc::endpoint::Endpoint;
 use crate::rpc::errors::{IntoEnvelope, envelope};
 use crate::rpc::lease::PidRecordFile;
+use crate::rpc::log_file::{self, Trimmed};
 use crate::rpc::peer::{CallerSession, PeerCredentials};
 use crate::rpc::session::{OwnedSession, SessionRegistry};
 use crate::rpc::stream::{BoundStream, ConnectionKey, CreditOutcome, StreamRegistry, StreamSink};
@@ -70,6 +71,14 @@ const DEFAULT_IDLE_RETIRE: Duration = Duration::from_secs(30);
 
 /// How often idle is re-checked.
 const IDLE_TICK: Duration = Duration::from_millis(250);
+
+/// How often the log beside the endpoint is measured against its cap.
+///
+/// Not every write, and not the idle tick either. A `stat` is cheap but a rotation copies up
+/// to [`log_file::MAX_LOG_BYTES`], and the thing being defended against is a file that grows
+/// over *days* — half a minute of overshoot against an 8 MiB cap is noise, where four checks
+/// a second would put a syscall on the daemon's quietest path for nothing.
+const LOG_TRIM_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The database file, beside the endpoint in the runtime directory.
 ///
@@ -164,6 +173,7 @@ pub struct Daemon {
     served_anyone: AtomicBool,
     shutting_down: AtomicBool,
     idle_since: Mutex<Option<Instant>>,
+    trimming_log: Arc<AtomicBool>,
 }
 
 impl Daemon {
@@ -220,6 +230,7 @@ impl Daemon {
                 served_anyone: AtomicBool::new(false),
                 shutting_down: AtomicBool::new(false),
                 idle_since: Mutex::new(None),
+                trimming_log: Arc::new(AtomicBool::new(false)),
             }),
             listener,
         ))
@@ -259,6 +270,40 @@ impl Daemon {
         &self.status
     }
 
+    /// Rotate the log beside this endpoint if it has outgrown
+    /// [`log_file::MAX_LOG_BYTES`].
+    ///
+    /// Called from [`Self::serve`] every [`LOG_TRIM_INTERVAL`], and public so a test can put
+    /// the question to a *bound* daemon: the schedule is a constant, but "this daemon knows
+    /// which file it is filling" is the part worth checking, and a test that called
+    /// [`log_file::trim`] with a path of its own would have proved nothing about the wiring.
+    ///
+    /// Blocking file IO. [`Self::serve`] hands it to a blocking thread rather than awaiting
+    /// it in the select, because copying 8 MiB on the accept loop is a stall the whole daemon
+    /// feels.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the filesystem said. A caller is entitled to ignore it: a failed rotation
+    /// leaves the log exactly as it was, which is the state this call exists to improve
+    /// rather than one it can make worse.
+    pub fn trim_log(&self) -> std::io::Result<Trimmed> {
+        let path = self.endpoint.log_path();
+        let trimmed = log_file::trim(&path)?;
+        if let Trimmed::Rotated { bytes } = trimmed {
+            // Into the freshly emptied file, so the first thing a reader finds at the top is
+            // where the rest of it went. Without this a log that has rotated looks like a
+            // daemon that started thirty seconds ago.
+            tracing::info!(
+                path = %path.display(),
+                moved_to = %log_file::rotation_path(&path, 1).display(),
+                bytes,
+                "the log passed its cap; the previous contents were rotated aside"
+            );
+        }
+        Ok(trimmed)
+    }
+
     /// Serve until the daemon retires or is interrupted.
     ///
     /// # Errors
@@ -275,6 +320,8 @@ impl Daemon {
         );
         let mut ticker = tokio::time::interval(IDLE_TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut log_ticker = tokio::time::interval(LOG_TRIM_INTERVAL);
+        log_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -296,6 +343,7 @@ impl Daemon {
                         break;
                     }
                 }
+                _ = log_ticker.tick() => self.spawn_log_trim(),
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("interrupted; shutting down");
                     break;
@@ -314,6 +362,25 @@ impl Daemon {
         self.shutting_down.store(true, Ordering::Release);
         self.sessions.close_all();
         self.lease.remove();
+    }
+
+    /// Hand a log trim to a blocking thread, unless one is already running.
+    ///
+    /// Two guards, and they answer different questions. `spawn_blocking` keeps an 8 MiB copy
+    /// off the accept loop; the flag keeps a copy that outlasts its interval from being
+    /// joined by the next tick, which would rotate twice for one overflow and throw away a
+    /// generation of log nobody meant to lose.
+    fn spawn_log_trim(self: &Arc<Self>) {
+        if self.trimming_log.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let daemon = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            if let Err(err) = daemon.trim_log() {
+                tracing::warn!(%err, "could not rotate the log; it will be tried again");
+            }
+            daemon.trimming_log.store(false, Ordering::Release);
+        });
     }
 
     /// Whether the idle-retire condition has held for the whole grace period.
@@ -1369,6 +1436,41 @@ mod tests {
             lease.read().expect("reads").is_none(),
             "a clean shutdown takes the lease with it"
         );
+        drop(listener);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    #[tokio::test]
+    async fn a_daemon_trims_the_log_beside_its_own_endpoint() {
+        // The wiring, not the rotation — `log_file`'s own tests cover what a trim does. What
+        // this holds is that a bound daemon knows which file it is filling, so the tick in
+        // `serve` is aimed at something.
+        let endpoint = crate::rpc::endpoint::scratch("logtrim");
+        let (daemon, listener) = Daemon::bind(DaemonConfig::new(endpoint.clone())).expect("binds");
+
+        let log = endpoint.log_path();
+        assert_eq!(
+            daemon.trim_log().expect("a trim"),
+            Trimmed::Untouched,
+            "a daemon with no log to trim reported doing something"
+        );
+
+        std::fs::File::create(&log)
+            .expect("a log")
+            .set_len(log_file::MAX_LOG_BYTES + 1)
+            .expect("a size over the cap");
+        assert!(matches!(
+            daemon.trim_log().expect("a trim"),
+            Trimmed::Rotated { .. }
+        ));
+        assert_eq!(
+            std::fs::metadata(&log).expect("the live log").len(),
+            0,
+            "the daemon rotated a file that was not its own log"
+        );
+        assert!(log_file::rotation_path(&log, 1).exists());
+
+        daemon.shutdown();
         drop(listener);
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
     }

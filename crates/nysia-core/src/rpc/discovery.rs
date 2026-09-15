@@ -482,11 +482,13 @@ async fn try_connect(
 /// open for as long as it lives, so a CLI that spawned one and then read its own output would
 /// never see the pipe close — the command would appear to hang for the daemon's entire
 /// lifetime, which under D-1 is days.
+///
+/// The log is opened through [`crate::rpc::log_file::open_for_append`], which rotates it
+/// first if a previous run left it over the cap. The handle the child inherits is the same
+/// append handle that makes rotating it *while it runs* possible — see that module for why a
+/// rename would be wrong.
 fn spawn_daemon(program: &std::path::Path, endpoint: &Endpoint) -> std::io::Result<()> {
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(endpoint.log_path())?;
+    let log = crate::rpc::log_file::open_for_append(&endpoint.log_path())?;
     let mut command = std::process::Command::new(program);
     command
         .arg("--daemon")
