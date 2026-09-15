@@ -1,0 +1,39 @@
+{
+  "changed": {
+    "agentId": "agent_7",
+    "target": "subagent"
+  },
+  "notify": {
+    "decision": "permitted"
+  },
+  "status": {
+    "lead": {
+      "agentId": null,
+      "isInterrupt": false,
+      "observedAt": 1757721600000,
+      "pane": "tab_1:leaf_1",
+      "question": null,
+      "restoredUnconfirmed": false,
+      "sessionBoundary": false,
+      "state": "done"
+    },
+    "subagents": [
+      {
+        "agentId": "agent_7",
+        "isInterrupt": false,
+        "observedAt": 1757721600000,
+        "pane": "tab_1:leaf_1",
+        "question": {
+          "options": [
+            "0001_init",
+            "0002_status"
+          ],
+          "question": "Which migration should run first?"
+        },
+        "restoredUnconfirmed": false,
+        "sessionBoundary": false,
+        "state": "waiting"
+      }
+    ]
+  }
+}

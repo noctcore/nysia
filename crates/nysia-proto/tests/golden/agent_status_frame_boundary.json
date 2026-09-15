@@ -1,0 +1,22 @@
+{
+  "changed": {
+    "target": "lead"
+  },
+  "notify": {
+    "decision": "suppressed",
+    "reason": "session_boundary"
+  },
+  "status": {
+    "lead": {
+      "agentId": null,
+      "isInterrupt": false,
+      "observedAt": 1757721600000,
+      "pane": "tab_1:leaf_1",
+      "question": null,
+      "restoredUnconfirmed": false,
+      "sessionBoundary": true,
+      "state": "done"
+    },
+    "subagents": []
+  }
+}
