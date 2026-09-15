@@ -2,10 +2,16 @@
  * The settings information architecture from design-spec.md §5.
  *
  * The whole tree is rendered, not just the two panes v0.1 implements. That is deliberate:
- * the nav is the clearest statement of what Nysia intends to be — Orchestration, Voice,
+ * the nav is the clearest statement of what Nysia intends to be — Orchestration,
  * Automations, Task sources, per-project overrides — and hiding the unbuilt entries would
  * make each one look like a surprise when it lands. Every unimplemented entry opens a pane
  * that says which release it is due in, so the tree promises rather than pretends.
+ *
+ * Which is exactly why `Voice` is not here. The mock draws it and design-spec.md §5 still
+ * lists it, but D-10 settled it — "No Voice. Design mock only." A tree that promises is a
+ * tree that cannot carry an entry nothing will ever deliver: the reasoning above turns an
+ * unbuilt entry into a commitment, and a commitment to something cancelled is the one thing
+ * worse than hiding it.
  *
  * The `Projects` group is not here: it is built from the store's project list at render
  * time, because per-project settings follow the projects the user actually has.
@@ -15,7 +21,6 @@ export type SettingsEntryId =
   | 'agents'
   | 'accounts'
   | 'orchestration'
-  | 'voice'
   | 'nysia-account'
   | 'general'
   | 'appearance'
@@ -61,7 +66,6 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
         version: 'v0.5',
         detail: 'The verb surface that lets one agent dispatch another.',
       },
-      { id: 'voice', label: 'Voice', version: 'a later version' },
     ],
   },
   {
