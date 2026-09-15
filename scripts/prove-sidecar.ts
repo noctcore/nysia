@@ -1,22 +1,28 @@
 /**
- * Proof that the sidecar check trips (traps register #12).
+ * Proof that the sidecar mechanism trips (traps register #12).
  *
- * `pnpm sidecar:verify` runs against a bundle that is expected to have the runtime in it,
- * and a check that only ever passes is worse than no check: the whole defect it guards
- * against — an app that builds cleanly and ships no `nysia` — is invisible until somebody
- * launches it on a machine with no daemon.
+ * Two halves, because a bundle that ships no runtime is two failures: the copy that was
+ * supposed to put the binary next to the window never ran, and the check that was supposed
+ * to refuse the result never saw it. A proof that only exercises `verify` stays green if
+ * `stage` is hollowed to `return`; a proof that asserts `verify`'s missing-runtime case on
+ * a `nysia.exe` substring stays green if the `existsSync` guard is hollowed, because
+ * `statSync` then throws `ENOENT` and that error's message already contains the path.
  *
- * So the same function is pointed at three directories built to break it: one with a window
- * and no runtime, one with a runtime that is empty, and one with neither. Each must throw,
- * and the message must name what is missing rather than fail generically — a bundle step
- * that says only "verification failed" sends the next person looking in the wrong place.
+ * So this drives both. `stage` is pointed at a scratch prefix that already holds a built
+ * runtime, and the copy has to land under `binaries/` as `nysia-<triple>` with those
+ * bytes — an immediate `return` leaves that directory empty. `verify` is pointed at four
+ * directories: one with a window and no runtime, one with a runtime that is empty, one
+ * with neither, and one with both. The missing-runtime case has to refuse with the guard's
+ * own message (`shipped without`), not with a system error that happens to name the file.
+ * The complete shape has to be accepted, or a check that refuses everything would satisfy
+ * the first three.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, isAbsolute, join, relative } from 'node:path';
 import process from 'node:process';
 
-import { verify } from './sidecar.ts';
+import { stage, verify } from './sidecar.ts';
 
 const WINDOW = process.platform === 'win32' ? 'nysia-desktop.exe' : 'nysia-desktop';
 const RUNTIME = process.platform === 'win32' ? 'nysia.exe' : 'nysia';
@@ -24,12 +30,27 @@ const RUNTIME = process.platform === 'win32' ? 'nysia.exe' : 'nysia';
 const failures: string[] = [];
 const root = mkdtempSync(join(tmpdir(), 'nysia-sidecar-'));
 
-/** `verify` must refuse `directory`, and say `expected` while doing it. */
+/** Node's `ENOENT` (and friends) carry a `code`; the check's own `Error` does not. */
+function errnoCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) {
+    return undefined;
+  }
+  return typeof error.code === 'string' ? error.code : undefined;
+}
+
+/** `verify` must refuse `directory` with its own message, not a thrown system error. */
 function expectTrips(what: string, directory: string, expected: string): void {
   try {
     verify(directory);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const code = errnoCode(error);
+    if (code !== undefined) {
+      failures.push(
+        `${what}: tripped with ${code}, not the check's own refusal: ${message}`,
+      );
+      return;
+    }
     if (!message.includes(expected)) {
       failures.push(`${what}: tripped, but the message did not mention ${expected}: ${message}`);
       return;
@@ -41,6 +62,39 @@ function expectTrips(what: string, directory: string, expected: string): void {
 }
 
 try {
+  const prefix = join(root, 'stage-prefix');
+  const profile = 'debug';
+  mkdirSync(join(prefix, 'target', profile), { recursive: true });
+  const payload = 'a runtime that stage must copy, not invent';
+  writeFileSync(join(prefix, 'target', profile, RUNTIME), payload);
+  const binaries = join(prefix, 'apps', 'desktop', 'src-tauri', 'binaries');
+  try {
+    const staged = stage(profile, prefix);
+    const rel = typeof staged === 'string' ? relative(binaries, staged) : '';
+    if (
+      typeof staged !== 'string' ||
+      staged.length === 0 ||
+      rel === '' ||
+      rel.startsWith('..') ||
+      isAbsolute(rel) ||
+      !basename(staged).startsWith('nysia-') ||
+      !existsSync(staged) ||
+      readFileSync(staged, 'utf8') !== payload
+    ) {
+      failures.push(
+        `stage: the runtime did not land under binaries/ (returned ${String(staged)})`,
+      );
+    } else {
+      process.stdout.write('  stages: the runtime into binaries/\n');
+    }
+  } catch (error) {
+    failures.push(
+      `stage: threw instead of copying the runtime: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+
   const bare = join(root, 'bare');
   mkdirSync(bare, { recursive: true });
   expectTrips('a directory with no window at all', bare, 'no window');
@@ -48,7 +102,7 @@ try {
   const windowOnly = join(root, 'window-only');
   mkdirSync(windowOnly, { recursive: true });
   writeFileSync(join(windowOnly, WINDOW), 'a window');
-  expectTrips('a window with no runtime beside it', windowOnly, RUNTIME);
+  expectTrips('a window with no runtime beside it', windowOnly, 'shipped without');
 
   const empty = join(root, 'empty-runtime');
   mkdirSync(empty, { recursive: true });
