@@ -31,6 +31,14 @@
 //! Stated rather than discovered, because each of these is a folder that will register
 //! twice and look like a bug:
 //!
+//! - **A path at or over `MAX_PATH`**, which keeps its `\\?\\` prefix because removing it
+//!   would change what the path resolves to — and `CreateProcess` will not accept a verbatim
+//!   `lpCurrentDirectory`. So [`crate::git::inspect_folder`] on such a folder fails with a
+//!   spawn error carrying Windows error 267, rather than answering about it. It fails at the
+//!   spawn and no project id is ever derived from it, so there is no silently wrong answer:
+//!   it is a folder Nysia cannot register, not one it registers twice. Making it registrable
+//!   means giving the spawn a short path of its own, which is a change to the spawn and not
+//!   to this type.
 //! - **`subst` drives and mapped network drives.** `GetFinalPathNameByHandleW` reports the
 //!   drive the handle was opened through, so a folder reached through `subst X: C:\Projekty`
 //!   canonicalises under `X:\` and does not merge with its target.
@@ -79,8 +87,12 @@ const RESERVED_NAMES: &[&str] = &[
 ///
 /// Construct with [`CanonicalPath::of`]. There is no way to make one from a path that does
 /// not exist, is not a directory, or could not be read, which is what lets every caller
-/// downstream treat it as a working directory without re-checking.
-
+/// downstream treat it as a folder that was there when it was resolved.
+///
+/// One caveat, and it is listed under *What this deliberately does not normalise*: a path
+/// long enough to keep its `\\?\\` prefix is not usable as a working directory, so a
+/// spawn against one fails. It fails loudly and at the spawn, which is why the guarantee is
+/// worded as "a folder that existed" rather than "a folder you can run a command in".
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CanonicalPath(PathBuf);
 
@@ -363,15 +375,30 @@ mod tests {
         // GitHub's Windows runner sets TEMP to a path with an 8.3 component
         // (`C:\Users\RUNNER~1\...`). Canonicalising expands it, which is why a test must
         // never compare a raw `temp_dir()` join against a canonical path.
+        //
+        // Where this actually exercises: on that runner, and nowhere else. A developer's TEMP
+        // has no short component, so the assertion below passes without the expansion ever
+        // happening — a vacuous pass, kept rather than deleted because the runner is where the
+        // behaviour has to hold. Manufacturing an 8.3 name locally needs `GetShortPathNameW`,
+        // which is not in this crate's `windows` feature set, so the test says which kind of
+        // pass it was instead of pretending they are the same.
         let dir = temp_dir("shortname");
         let long = dir.join("a directory with a long name");
         std::fs::create_dir_all(&long).expect("long name");
 
+        let exercised = long.to_string_lossy().contains('~');
         let canonical = CanonicalPath::of(&long).expect("canonical");
         assert!(
             !canonical.to_string().contains('~'),
             "{canonical} still holds a short name component"
         );
+        if !exercised {
+            eprintln!(
+                "a_short_name_expands_to_the_long_one: no 8.3 component in {}, so this run \
+                 asserted nothing; the expansion is exercised on GitHub's Windows runner",
+                long.display()
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

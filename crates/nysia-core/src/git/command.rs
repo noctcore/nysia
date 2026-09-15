@@ -528,6 +528,22 @@ fn apply_environment(command: &mut Command) {
 /// git itself is gone. Waiting for EOF unconditionally is therefore an unbounded wait, so the
 /// collection has its own grace period and the function returns what it has rather than never
 /// returning at all.
+///
+/// # A limitation, stated rather than left to be discovered
+///
+/// What happens to that holder is **not the same on the two platforms**, and the Unix side is
+/// the weaker one. On Windows the Job Object is a kernel object rather than a pid, so
+/// terminating it once the child has been reaped is precise and the holder goes away with it.
+/// On Unix there is no equivalent handle here: the child has been reaped, its pid is the
+/// kernel's to hand out again, and signalling a process group by a number that may now belong
+/// to somebody else is a worse failure than a truncated answer — so nothing is signalled. The
+/// holder keeps running and its drain thread lives as long as the daemon does, bounded at
+/// [`MAX_OUTPUT_BYTES`] of memory each but unbounded in number.
+///
+/// Closing it needs a process group Nysia allocates and holds rather than one it signals by
+/// number, which is the same gap [`crate::pty`]'s teardown documents for a grandchild that
+/// double-forked away. Nothing v0.3 runs reaches it: the only git helper that detaches is the
+/// fsmonitor daemon, and [`NEUTRALISED_CONFIG`] turns that off.
 fn run_to_completion(mut spawn: Command, timeout: Duration) -> std::io::Result<Finished> {
     #[cfg(unix)]
     let spawn = unix_kill::in_its_own_session(&mut spawn);
