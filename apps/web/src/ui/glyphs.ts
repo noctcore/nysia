@@ -100,7 +100,7 @@ export const GLYPH = {
 export const COMMAND_PALETTE_HINT = `${GLYPH.command}K`;
 
 /** Settings has its own search, on its own key (design-spec.md §5). */
-export const SETTINGS_SEARCH_HINT = '⌘F';
+export const SETTINGS_SEARCH_HINT = `${GLYPH.command}F`;
 
 /**
  * The mark for one entry in the `+` menu.
