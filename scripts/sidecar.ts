@@ -44,13 +44,31 @@
  * be called `nysia` and has to land beside the window, which is the file the daemon runs
  * from. §12 q5 of the architecture doc carries that with the line numbers in it.
  *
+ * ## What a dev run needs, and why it is not this file
+ *
+ * The window resolves its runtime **beside its own executable**, which in development is
+ * `target/<profile>/nysia` — the binary cargo just built, never the copy in `binaries/`.
+ * `tauri dev` merges only `build.devUrl` into `TAURI_CONFIG` and never the `externalBin`
+ * declaration, so nothing on the dev path reads `binaries/` at all: staging for a dev run
+ * would copy a file no window opens.
+ *
+ * What a dev run does need is that `target/<profile>/nysia` **exist** — and `tauri dev`
+ * builds `nysia-desktop` without ever building `nysia`. That was #74: a fresh clone's first
+ * `pnpm dev` opened a window whose runtime was not there, and the notice it raised said to
+ * reinstall, which is honest about the missing file and useless advice for a missing build.
+ * So `pnpm dev` is `cargo build -p nysia && tauri dev`, and what decides whether anything
+ * needs rebuilding is cargo's own fingerprint rather than a hand-rolled staleness test that
+ * cannot see a feature, a profile, or a dependency that moved underneath it. Measured on
+ * Windows with everything warm: ~0.3s when nothing changed, against the ~0.5s `tauri dev`
+ * already spends deciding `nysia-desktop` is current.
+ *
  * Two commands:
  *
  * - `stage [--profile debug|release]` copies the freshly built `nysia` into `binaries/`.
  *   Needed **before bundling** — `pnpm build:app`, or the bundle job in CI — and never
- *   before an ordinary cargo command.
- * Re-stage whenever the runtime changes and you are about to bundle. In development there is
- * nothing to re-stage for: the window starts what cargo built.
+ *   before an ordinary cargo command. Re-stage whenever the runtime changes and you are
+ *   about to bundle. In development there is nothing to re-stage for: the window starts
+ *   what cargo built.
  *
  * - `verify <directory>` asserts the runtime is beside a window that has been built or
  *   bundled — `target/release` on Windows, `Nysia.app/Contents/MacOS` on macOS. That is the
@@ -80,7 +98,7 @@ const WINDOWS = (process.platform === 'win32'
 /** The runtime, as it is named once Tauri has laid the bundle out. */
 const RUNTIME = process.platform === 'win32' ? 'nysia.exe' : 'nysia';
 
-/** Where `externalBin` in `tauri.conf.json` points, relative to `src-tauri`. */
+/** Where `externalBin` in `tauri.bundle.conf.json` points, relative to `src-tauri`. */
 const BINARIES = join('apps', 'desktop', 'src-tauri', 'binaries');
 
 /**
