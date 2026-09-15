@@ -214,6 +214,26 @@ impl Endpoint {
     pub fn log_path(&self) -> PathBuf {
         self.runtime_dir.join(format!("{}.log", self.stem))
     }
+
+    /// Where the *window's* diagnostics go: `<runtime dir>/<stem>.window.log`.
+    ///
+    /// Beside [`Self::log_path`] rather than inside it, and that is a decision rather than a
+    /// convenience. Two processes appending to one file interleave at whatever granularity
+    /// the formatter happens to write in, and the resulting file cannot say which process
+    /// wrote a line — so the streams are kept apart and correlated by what they both already
+    /// carry: a `PaneKey`, a `SessionHandle`, an `Incarnation` and a `StreamId`.
+    ///
+    /// Under `windows_subsystem = "windows"` a packaged window has no stderr at all, so this
+    /// file is the only record its Rust side leaves anywhere.
+    ///
+    /// Two windows on one daemon share this file. They interleave, and a rotation racing
+    /// between them loses the lines written during the other's copy — see
+    /// [`crate::rpc::log_file`] for the trade. One window is the ordinary case and the file
+    /// is diagnostic, so that is accepted rather than defended against.
+    #[must_use]
+    pub fn window_log_path(&self) -> PathBuf {
+        self.runtime_dir.join(format!("{}.window.log", self.stem))
+    }
 }
 
 /// Compose the platform's default endpoint.
@@ -474,6 +494,15 @@ mod tests {
         );
         assert_eq!(endpoint.lock_path(), dir.join(format!("{stem}.lock")));
         assert_eq!(endpoint.log_path(), dir.join(format!("{stem}.log")));
+        assert_eq!(
+            endpoint.window_log_path(),
+            dir.join(format!("{stem}.window.log"))
+        );
+        assert_ne!(
+            endpoint.window_log_path(),
+            endpoint.log_path(),
+            "the window and the daemon would interleave into one file"
+        );
         // And they are versioned at all, which is the property the names carry.
         assert!(stem.starts_with("nysiad-v"));
         let _ = std::fs::remove_dir_all(&dir);
