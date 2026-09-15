@@ -67,6 +67,17 @@
 //! through Windows PowerShell 5.1, which shares the syntax and the native-stdin behaviour;
 //! it is evidence rather than the leg itself.
 //!
+//! **Which branch a run took is no longer something to work out.** [`hook_command`] says so
+//! on stderr, on green runs as well as red ones, so the log answers it outright:
+//!
+//! ```text
+//! agent_status: driving the `pwsh` shell
+//! ```
+//!
+//! That line exists because the paragraph above had to be written twice — once by wave A
+//! guessing forward and once by wave C reasoning backwards from runner-image manifests — and
+//! neither was an observation. Reading it beats inferring it from what a runner has installed.
+//!
 //! So: **a red here is a harness bug until it is ruled out.** The failure message prints the
 //! pane's screen, which is where one shows itself — a quoting or redirection fault appears
 //! there as a PowerShell parser error against the command line, where a missing feature

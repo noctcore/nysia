@@ -113,6 +113,18 @@ fn the_hook_answers_before_it_does_anything_that_could_fail() {
     // /dev/null here, so there is no payload and everything after the first line fails. The
     // decision is on stdout anyway, which is the whole claim — the agent has its answer
     // before this process has done anything that could go wrong.
+    //
+    // **What this does not grade**, because a green run should not be read as proving more
+    // than it did: it grades that the decision *arrived* and that it was the only thing on
+    // stdout. It does not grade that the write *preceded the stdin read*, which is the
+    // stronger ordering `hook::run` actually implements. Nothing here can: stdin is closed
+    // before the process starts, so both orderings produce this output.
+    //
+    // The stronger property was checked by hand instead — spawn the hook with stdin piped and
+    // never written to, and `{}` reaches stdout while stdin is still open — and it is held in
+    // the source by `answer_now()` being the first statement in `run`. A test for it would
+    // have to hold a pipe open and race a read against a deadline, which is a flake in
+    // exchange for a property one line of code already makes obvious.
     let run = run(&["hook", "--event", "Stop", "--no-spawn"]);
     assert_eq!(
         run.stdout.trim(),
