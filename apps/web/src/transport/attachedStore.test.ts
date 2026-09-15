@@ -92,7 +92,7 @@ describe('the attached transport', () => {
     const transport = attachedStore();
 
     expect(running.getSnapshot().errors).toEqual([]);
-    transport?.reportDroppedOutput(4096);
+    transport?.reportDroppedOutput(3, 4096);
 
     const [recorded] = running.getSnapshot().errors;
     expect(recorded?.message).toContain('4096');

@@ -8,6 +8,7 @@ import type { CommandFailure, DaemonBridge } from './bridge';
 import { DaemonStore } from './DaemonStore';
 import type { StreamId } from './frames';
 import type { TerminalFactory, XtermLike } from './surface/XtermSurface';
+import type { TransportEvent, TransportEventDetail, TransportLog } from './log';
 import { TerminalRouter } from './terminals';
 import { encodeFrame, encodeHeaderOnly } from './testFrames';
 
@@ -204,11 +205,21 @@ function stubTerminals(): TerminalFactory {
   });
 }
 
-function build(seed = 2): { store: DaemonStore; daemon: FakeDaemon } {
+/** Everything the store asked to have recorded, in order. */
+class RecordingLog implements TransportLog {
+  readonly entries: { event: TransportEvent; detail?: TransportEventDetail }[] = [];
+
+  record(event: TransportEvent, detail?: TransportEventDetail): void {
+    this.entries.push({ event, ...(detail === undefined ? {} : { detail }) });
+  }
+}
+
+function build(seed = 2): { store: DaemonStore; daemon: FakeDaemon; log: RecordingLog } {
   const daemon = new FakeDaemon();
   daemon.seed(
     Array.from({ length: seed }, (_, index) => session(index + 1, index === 0 ? 'agent' : 'shell')),
   );
+  const log = new RecordingLog();
   const store = new DaemonStore({
     bridge: daemon,
     router: new TerminalRouter({
@@ -218,9 +229,10 @@ function build(seed = 2): { store: DaemonStore; daemon: FakeDaemon } {
     }),
     // No waiting in tests; the backoff itself is asserted separately.
     retryDelaysMs: [0],
+    log,
   });
   void store.run();
-  return { store, daemon };
+  return { store, daemon, log };
 }
 
 /**
@@ -621,6 +633,39 @@ describe('output arriving on the channel', () => {
     const garbage = encodeHeaderOnly(0, 0);
     expect(() => daemon.send(garbage)).not.toThrow();
     expect(store.getSnapshot().errors.length).toBeGreaterThan(0);
+  });
+
+  it('records an unreadable delivery, which is the one failure Rust cannot see', async () => {
+    // Rust wrote well-formed frames; whatever happened to them happened in the delivery,
+    // where only this side is standing. Before #75 the notice was the whole record, and a
+    // notice says nothing about what the transport was doing when it gave up.
+    const { store, daemon, log } = build();
+    await ready(store);
+
+    daemon.send(encodeHeaderOnly(0, 0));
+
+    const recorded = log.entries.filter((entry) => entry.event === 'channel_unreadable');
+    expect(recorded).toHaveLength(1);
+    // The decoder's message is deliberately *not* passed along: it is built from the bytes
+    // that would not parse, and those bytes are terminal output (trap 13).
+    expect(Object.keys(recorded[0]?.detail ?? {})).toEqual(['count']);
+  });
+
+  it('names the pane whose hidden output was dropped', async () => {
+    // The notice on screen says "a background session", which is the one thing a reader of
+    // the log afterwards cannot recover. The stream id is the daemon's own, so this line
+    // joins up with the `stream_attach` line Rust wrote when the pane opened — which is what
+    // #75 asked for and what nothing was doing with the ids the protocol already carries.
+    const { store, log } = build();
+    await ready(store);
+
+    const stream = store.surfaceStream(store.getSnapshot().tabs[0]?.paneKey ?? '') ?? 0;
+    store.reportDroppedOutput(stream, 65_536);
+
+    expect(log.entries).toContainEqual({
+      event: 'dropped_while_hidden',
+      detail: { stream, count: 65_536 },
+    });
   });
 });
 

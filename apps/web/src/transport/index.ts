@@ -2,6 +2,7 @@ import type { Store } from '../store/types';
 import { setAttachedStore } from './attachedStore';
 import { createTauriBridge, type DaemonBridge } from './bridge';
 import { DaemonStore } from './DaemonStore';
+import { createTransportLog } from './log';
 import { createXterm } from './surface/xterm';
 import type { TerminalFactory } from './surface/XtermSurface';
 import { TerminalRouter } from './terminals';
@@ -36,7 +37,10 @@ export function createDaemonStore(options?: {
     ...(options?.platform === undefined ? {} : { platform: options.platform }),
   });
 
-  const store = new DaemonStore({ bridge, router });
+  // The real logger, which reaches the window's log file through `client_log`. Everything
+  // below this line that goes wrong leaves a trace; before it, the one surface the user
+  // touches left none. See `log.ts`.
+  const store = new DaemonStore({ bridge, router, log: createTransportLog(bridge) });
   // How `TerminalView` finds the router without reaching through `StoreContext`, which the
   // store module closed to components on purpose. See `attachedStore.ts`.
   setAttachedStore(store);

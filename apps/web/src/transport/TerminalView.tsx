@@ -59,7 +59,7 @@ export function TerminalView() {
     // left as if it followed on.
     const dropped = store.terminals.takeDroppedWhileHidden(stream);
     if (dropped > 0) {
-      store.reportDroppedOutput(dropped);
+      store.reportDroppedOutput(stream, dropped);
     }
 
     // The daemon sizes the PTY, so a pane that resized without telling it leaves the shell

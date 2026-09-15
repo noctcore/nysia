@@ -18,6 +18,7 @@ import {
 } from '../store/types';
 import { describeFailure, isRetryable, type DaemonBridge } from './bridge';
 import type { StreamId } from './frames';
+import { SILENT_TRANSPORT_LOG, type TransportLog } from './log';
 import { REPLAY_BOUNDARY_DEADLINE_MS } from './surface/TerminalSurface';
 import type { TerminalRouter } from './terminals';
 
@@ -79,6 +80,14 @@ export class DaemonStore implements Store {
   readonly #bridge: DaemonBridge;
   readonly #router: TerminalRouter;
   readonly #retryDelaysMs: readonly number[];
+  /**
+   * Where the three things only this side can see are recorded.
+   *
+   * Optional, defaulting to a log that writes nowhere, so no existing test fake had to grow
+   * a method for a dependency it does not care about. See `log.ts` for why the list is
+   * three long and why the Rust side holds it.
+   */
+  readonly #log: TransportLog;
 
   /**
    * Which stream id the daemon assigned each session, from its `stream_attach` answer.
@@ -118,10 +127,13 @@ export class DaemonStore implements Store {
      * without either of them needing a clock they can control.
      */
     readonly retryDelaysMs?: readonly number[];
+    /** Where transport events go. Defaults to nowhere. */
+    readonly log?: TransportLog;
   }) {
     this.#bridge = options.bridge;
     this.#router = options.router;
     this.#retryDelaysMs = options.retryDelaysMs ?? [250, 500, 1000, 2000, 5000];
+    this.#log = options.log ?? SILENT_TRANSPORT_LOG;
     // The one place the replay gate becomes visible to a person. A surface holds input shut
     // until the daemon's replay boundary has been parsed; if that frame never arrives the
     // deadline opens it anyway, and the keystrokes typed in the meantime are gone. Opening in
@@ -130,6 +142,10 @@ export class DaemonStore implements Store {
     // with for a wave before anybody wrote it down.
     this.#router.on({
       replayTimeout: (stream, dropped) => {
+        // The notice tells the user; this tells whoever reads the log afterwards *which*
+        // pane, which is the question the notice cannot answer. `stream` is the daemon's own
+        // id, so it joins up with the `stream_attach` line Rust wrote when the pane opened.
+        this.#log.record('replay_timeout', { stream, count: dropped });
         this.#recordOnce(
           'selectTab',
           `The daemon never marked the end of its replay for stream ${stream}, so this pane ` +
@@ -268,8 +284,13 @@ export class DaemonStore implements Store {
    * `surface/TerminalSurface.ts`), and it is not a fault — but a terminal that silently
    * skips a stretch of its own output is worse than one that says so, because the reader
    * takes what is left as following on from what came before.
+   *
+   * Takes the stream as well as the count so the log line names the pane. The notice on
+   * screen cannot — it is one sentence in a list — and "a background session" is exactly the
+   * detail somebody reading the log afterwards needs and cannot recover.
    */
-  reportDroppedOutput(bytes: number): void {
+  reportDroppedOutput(stream: StreamId, bytes: number): void {
+    this.#log.record('dropped_while_hidden', { stream, count: bytes });
     this.#recordOnce(
       'selectTab',
       `A background session produced more output than Nysia holds for a hidden pane, so ${bytes} bytes were dropped and its screen was reset.`,
@@ -435,6 +456,14 @@ export class DaemonStore implements Store {
         if (unreadable) {
           // There is no delimiter to resynchronise on, so the channel is finished. Dropping
           // the connection is what gets a fresh one.
+          //
+          // The one failure in this file that Rust cannot see for itself: it wrote
+          // well-formed frames, and whatever happened to them happened in the delivery. The
+          // decoder's message is *not* passed along — it is built from the bytes that would
+          // not parse, and those bytes are terminal output.
+          this.#log.record('channel_unreadable', {
+            count: this.#router.bufferedBytes,
+          });
           this.#recordOnce('openTab', unreadable.message);
         }
       });
