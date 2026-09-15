@@ -120,6 +120,42 @@ pub enum DaemonError {
 }
 
 impl DaemonError {
+    /// This failure as a word, for a log line that must not carry the message.
+    ///
+    /// Every variant here renders a **sentence for the user**, and a sentence is built from
+    /// whatever the failure was about: a `cwd` the session asked for, the program a shell
+    /// spawn could not find, an endpoint path. None of that belongs in a file (trap 13, and
+    /// the rule in `nysia_core::rpc::log_file`), and "log the message, it is only an error"
+    /// is exactly how a payload ends up in one.
+    ///
+    /// So a log line gets this instead: a fixed word per variant, plus the daemon's own
+    /// [`nysia_proto::ErrorCode`] where there is one. It is enough to tell a refused
+    /// handshake from a dead socket from a shell that would not start, which is what a reader
+    /// of the log is asking. The sentence still reaches the user on screen, where it is
+    /// wanted and where it is not written down.
+    ///
+    /// [`nysia_proto::ErrorCode::Other`] is rendered as `other` rather than passed through.
+    /// It is the one open end of proto's otherwise closed taxonomy — a code from a daemon
+    /// newer than this build, carried verbatim and of unbounded length — and a field that
+    /// writes whatever the far end sent is not a closed set however unlikely the far end is
+    /// to abuse it.
+    pub fn kind(&self) -> &str {
+        match self {
+            Self::Endpoint(_) => "endpoint",
+            Self::Unreachable { .. } => "unreachable",
+            Self::Refused { .. } => "refused",
+            Self::Spawn { .. } => "spawn",
+            Self::Starting { .. } => "starting",
+            Self::Io(_) => "io",
+            Self::Protocol(_) => "protocol",
+            Self::Disconnected => "disconnected",
+            Self::Daemon(envelope) => match envelope.code() {
+                nysia_proto::ErrorCode::Other(_) => "other",
+                known => known.as_str(),
+            },
+        }
+    }
+
     /// Whether trying again could plausibly work.
     ///
     /// The window uses this to decide between reconnecting and giving up, so it is
