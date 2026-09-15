@@ -675,9 +675,11 @@ impl Daemon {
             | RequestPayload::AgentStatusUnsubscribe(_) => ResponsePayload::Error(envelope(
                 ErrorCode::Unsupported,
                 "agent status is not served by this build; it lands in v0.2 wave C",
-                "wait for the daemon build that serves it, or read the pane's screen with                  `nysia terminal read`",
+                "wait for a daemon build that serves it, or read the pane's screen with \
+                 `nysia terminal read`",
                 &[
-                    "see docs/plans/v0.2-delivery-plan.md wave C (W4) for what implements                      these verbs",
+                    "see docs/plans/v0.2-delivery-plan.md wave C (W4) for what implements \
+                     these verbs",
                 ],
             )),
         }
