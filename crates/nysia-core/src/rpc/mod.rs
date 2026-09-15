@@ -13,6 +13,7 @@
 //! | Module | What it owns |
 //! |---|---|
 //! | [`endpoint`] | where the daemon listens, and the lease, lock and log beside it |
+//! | [`log_file`] | the cap that keeps that log from growing for ever, and what may go in it |
 //! | [`spool`] | the per-pane JSONL a hook writes when no daemon will take its status |
 //! | [`agent_status`] | §2's ingest, persistence and subscription, over [`crate::store`] |
 //! | [`discovery`] | connect, or spawn one daemon and only one (§12 Q5) |
@@ -78,6 +79,7 @@ pub mod discovery;
 pub mod endpoint;
 pub(crate) mod errors;
 pub mod lease;
+pub mod log_file;
 pub mod peer;
 pub mod server;
 pub mod session;
@@ -100,6 +102,10 @@ pub use endpoint::{
     ENDPOINT_VAR, Endpoint, EndpointResolveError, EnvSource, Listening, RUNTIME_DIR_VAR,
 };
 pub use lease::{LeaseError, PidRecordFile};
+pub use log_file::{
+    KEPT_ROTATIONS, MAX_LOG_BYTES, MAX_TOTAL_LOG_BYTES, Trimmed, open_for_append, rotation_path,
+    trim,
+};
 pub use peer::{CallerSession, PeerCredentials, PeerError, ancestry, parent_of};
 pub use server::{Daemon, DaemonConfig, STORE_FILE, ServerError};
 pub use session::{OwnedSession, PANE_KEY_VAR, SessionError, SessionRegistry};
