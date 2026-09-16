@@ -569,6 +569,12 @@ fn unexpected(verb: &str, got: &ResponsePayload) -> DaemonError {
 /// A Tauri v2 capability is what makes a plugin command reachable from JavaScript, so this
 /// is not a style rule — a capability naming nothing from either plugin is the whole reason
 /// neither is callable. Named here so [`granted_plugin_permissions`] can check it.
+///
+/// Test-only, because nothing at run time consults it: the capability file *is* the
+/// enforcement and Tauri is what reads it, so a second copy of the list compiled into the
+/// binary would be a second authority that could disagree with the first. This exists to
+/// assert on the first.
+#[cfg(test)]
 const PICKER_PLUGIN_PREFIXES: &[&str] = &["dialog:", "fs:"];
 
 /// Which of `permissions` a picker plugin would have granted the webview.
