@@ -1491,6 +1491,19 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs the agent CLI, a machine it can authenticate on, and NYSIA_RUNTIME_DIR"]
     async fn a_real_agent_starts_in_a_worktree_and_lights_its_dot() {
+        // **Checked, not documented.** `#[ignore]` keeps this out of a normal run; it does
+        // nothing for the person who typed `-- --ignored`. Without the override
+        // `Endpoint::from_env` resolves the machine's *real* endpoint, and this test would
+        // then bind the daemon somebody is using, register a temporary repository into their
+        // real store, and delete that repository afterwards — leaving a project in their
+        // sidebar pointing at a folder that is gone. Refusing to start is the only safe
+        // reading of an unset variable.
+        assert!(
+            std::env::var_os(crate::rpc::RUNTIME_DIR_VAR).is_some_and(|dir| !dir.is_empty()),
+            "set {} to a directory you own before running this: without it the test binds \
+             the real daemon endpoint and writes to the real store",
+            crate::rpc::RUNTIME_DIR_VAR
+        );
         let Some(_git) = git_or_skip() else {
             return;
         };
