@@ -51,6 +51,14 @@ const DEFAULT_DIRECTIVES: &str = "info";
 /// The confinement applies to the fallback too — it is not conditional on the user having
 /// asked for anything.
 ///
+/// The branch below is the line that switches the confinement off for every shipped run of
+/// this binary, so it is held by two checks that put it in a process of its own rather than
+/// calling it here — reading the environment is not something a test that shares one with
+/// every other test in the binary can do. `the_runtime_branch_confines_unless_the_way_out_is_named`
+/// re-execs this test binary at a child that installs exactly the subscriber `main` installs;
+/// `crates/nysia/tests/log_confinement.rs` drives the shipped `nysia` binary and reads the
+/// log file a daemon actually writes.
+///
 /// A directive in [`log_file::CONFINED_TARGETS`] that does not parse is skipped rather than
 /// panicking here, which would be a crash on a path nobody can fix at runtime;
 /// `every_confined_directive_parses` is what stops one reaching a release, because a skipped
@@ -61,28 +69,31 @@ pub fn filter() -> EnvFilter {
         note(&log_file::unconfined_note());
         return unconfined(&asked);
     }
-    for refused in log_file::screen_directives(&asked).refused {
+    // Screened once and then handed on, rather than screened again inside [`confine`]. The
+    // two calls cannot disagree — it is a pure function of the same string — but a reader
+    // had to establish that before they could be sure the line being reported was the line
+    // being dropped.
+    let screened = log_file::screen_directives(&asked);
+    for refused in &screened.refused {
         note(&log_file::refusal_note(refused));
     }
-    confine(&asked)
+    confine(&screened)
 }
 
-/// `asked` with every directive that could undo the confinement refused, and
-/// [`log_file::CONFINED_TARGETS`] folded in behind what is left.
+/// What survived [`log_file::screen_directives`], with [`log_file::CONFINED_TARGETS`] folded
+/// in behind it.
 ///
 /// Both halves, and they are not interchangeable. The screen is what stops a directive
 /// out-specifying an entry; the fold is what holds those targets down when nothing was asked
 /// about them at all, which is every ordinary run.
 ///
-/// Takes the raw `NYSIA_LOG` value rather than a filter somebody else already built, and that
+/// Takes a [`log_file::Screened`] rather than a filter somebody else already built, and that
 /// is the shape the fix needed: a directive has to be refused before `EnvFilter` has resolved
 /// a callsite against it, and once one is inside an `EnvFilter` there is no way to take it
 /// back out. Split out from [`filter`] so the tests can put the same question to a value they
 /// wrote themselves, and so the "without this" case can be written down as a test rather than
 /// imagined.
-fn confine(asked: &str) -> EnvFilter {
-    let screened = log_file::screen_directives(asked);
-
+fn confine(screened: &log_file::Screened<'_>) -> EnvFilter {
     log_file::CONFINED_TARGETS
         .iter()
         .filter_map(|directive| directive.parse().ok())
@@ -213,6 +224,15 @@ mod tests {
             .iter()
             .filter_map(|directive| directive.parse().ok())
             .fold(EnvFilter::new(asked), EnvFilter::add_directive)
+    }
+
+    /// The whole of what [`filter`] does to a `NYSIA_LOG` value, from the value.
+    ///
+    /// [`confine`] takes what [`log_file::screen_directives`] already returned, because
+    /// `filter` screens once and reports the refusals out of the same answer it filters by.
+    /// Every test below writes the string rather than the split, so the screen is done here.
+    fn confined(asked: &str) -> EnvFilter {
+        confine(&log_file::screen_directives(asked))
     }
 
     /// One line on each target [`log_file::CONFINED_TARGETS`] holds down, as `tracing` sees it.
@@ -366,7 +386,7 @@ mod tests {
                  would hold for the wrong reason: {leaked}"
             );
 
-            let written = through(confine(asked), || as_the_terminal_crates_would(SENTINEL));
+            let written = through(confined(asked), || as_the_terminal_crates_would(SENTINEL));
             assert!(
                 !written.contains(SENTINEL),
                 "NYSIA_LOG={asked} out-specified the confinement: {written}"
@@ -400,7 +420,7 @@ mod tests {
                  would hold for the wrong reason: {leaked}"
             );
 
-            let written = through(confine(asked), || {
+            let written = through(confined(asked), || {
                 tracing::info_span!("serving").in_scope(|| as_the_terminal_crates_would(SENTINEL));
             });
             assert!(
@@ -429,7 +449,7 @@ mod tests {
             "the way out does not let anything out, so there is no way out: {lifted}"
         );
 
-        let held = through(confine(asked), || as_the_terminal_crates_would(SENTINEL));
+        let held = through(confined(asked), || as_the_terminal_crates_would(SENTINEL));
         assert!(
             !held.contains(SENTINEL),
             "the same string was honoured without anybody naming the way out: {held}"
@@ -442,7 +462,7 @@ mod tests {
         // traded one bug for a worse one. Every directive in that value is refused, so nothing
         // is left to parse — and what has to happen then is the shipped default, not the empty
         // `EnvFilter` an empty string builds, which enables nothing at all.
-        let written = through(confine("vte::ansi=trace"), || {
+        let written = through(confined("vte::ansi=trace"), || {
             tracing::info!(target: "nysia_core::rpc::server", verb = "session_create", "served");
             tracing::debug!(target: "nysia_core::rpc::server", "below the default");
         });
@@ -483,7 +503,7 @@ mod tests {
              absent: {leaked}"
         );
 
-        let written = through(confine("vte::ansi=trace"), || {
+        let written = through(confined("vte::ansi=trace"), || {
             feed_an_unhandled_osc(SENTINEL);
         });
         assert!(
@@ -554,7 +574,7 @@ mod tests {
         ] {
             let (marker, dir) = a_marked_directory("confined");
 
-            let written = through(confine(asked), || {
+            let written = through(confined(asked), || {
                 plant_a_failed_spawn(&dir);
             });
 
@@ -600,7 +620,7 @@ mod tests {
             "vte=trace,alacritty_terminal=trace",
             "vte::ansi=trace,alacritty_terminal::term=trace",
         ] {
-            let written = through(confine(asked), || {
+            let written = through(confined(asked), || {
                 as_the_terminal_crates_would(SENTINEL);
             });
             assert!(
@@ -634,7 +654,7 @@ mod tests {
         // The `portable_pty` line is the one that decided that entry's spelling. It is an
         // `ERROR`, and `warn` — which is what `alacritty_terminal` is held to — permits
         // `ERROR`, so copying that spelling would have confined nothing at all.
-        let written = through(confine("debug"), || {
+        let written = through(confined("debug"), || {
             tracing::debug!(target: "nysia_core::rpc::server", verb = "session_create", "served");
             tracing::warn!(target: "alacritty_terminal::term", "a real fault");
             tracing::error!(target: "portable_pty::win::pseudocon", "a spawn in some cwd");
@@ -657,7 +677,7 @@ mod tests {
         // be honoured; the other two are what they were actually trying to do, and they have
         // to arrive intact and still mean what they said.
         let written = through(
-            confine("info,nysia_core::rpc::server=trace,vte::ansi=trace"),
+            confined("info,nysia_core::rpc::server=trace,vte::ansi=trace"),
             || {
                 tracing::trace!(target: "nysia_core::rpc::server", verb = "session_create", "served");
                 as_the_terminal_crates_would(SENTINEL);
