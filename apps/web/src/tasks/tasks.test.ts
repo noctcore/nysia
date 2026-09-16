@@ -6,6 +6,7 @@ import {
   issuesOf,
   tasksNotice,
   unavailableReason,
+  type TasksNotice,
   type TaskUnavailableReason,
   type TasksState,
 } from './tasks';
@@ -42,6 +43,46 @@ const REASON_ROSTER: Readonly<Record<TaskUnavailableReason, TaskUnavailableReaso
 };
 
 const EVERY_REASON: readonly TaskUnavailableReason[] = Object.values(REASON_ROSTER);
+
+const A_NOTICE: TasksNotice = { heading: 'Something went wrong', tone: 'failed' };
+
+/*
+ * The two rosters below **must not compile**, and that is the assertion.
+ *
+ * `TaskUnavailableReason` is `Extract<ErrorCode, …>` now, which reads as though it ties the
+ * three reasons to the wire. It only does so if the `Extract` really narrows — and `ErrorCode`
+ * carries an open `(string & {})` tail, so an `Extract` written against the wrong target
+ * resolves to the whole union instead, which is `string` for every practical purpose.
+ *
+ * **A widened union passes every check this file otherwise makes.** `Record<string, TasksNotice>`
+ * accepts a roster of two, of three, of four, and of four under names `nysia-proto` has never
+ * heard of; `REASON_ROSTER` above would still compile, `Object.values` would still hand back
+ * three, and the duplicate-heading test would still pass. Nothing would notice until a rename
+ * in proto quietly dropped a heading and the screen started saying "the issue list could not
+ * be fetched" about a missing `gh`.
+ *
+ * `@ts-expect-error` is what turns that into a gate, and it is a gate in both directions: it
+ * fails the build when the error it names *stops* happening. So if the union ever widens, both
+ * directives below go unused and `pnpm typecheck` fails on the directives themselves.
+ */
+
+// @ts-expect-error a roster that forgets a reason must not compile. If this is ever accepted,
+// `TaskUnavailableReason` has stopped being three literals and the notices are no longer tied
+// to `ErrorCode` at all.
+const MISSING_A_REASON: Readonly<Record<TaskUnavailableReason, TasksNotice>> = {
+  gh_missing: A_NOTICE,
+  gh_unauthenticated: A_NOTICE,
+};
+
+const CARRIES_A_STRANGER: Readonly<Record<TaskUnavailableReason, TasksNotice>> = {
+  gh_missing: A_NOTICE,
+  gh_unauthenticated: A_NOTICE,
+  query_failed: A_NOTICE,
+  // @ts-expect-error a code `nysia-proto` does not spell is not a reason this screen has a
+  // heading for. Narrowing is what reports it; a widened union would take it in silence, and
+  // so would the object literal a `Map` was chosen over.
+  gh_rate_limited: A_NOTICE,
+};
 
 function unavailable(reason: TaskUnavailableReason): TasksState {
   return { phase: 'unavailable', reason, message: 'the daemon said so', nextSteps: ['do this'] };
@@ -109,12 +150,22 @@ describe('reading a refusal', () => {
   });
 
   it('falls back to query_failed rather than inventing a state', () => {
-    // The codes are proposed rather than generated until wave C1 lands, so this is the case
-    // that decides whether a guessed spelling is safe. It degrades to a heading one notch
-    // less specific, carrying the daemon's own sentence — never to a blank table.
+    // `ErrorCode` is open on purpose — an error that cannot be parsed is the worst possible
+    // place to be strict — so a code from a newer daemon is a real possibility. It degrades to
+    // a heading one notch less specific, carrying the daemon's own sentence, never to a blank
+    // table. `unsupported` is what a daemon older than wave C1 answers, having no such verb.
     expect(unavailableReason('unsupported')).toBe('query_failed');
     expect(unavailableReason('something_a_newer_daemon_added')).toBe('query_failed');
     expect(unavailableReason(null)).toBe('query_failed');
+  });
+
+  it('will not let the roster drift from the wire without failing a build', () => {
+    // The assertion is `tsc`, not these two expectations: the rosters above carry
+    // `@ts-expect-error` directives that fail the typecheck if the errors they name stop
+    // happening. These lines exist so the declarations are used — `noUnusedLocals` is on — and
+    // so the shapes being described are visible from the test that names them.
+    expect(Object.keys(MISSING_A_REASON)).toHaveLength(2);
+    expect(Object.keys(CARRIES_A_STRANGER)).toHaveLength(4);
   });
 
   it('answers a miss for a name that lives on Object.prototype', () => {
