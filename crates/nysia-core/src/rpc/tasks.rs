@@ -245,12 +245,29 @@ fn issue(row: GhIssue) -> Issue {
 
 /// What a gh refusal says to a person.
 ///
-/// The three codes the Tasks screen draws distinct headings for, plus the two that are not
-/// about GitHub at all. Every message and every step is written here rather than taken from
-/// gh, because gh's text names repositories and URLs (trap 14).
+/// Every [`GhFailure`] gets a sentence here, and the codes underneath them are the ones the
+/// Tasks screen branches on — fewer codes than failures, because two states can deserve the
+/// same heading and still deserve different words. Every message and every step is written
+/// here rather than taken from gh, because gh's text names repositories and URLs (trap 14).
 fn refusal(failure: GhFailure) -> ErrorEnvelope {
     match failure {
         GhFailure::NotInstalled => gh_missing(),
+        // **Installed, and it did not start.** Deliberately not `gh_missing`: telling
+        // somebody who can see gh on their `PATH` to go and install it sends them after what
+        // they already have, and leaves the thing that actually failed unnamed.
+        //
+        // Not retryable, for the reason the two below it are not: the ordinary causes are a
+        // binary a policy refuses to launch and an installation part-way through an upgrade,
+        // and waiting does not resolve either. A client that thought otherwise would spin.
+        GhFailure::CouldNotRun => envelope(
+            ErrorCode::QueryFailed,
+            "the GitHub CLI is installed and would not start",
+            "check that `gh --version` runs in a terminal",
+            &[
+                "a policy or an antivirus that blocks new processes stops it here",
+                "an installation part-way through an upgrade resolves and does not launch",
+            ],
+        ),
         GhFailure::Unauthenticated => envelope(
             ErrorCode::GhUnauthenticated,
             "the GitHub CLI has no credentials for this repository",
@@ -472,12 +489,44 @@ mod tests {
             &ErrorCode::GhUnauthenticated
         );
         for failure in [
+            GhFailure::CouldNotRun,
             GhFailure::NoRepository,
             GhFailure::QueryFailed,
             GhFailure::Unreadable,
         ] {
             assert_eq!(refusal(failure).code(), &ErrorCode::QueryFailed);
         }
+    }
+
+    #[test]
+    fn a_gh_that_will_not_start_is_not_reported_as_a_gh_that_is_absent() {
+        // The two arrive by different roads — one from resolution, one from the spawn — and
+        // collapsing them tells somebody who can see `gh` on their `PATH` to go and install
+        // it. That is advice they will follow, find nothing to do, and be no further on.
+        let absent = refusal(GhFailure::NotInstalled);
+        let stalled = refusal(GhFailure::CouldNotRun);
+
+        assert_eq!(absent.code(), &ErrorCode::GhMissing);
+        assert_ne!(
+            stalled.code(),
+            &ErrorCode::GhMissing,
+            "a gh that is installed must not be reported under the missing-gh heading"
+        );
+        assert!(
+            !stalled.message().contains("not installed"),
+            "{}",
+            stalled.message()
+        );
+        // And it does not send them to cli.github.com, which is the step that would waste
+        // the trip.
+        assert!(
+            !stalled
+                .next_steps()
+                .iter()
+                .any(|step| step.contains("cli.github.com")),
+            "{:?}",
+            stalled.next_steps()
+        );
     }
 
     #[test]
@@ -515,6 +564,7 @@ mod tests {
         // module — which is what this test is here to catch.
         for failure in [
             GhFailure::NotInstalled,
+            GhFailure::CouldNotRun,
             GhFailure::Unauthenticated,
             GhFailure::NoRepository,
             GhFailure::QueryFailed,
