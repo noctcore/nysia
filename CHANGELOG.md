@@ -82,9 +82,10 @@ harness moved. It is also the release where an agent session first exists — th
   became *already running* and a success exit — which is the one thing a supervisor must not be
   told wrongly, because it waits for a daemon nobody is going to start. `AlreadyBound` is the
   transport's reading of a failed `bind` and not a claim about the world, so the claim is now
-  checked by dialling: anything that completes a connection is a daemon, including one too new
-  to answer this build's handshake, since D-11 lets the window and the daemon run different
-  versions. Only a transport failure is nobody, and that exits non-zero saying what to do.
+  checked by dialling: a daemon that refuses this build's handshake still counts, since D-11
+  lets the window and the daemon run different versions and one too new to talk to this build
+  is still listening. Only a transport failure is nobody, and that exits non-zero saying what
+  to do about it.
 - **An endpoint whose every pipe instance is taken is no longer read as an empty one.** A dial
   re-opens a busy pipe on a bounded schedule — a race, not a queue, since the window is one
   `CreateNamedPipeW` long — and busy is now a third answer rather than *nothing is listening*,
@@ -282,8 +283,9 @@ that did not ship, and it lands in 0.3.0.
   `flex-1 min-h-0` the root was missing — without it the pane sizes to its content and
   `fit()` measures a box xterm had already chosen, so the fit follows the window only by
   accident. The prompt and the chips row are recorded as belonging to the agent surface
-  rather than to this component, and a render test holds the row gone so it cannot come back
-  from the spec.
+  rather than to this component, and the render tests hold that row's marks gone and the
+  markup to no `<input>`, no `<textarea>` and no `contenteditable` in either state — so a
+  second place to type cannot come back from the spec quietly.
 
 ### Security
 
@@ -301,7 +303,7 @@ that did not ship, and it lands in 0.3.0.
   asks for everything, and — since every other assertion is a `!contains` a typo would also
   satisfy — that those bytes do reach the file without it. What it did not cover is a
   directive naming a module *inside* a confined crate; that is `[0.3.0]`'s to report.
-- **A handle-inheritance guarantee a test could not have caught being broken.** Windows
+- **The handle-inheritance guarantee is provable now, and its hole is written down.** Windows
   inherits *every* inheritable handle when any stdio is redirected, and the daemon spawn has
   to redirect. Detaching the parent's three standard handles is what stopped the reported case
   — a daemon spawned inside `H=$(nysia session create)` held the shell's own stdout pipe open
