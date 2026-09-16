@@ -109,8 +109,18 @@
 //! `a_failed_spawn_writes_a_caller_offered_path_without_the_confinement` in `nysia`'s `log`
 //! module, which plants a spawn that cannot succeed and reads the line back out.
 //!
-//! [`CONFINED_TARGETS`] is the answer, and it is why the sentence above is a rule rather than
-//! an aspiration.
+//! [`CONFINED_TARGETS`] and [`screen_directives`] are the answer together, and they are what
+//! make the section above a rule rather than an aspiration. The list holds those crates down;
+//! the screen stops `NYSIA_LOG` taking one of them back off. Either alone leaves a spelling
+//! that undoes it, which is what each of them is documented against.
+//!
+//! [`UNCONFINED_ENV`] is the one exception, and it is one somebody has to name. With it set the
+//! linked crates print what they always printed, and this section stops describing the file —
+//! which is why the process says so, into the file, before writing anything else there. Nysia's
+//! own lines are not affected by it: the rule above holds for those by construction rather than
+//! by filtering, as the paragraph after the bullets says, and nothing this repository writes
+//! carries a payload whatever that variable is set to. What the variable lifts is the
+//! confinement on the dependencies, which is the only part that was ever a filter.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -209,6 +219,11 @@ use std::path::{Path, PathBuf};
 /// `every_confined_directive_parses` cannot stand in for that plant: `portable-pty=off` parses
 /// perfectly and confines nothing, because an `EnvFilter` target is a Rust path and this
 /// crate's is spelled with an underscore.
+///
+/// What a new entry does *not* need is anything done to [`screen_directives`]. That takes the
+/// crate names from this list, so a fourth entry arrives already screened, and
+/// `the_screen_refuses_a_directive_under_every_confined_crate` builds its cases from this
+/// constant rather than from a roster written out beside it.
 pub const CONFINED_TARGETS: &[&str] = &["vte=off", "alacritty_terminal=warn", "portable_pty=off"];
 
 /// The environment variable every Nysia binary takes its filter from.
