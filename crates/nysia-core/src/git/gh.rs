@@ -706,15 +706,31 @@ mod tests {
     }
 
     #[test]
-    fn a_real_gh_in_a_repository_with_no_remote_answers_that_it_is_not_a_repository() {
+    fn a_real_gh_in_a_repository_with_no_remote_never_reports_it_as_a_failed_query() {
         // The one thing the fixture tests above cannot prove: that this module's argument
-        // vector and environment policy really do produce the ending it claims, out of a
-        // real gh. Everything else here reads a `Finished` somebody typed.
+        // vector and environment policy really do produce a sensible ending out of a **real**
+        // gh. Everything else here reads a `Finished` somebody typed.
         //
-        // **Deterministic and offline.** gh fails on the missing remote before it opens a
-        // socket, so this needs no network, no token and no GitHub account — which is what
-        // makes it safe to run on a CI leg that has gh but no credentials, and what makes a
-        // failure here mean the spawn is wrong rather than that the network is.
+        // # Why this accepts two answers rather than one
+        //
+        // It asserted `NoRepository` alone at first, on the reasoning that gh would fail on
+        // the missing remote before opening a socket and so would not care about credentials.
+        // **Both CI legs disproved that**, and the fact is worth keeping: gh checks
+        // authentication *before* it looks at the remote. Measured both ways in a repository
+        // with no GitHub remote —
+        //
+        // - signed in: exit 1, `none of the git remotes ... point to a known GitHub host`
+        // - not signed in: exit 4, `To get started with GitHub CLI, please run: gh auth login`
+        //
+        // — so the answer depends on whether the machine running the test has credentials,
+        // which a developer's does and a CI runner's does not. Both are *correct*: a machine
+        // with no credentials genuinely cannot say anything about the remote.
+        //
+        // So the assertion is the property that holds on either machine, and it is still a
+        // real one: whatever happens, this must never read as a **failed query**. That is the
+        // bucket "offline, rate-limited, no such repository" lands in, and a local-only
+        // repository is none of those — reporting it that way would tell a user to check
+        // their network about a folder that was simply never pushed.
         let (Some(_git), Some(gh)) = (git_or_skip(), gh_or_skip()) else {
             return;
         };
@@ -722,10 +738,14 @@ mod tests {
         let repository = scratch.repository("local-only");
         let at = CanonicalPath::of(&repository).expect("a folder");
 
-        assert_eq!(
-            gh.issues(&at),
-            Err(GhFailure::NoRepository),
-            "a repository that was never pushed is not a repository with no issues"
+        let answer = gh.issues(&at);
+        assert!(
+            matches!(
+                answer,
+                Err(GhFailure::NoRepository | GhFailure::Unauthenticated)
+            ),
+            "a repository that was never pushed is not a repository with no issues, and is \
+             not a failed query either; got {answer:?}"
         );
     }
 
