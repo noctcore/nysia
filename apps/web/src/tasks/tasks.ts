@@ -159,7 +159,13 @@ export function tasksNotice(state: TasksState): TasksNotice | null {
 const UNAVAILABLE_NOTICES: Readonly<Record<TaskUnavailableReason, TasksNotice>> = {
   gh_missing: { heading: 'GitHub CLI is not installed', tone: 'setup' },
   gh_unauthenticated: { heading: 'GitHub CLI is not signed in', tone: 'setup' },
-  query_failed: { heading: 'GitHub could not be reached', tone: 'failed' },
+  // Deliberately not "GitHub could not be reached", which was the first wording and is
+  // narrower than the reason it heads. `query_failed` is the fallback for every code this
+  // build does not recognise, so it covers offline and rate-limited and "no such repository"
+  // and a daemon too old to serve the verb at all — and a heading that names the network is
+  // wrong for half of those. The daemon's own sentence underneath is where the specifics
+  // live; the heading's job is to be true.
+  query_failed: { heading: 'The issue list could not be fetched', tone: 'failed' },
 };
 
 /** Whether the daemon is mid-answer, so the `↻` cannot start a second query. */

@@ -451,19 +451,34 @@ export function describeStoreContract(name: string, create: StoreFactory): void 
         expect(store.getSnapshot().tasks).toEqual({ phase: 'idle' });
       });
 
-      it('rejects a start with a StoreCommandError, unlike a refresh', async () => {
-        // The other half of the split. Nobody asked for the list, so its refusals are
-        // content; somebody pressed `Start →`, so its failure is a notice — and it has to
-        // arrive as the type `runCommand` recognises or it lands in the unexpected-failure
-        // path instead of in front of the user.
+      it('either starts or rejects, and never leaves the button spinning', async () => {
+        // The other half of the split, stated as the invariant rather than as an outcome.
+        // Whether a given provider *can* start something is its own business — the mock and
+        // the probe have no daemon, a daemon-backed one has a worktree verb — so requiring
+        // either ending would be a fact about today's fakes rather than a contract.
         //
-        // Asserted against a provider that cannot start anything, which is every provider
-        // here: the mock and the probe have no daemon, and the daemon-backed one has no
-        // worktree verb until wave C1 lands.
+        // What every provider owes is that it reaches one of them. A `startTask` that
+        // resolved while leaving `taskStart` at `starting` is the failure this catches, and
+        // it is the worst of the three: the row's own button stays disabled, the screen says
+        // a worktree is being made, and nothing is happening.
+        //
+        // The rejection, when it is one, must be a `StoreCommandError` — that is the type
+        // `runCommand` recognises as already recorded, and anything else lands in the
+        // unexpected-failure path instead of in front of the user.
         const store = await ready();
-        await expect(store.startTask(A_TASK)).rejects.toBeInstanceOf(StoreCommandError);
+        const outcome = await store.startTask(A_TASK).then(
+          () => null,
+          (cause: unknown) => cause,
+        );
 
-        const recorded = store.getSnapshot().errors.at(-1);
+        const { taskStart, errors } = store.getSnapshot();
+        if (outcome === null) {
+          expect(taskStart.phase, 'a start that resolved has to have started').toBe('started');
+          return;
+        }
+        expect(outcome).toBeInstanceOf(StoreCommandError);
+        expect(taskStart, 'a failed start puts the button back').toEqual({ phase: 'idle' });
+        const recorded = errors.at(-1);
         expect(recorded?.command).toBe('startTask');
         expect(recorded?.message.length).toBeGreaterThan(0);
       });

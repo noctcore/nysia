@@ -64,6 +64,26 @@ class FakeDaemon implements DaemonBridge {
   projects: WireProject[] = [wireProject('nysia'), wireProject('orca')];
   /** What the folder picker answers with. `null` is a cancelled dialog. */
   picks: string | null = 'D:/dev/valve';
+  /**
+   * What `tasks_list` answers with, in the shape `gh issue list --json` produces.
+   *
+   * Uppercase `state` and label *objects* with a colour, because that is what `gh` really
+   * sends — a fake that pre-lowered the state and flattened the labels would let a client
+   * through that could not read the real answer.
+   */
+  issues: unknown[] = [
+    {
+      number: 200,
+      title: 'Add the Tasks screen',
+      state: 'OPEN',
+      updatedAt: '2026-09-09T12:00:00Z',
+      url: 'https://github.com/noctcore/nysia/issues/200',
+      author: 'Shironex',
+      labels: [{ name: 'area:web', color: 'bfd4f2' }],
+    },
+  ];
+  /** Branches this daemon already has a worktree for, so `task_start` adopts rather than creates. */
+  readonly adoptedBranches = new Set<string>();
   /** Ids handed out on this connection. Spent, never reissued — as proto requires. */
   #nextStream = 1;
   readonly streams = new Map<string, StreamId>();
@@ -139,6 +159,27 @@ class FakeDaemon implements DaemonBridge {
       }
       case 'project_list':
         return this.projects.map((project) => ({ ...project })) as T;
+      case 'tasks_list':
+        return [...this.issues] as T;
+      case 'task_start': {
+        // Wave C1's verb, modelled the way the contract spells it: the request carries a
+        // branch and **no issue number**, and the answer says whether a worktree was adopted
+        // or made. A session is created too, because the window re-reads `session_list`
+        // afterwards and a fake that answered without one would let a client through that
+        // never opens a tab.
+        const request = args?.request as { branch?: string } | undefined;
+        const branch = request?.branch ?? '';
+        this.#nextSession += 1;
+        const created = session(this.#nextSession, 'agent');
+        this.sessions.push(created);
+        const adopted = this.adoptedBranches.has(branch);
+        return {
+          branch,
+          handle: created.handle,
+          paneKey: created.paneKey,
+          adopted,
+        } as T;
+      }
       case 'project_pick_folder':
         return this.picks as T;
       case 'project_register': {
@@ -958,6 +999,190 @@ describe('output arriving on the channel', () => {
 });
 
 
+
+describe('the task list, which is the screen’s whole subject', () => {
+  /** A refusal shaped like the daemon's envelope, with a code the window branches on. */
+  function refusal(kind: string, message: string, step: string): CommandFailure {
+    return { kind, message, nextSteps: [step], retryable: false };
+  }
+
+  it('reads what gh sends rather than what the design mock draws', async () => {
+    const { store, daemon } = build();
+    await ready(store);
+    await store.refreshTasks();
+
+    const { tasks } = store.getSnapshot();
+    expect(tasks.phase).toBe('loaded');
+    expect(tasks.phase === 'loaded' ? tasks.issues : []).toEqual([
+      {
+        number: 200,
+        title: 'Add the Tasks screen',
+        // Lowered from `gh`'s `OPEN`, and the label's colour dropped — a wire hex on screen
+        // is a pixel the accent picker cannot reach.
+        state: 'open',
+        updatedAt: '2026-09-09T12:00:00Z',
+        url: 'https://github.com/noctcore/nysia/issues/200',
+        author: 'Shironex',
+        labels: ['area:web'],
+      },
+    ]);
+    expect(daemon.calls.some((call) => call.command === 'tasks_list')).toBe(true);
+  });
+
+  it('asks about the active project and nothing else', async () => {
+    // The verb takes a project. Not a path — `Project` deliberately carries none (traps
+    // register #13/#14) — and emphatically not an issue number.
+    const { store, daemon } = build();
+    await ready(store);
+    await store.refreshTasks();
+
+    const asked = daemon.calls.find((call) => call.command === 'tasks_list');
+    expect(asked?.args).toEqual({ project: store.getSnapshot().activeProjectId });
+  });
+
+  it('tells the three refusals apart, and never rejects for any of them', async () => {
+    // The requirement in one test. "An empty list for any of those is a lie": a user with no
+    // issues and a user whose token expired must not see the same screen, so each code has to
+    // survive the round trip into a reason the panel can render differently.
+    const cases = [
+      ['gh_missing', 'gh_missing'],
+      ['gh_unauthenticated', 'gh_unauthenticated'],
+      ['query_failed', 'query_failed'],
+      // A code this build does not know degrades to the widest of the three, carrying the
+      // daemon's own sentence — never to a blank table. That is what makes proposing the
+      // three spellings ahead of wave C1 safe rather than a gamble.
+      ['something_a_newer_daemon_added', 'query_failed'],
+      // What every daemon answers today, until C1 serves the verb.
+      ['unsupported', 'query_failed'],
+    ] as const;
+
+    for (const [kind, reason] of cases) {
+      const { store, daemon } = build();
+      await ready(store);
+      daemon.failures.set('tasks_list', refusal(kind, `the daemon said ${kind}`, 'Do this.'));
+
+      // Resolves. A refusal routed through `runCommand` would paint a notice over a table
+      // that looks like a repository with no work in it.
+      await expect(store.refreshTasks()).resolves.toBeUndefined();
+
+      const { tasks, errors } = store.getSnapshot();
+      expect(tasks.phase, kind).toBe('unavailable');
+      if (tasks.phase === 'unavailable') {
+        expect(tasks.reason, kind).toBe(reason);
+        // The daemon's sentence and its steps, kept apart rather than joined: the panel puts
+        // them in two different places and the steps are what say `gh auth login`.
+        expect(tasks.message, kind).toBe(`the daemon said ${kind}`);
+        expect(tasks.nextSteps, kind).toEqual(['Do this.']);
+      }
+      expect(errors, kind).toEqual([]);
+    }
+  });
+
+  it('offers a step even when the failure carried none', async () => {
+    // A Tauri-level error never becomes an envelope, so there is no advice attached — and a
+    // panel with no next step is a dead end on the one screen whose whole subject is what to
+    // do next.
+    const { store, daemon } = build();
+    await ready(store);
+    daemon.failures.set('tasks_list', 'the command never ran');
+
+    await store.refreshTasks();
+    const { tasks } = store.getSnapshot();
+    expect(tasks.phase === 'unavailable' ? tasks.nextSteps.length : 0).toBeGreaterThan(0);
+  });
+
+  it('forgets one project’s issues when another becomes active', async () => {
+    const { store } = build();
+    await ready(store);
+    await store.refreshTasks();
+    expect(store.getSnapshot().tasks.phase).toBe('loaded');
+
+    const other = store.getSnapshot().projects[1];
+    await store.selectProject(other?.id ?? '');
+    expect(store.getSnapshot().tasks).toEqual({ phase: 'idle' });
+  });
+});
+
+describe('starting an issue', () => {
+  it('asks for a branch derived here, and never for an issue number', async () => {
+    // D-6 made unrepresentable rather than forbidden. The request cannot carry a task id, so
+    // the branch is chosen before it exists — and the daemon never learns which issue it was.
+    const { store, daemon } = build();
+    await ready(store);
+    await store.refreshTasks();
+    const issue = store.getSnapshot().tasks;
+    await store.startTask(issue.phase === 'loaded' ? issue.issues[0] ?? A_ROW : A_ROW);
+
+    const request = daemon.calls.find((call) => call.command === 'task_start')?.args?.request;
+    expect(request).toEqual({
+      project: store.getSnapshot().activeProjectId,
+      branch: 'issue/200-add-the-tasks-screen',
+      kind: 'agent',
+      profile: null,
+    });
+    expect(JSON.stringify(request)).not.toContain('"issue"');
+  });
+
+  it('says whether a worktree was adopted or created', async () => {
+    for (const adopted of [false, true]) {
+      const { store, daemon } = build();
+      await ready(store);
+      if (adopted) {
+        daemon.adoptedBranches.add('issue/200-add-the-tasks-screen');
+      }
+
+      await store.startTask(A_ROW);
+      const { taskStart } = store.getSnapshot();
+      expect(taskStart.phase).toBe('started');
+      expect(taskStart.phase === 'started' ? taskStart.adopted : null).toBe(adopted);
+    }
+  });
+
+  it('opens a tab for the session the daemon created', async () => {
+    // Re-read rather than spliced in: `session_list` decides what exists, and the pane key
+    // the answer names has to be one the strip is actually holding or `Open the session`
+    // points at nothing.
+    const { store } = build();
+    await ready(store);
+    const before = store.getSnapshot().tabs.length;
+
+    await store.startTask(A_ROW);
+    const { tabs, taskStart } = store.getSnapshot();
+    expect(tabs).toHaveLength(before + 1);
+    expect(tabs.some((tab) => tab.paneKey === (taskStart.phase === 'started' ? taskStart.paneKey : ''))).toBe(true);
+  });
+
+  it('records a failure as a notice and puts the button back', async () => {
+    // The other half of the split: nobody asked for the list, so its refusals are content;
+    // somebody pressed this, so its failure is a notice with the daemon's own next steps.
+    const { store, daemon } = build();
+    await ready(store);
+    daemon.failures.set('task_start', {
+      kind: 'not_a_repository',
+      message: 'that branch is checked out in another worktree',
+      nextSteps: ['Close the other worktree, or start on a different branch.'],
+      retryable: false,
+    });
+
+    await expect(store.startTask(A_ROW)).rejects.toBeInstanceOf(StoreCommandError);
+
+    const { taskStart, errors } = store.getSnapshot();
+    expect(taskStart).toEqual({ phase: 'idle' });
+    expect(errors.at(-1)?.command).toBe('startTask');
+    expect(errors.at(-1)?.message).toContain('Close the other worktree');
+  });
+});
+
+/** The issue every start test presses, whose branch is `issue/200-add-the-tasks-screen`. */
+const A_ROW = {
+  number: 200,
+  title: 'Add the Tasks screen',
+  state: 'open' as const,
+  updatedAt: '2026-09-09T12:00:00Z',
+  url: 'https://github.com/noctcore/nysia/issues/200',
+  author: 'Shironex',
+  labels: ['area:web'],
+};
 
 async function ready(store: DaemonStore): Promise<void> {
   await until(() => store.getSnapshot().status === 'ready');

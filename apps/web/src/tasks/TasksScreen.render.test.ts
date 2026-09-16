@@ -252,7 +252,7 @@ describe('with no project', () => {
       activeProjectId: null,
     });
     expect(markup).toContain('No project is selected');
-    expect(markup).not.toContain('GitHub could not be reached');
+    expect(markup).not.toContain('could not be fetched');
     expect(markup).not.toContain('role="columnheader"');
   });
 });
