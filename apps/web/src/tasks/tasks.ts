@@ -1,3 +1,4 @@
+import type { ErrorCode } from '../generated/ErrorCode';
 import type { PaneKey } from '../generated/PaneKey';
 import type { Issue } from './issue';
 
@@ -31,8 +32,23 @@ import type { Issue } from './issue';
  * with three different sentences underneath, because the daemon's own message is what
  * distinguishes them and a heading per network condition would be four words guessing at a
  * sentence that is already there.
+ *
+ * **Taken from the wire rather than restated**, now that v0.3 wave C1 has put all three in
+ * `nysia-proto`'s `ErrorCode`. These were proposed spellings for a wave — the contract's own
+ * words for the three states, safe to guess at only because an unrecognised code falls
+ * through to `query_failed` — and a proposal that has been answered stops being a proposal.
+ * Rename one in proto now and the typecheck fails here, which is what `RegisterRefusalCode`
+ * already does for the register dialog's three.
+ *
+ * `Extract` is what narrows: `ErrorCode`'s open `(string & {})` tail does not extend a
+ * literal, so it drops out, and a literal proto no longer spells leaves `never` behind. That
+ * the narrowing really happens is not taken on trust — `tasks.test.ts` holds two rosters that
+ * must *fail* to compile, because a widened union would accept both.
  */
-export type TaskUnavailableReason = 'gh_missing' | 'gh_unauthenticated' | 'query_failed';
+export type TaskUnavailableReason = Extract<
+  ErrorCode,
+  'gh_missing' | 'gh_unauthenticated' | 'query_failed'
+>;
 
 /**
  * The wire codes this window has a distinct answer for.
@@ -43,18 +59,11 @@ export type TaskUnavailableReason = 'gh_missing' | 'gh_unauthenticated' | 'query
  * sending `kind: "constructor"` would be read as a function rather than as a miss. A `Map`
  * holds only what was put in it.
  *
- * **These spellings are proposed rather than generated, and the fallback is what makes that
- * safe.** `nysia-proto`'s `ErrorCode` does not carry them yet — wave C1 serves `tasks_list`
- * and its codes land with it — so this cannot be derived from the generated union the way
- * `RegisterRefusalCode` is, and an `Extract<ErrorCode, …>` here would resolve to `never`
- * today. The names below are the contract's own words for the three states, which makes them
- * the least surprising thing for C1 to spell; and a code that does not match reads as
+ * Keyed by `string` rather than by `ErrorCode`, and deliberately: what arrives is whatever
+ * the daemon sent, `ErrorCode`'s open tail means every string is one, and the whole question
+ * this asks is whether it is one of ours. A code that is not reads as
  * {@link TaskUnavailableReason} `query_failed`, carrying the daemon's own message and next
- * steps. That is a heading one notch less specific than it could be, not a lie — which is
- * the right way round for a guess to be wrong.
- *
- * When C1's codes land this becomes an `Extract<ErrorCode, …>` and a rename in proto fails
- * the typecheck here instead of silently falling through.
+ * steps — a heading one notch less specific than it could be, not a lie.
  */
 const UNAVAILABLE = new Map<string, TaskUnavailableReason>([
   ['gh_missing', 'gh_missing'],
