@@ -63,6 +63,17 @@ async fn main() -> ExitCode {
                 );
                 ExitCode::SUCCESS
             }
+            Ok(daemon::Outcome::Unanswered { endpoint }) => {
+                // Something holds the endpoint and would not answer inside the deadline. Not
+                // a success — nothing was confirmed to be serving — and not the message
+                // below either, which would send somebody to delete what is at that path.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "{endpoint} is held by something that did not answer; if a daemon is \
+                     wedged there, stop it and start this one again"
+                );
+                ExitCode::from(EXIT_FAILED)
+            }
             Ok(daemon::Outcome::NotListening { endpoint }) => {
                 // The endpoint was taken, nothing answers on it, and this process is not
                 // going to serve either. Exiting zero here is the one lie a supervisor cannot
