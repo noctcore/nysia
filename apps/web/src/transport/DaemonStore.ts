@@ -7,7 +7,12 @@ import type { SessionSummary as WireSession } from '../generated/SessionSummary'
 import type { ShellProfile } from '../generated/ShellProfile';
 import { branchForIssue } from '../tasks/branchName';
 import type { Issue } from '../tasks/issue';
-import { isTasksBusy, unavailableReason, type TasksState } from '../tasks/tasks';
+import {
+  isTasksBusy,
+  unavailableReason,
+  type TaskStartState,
+  type TasksState,
+} from '../tasks/tasks';
 import { isAddProjectBusy, registerRefusal, type AddProjectState } from '../store/addProject';
 import { StoreCommandError, type StoreCommandName, type StoreError } from '../store/errors';
 import {
@@ -467,6 +472,9 @@ export class DaemonStore implements Store {
    * The session list is re-read rather than having a tab spliced in, for `openTab`'s reason:
    * `session_list` decides what exists, and a client that invented a row would disagree with
    * the daemon the first time anything else opened one.
+   *
+   * Its two late writes go through {@link #settleStart}, for {@link #settle}'s reason reached
+   * by the other road.
    */
   startTask = async (issue: Issue): Promise<void> => {
     const project = this.#snapshot.activeProjectId;
@@ -478,10 +486,12 @@ export class DaemonStore implements Store {
     }
 
     const branch = branchForIssue(issue);
-    this.#update((current) => ({
-      ...current,
-      taskStart: { phase: 'starting', issue: issue.number },
-    }));
+    // Held by reference, and that reference is this start's claim on the phase — see
+    // {@link #settleStart}. Every other write in this file spreads the snapshot, so the
+    // object survives a `↻` and a session refresh unchanged, and is replaced by exactly the
+    // things that end this start: a project move, a failure, or its own answer.
+    const pending: TaskStartState = { phase: 'starting', issue: issue.number };
+    this.#update((current) => ({ ...current, taskStart: pending }));
 
     let started: TaskStarted;
     try {
@@ -502,23 +512,55 @@ export class DaemonStore implements Store {
       // the user as a `StoreCommandError` or it reaches nobody.
       await this.#refresh();
     } catch (cause) {
-      this.#update((current) => ({ ...current, taskStart: { phase: 'idle' } }));
+      // The state write is conditional, the refusal never is. Somebody pressed a button and
+      // has to hear that it failed wherever they are looking by now — but putting the button
+      // back is about *this* start, and there may be a newer one in flight that owns it.
+      this.#settleStart(pending, { phase: 'idle' });
       throw this.fail('startTask', describeFailure(cause));
     }
 
-    this.#update((current) => ({
-      ...current,
-      taskStart: {
-        phase: 'started',
-        issue: issue.number,
-        // The daemon's branch, not the one asked for. They should agree, and if they ever do
-        // not it is the daemon that knows which worktree it actually opened.
-        branch: started.branch,
-        paneKey: started.paneKey,
-        adopted: started.adopted,
-      },
-    }));
+    this.#settleStart(pending, {
+      phase: 'started',
+      issue: issue.number,
+      // The daemon's branch, not the one asked for. They should agree, and if they ever do
+      // not it is the daemon that knows which worktree it actually opened.
+      branch: started.branch,
+      paneKey: started.paneKey,
+      adopted: started.adopted,
+    });
   };
+
+  /**
+   * Write a `Start →` answer, unless the screen has moved on since the button was pressed.
+   *
+   * {@link #settle}'s hazard, reached by the other road and one notch worse. `task_start`
+   * creates a worktree and can take seconds, and `withActiveProject` clears `taskStart` the
+   * moment the project moves — so a late answer would repaint *"#7 started in a new worktree
+   * on issue/7-…"* under whichever repository is showing by then, a confirmation naming an
+   * issue that does not exist there. The list above it is already correct, which is what
+   * makes the line worse than useless: it is the only thing on screen that is lying.
+   *
+   * **The test is object identity, not the project, and not the issue number.** Both of the
+   * weaker tests pass in a case this one catches: switch away and back — which clears the
+   * phase — then press `Start →` on the same row again, and a comparison on either would let
+   * the first answer land on the second start's `starting`, un-busying a row whose worktree
+   * is still being made and reporting `adopted` for the wrong one of the two. The state this
+   * start wrote is its claim on the phase, and only the start still holding it may write.
+   *
+   * A `↻` during a start deliberately does not disturb that claim: `refreshTasks` carries a
+   * `starting` phase across untouched rather than rebuilding it, so the answer still finds
+   * its own start when it lands.
+   *
+   * Dropping the confirmation loses nothing durable. The worktree was made, the session
+   * exists, and `#refresh` has already put its tab in the strip — what is discarded is one
+   * line of prose belonging to a screen the user has left.
+   */
+  #settleStart(pending: TaskStartState, taskStart: TaskStartState): void {
+    if (this.#snapshot.taskStart !== pending) {
+      return;
+    }
+    this.#update((snapshot) => ({ ...snapshot, taskStart }));
+  }
 
   dismissError = async (id: string): Promise<void> => {
     this.#update((current) => {
