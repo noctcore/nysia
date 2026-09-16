@@ -954,7 +954,7 @@ mod tests {
         panic!("{flag} was not in the help:\n{help}");
     }
 
-    /// Artefacts a `--help` string must not contain. A user reading the terminal is not
+    /// Artefacts a help string must not contain. A user reading the terminal is not
     /// the next maintainer of `docs/design`.
     fn maintainer_artefacts(help: &str) -> Vec<&'static str> {
         let mut found = Vec::new();
@@ -964,8 +964,14 @@ mod tests {
         if help.contains("[`") {
             found.push("rustdoc link ([`)");
         }
-        if contains_decision_id(help) {
+        if help.contains("::") {
+            found.push("rust path (::)");
+        }
+        if contains_hyphenated_decision_id(help) {
             found.push("decision id (D-n)");
+        }
+        if contains_unhyphenated_decision_id(help) {
+            found.push("decision id (Dn)");
         }
         if help.contains('§') {
             found.push("section mark (§)");
@@ -973,16 +979,80 @@ mod tests {
         if help.contains("ts-rs") {
             found.push("ts-rs");
         }
-        if help.contains("trap") {
+        if contains_word(help, "trap") {
             found.push("trap");
+        }
+        if contains_wire_type(help) {
+            found.push("wire type");
+        }
+        if help.contains("TODO(#") {
+            found.push("TODO(#n)");
         }
         found
     }
 
-    fn contains_decision_id(help: &str) -> bool {
-        help.as_bytes()
-            .windows(3)
-            .any(|w| w[0] == b'D' && w[1] == b'-' && w[2].is_ascii_digit())
+    /// `D` at a token boundary, then `-` and a digit. `CMD-3` and `ID-1` do not count:
+    /// the `D` there is in the middle of another token.
+    fn contains_hyphenated_decision_id(help: &str) -> bool {
+        let bytes = help.as_bytes();
+        bytes.windows(3).enumerate().any(|(i, w)| {
+            w[0] == b'D'
+                && w[1] == b'-'
+                && w[2].is_ascii_digit()
+                && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric())
+        })
+    }
+
+    /// `D` at a token boundary, then a digit and no hyphen. `D16` is a decision id;
+    /// `D-16` is the hyphenated form, counted separately.
+    fn contains_unhyphenated_decision_id(help: &str) -> bool {
+        let bytes = help.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'D' && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric()) {
+                let rest = &bytes[i + 1..];
+                if rest.first().is_some_and(|c| c.is_ascii_digit()) {
+                    let mut j = i + 2;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    if j == bytes.len() || !bytes[j].is_ascii_alphanumeric() {
+                        return true;
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn contains_word(help: &str, word: &str) -> bool {
+        let hay = help.as_bytes();
+        let needle = word.as_bytes();
+        if needle.is_empty() || hay.len() < needle.len() {
+            return false;
+        }
+        hay.windows(needle.len()).enumerate().any(|(i, window)| {
+            window == needle
+                && (i == 0 || !hay[i - 1].is_ascii_alphabetic())
+                && (i + needle.len() == hay.len() || !hay[i + needle.len()].is_ascii_alphabetic())
+        })
+    }
+
+    /// SessionKind is the type `--kind` already leaked. Request is the type a
+    /// maintainer writes when pointing at the envelope. A user types `shell` or
+    /// `agent`, not these.
+    fn contains_wire_type(help: &str) -> bool {
+        help.contains("SessionKind") || contains_word(help, "Request")
+    }
+
+    fn rendered_help(cmd: &clap::Command) -> String {
+        cmd.clone()
+            .color(clap::ColorChoice::Never)
+            .render_help()
+            .to_string()
     }
 
     fn rendered_long_help(cmd: &clap::Command) -> String {
@@ -993,18 +1063,40 @@ mod tests {
     }
 
     /// Every command clap knows about, including ones this test does not name.
+    ///
+    /// `-h` renders `about`, `--help` renders `long_about`. The root sets both, so a
+    /// walker that only calls `render_long_help` never sees the short string.
     fn rendered_help_tree(
         cmd: &clap::Command,
         path: &str,
         hits: &mut Vec<(String, Vec<&'static str>)>,
     ) {
-        let found = maintainer_artefacts(&rendered_long_help(cmd));
+        let mut found = Vec::new();
+        for help in [rendered_long_help(cmd), rendered_help(cmd)] {
+            for artefact in maintainer_artefacts(&help) {
+                if !found.contains(&artefact) {
+                    found.push(artefact);
+                }
+            }
+        }
         if !found.is_empty() {
             hits.push((path.to_owned(), found));
         }
         for sub in cmd.get_subcommands() {
             rendered_help_tree(sub, &format!("{path} {}", sub.get_name()), hits);
         }
+    }
+
+    /// A command clap knows and this test does not name, two levels down.
+    /// #102 planted at depth one; the leaks were on `project start` / `tasks list`.
+    fn with_unnamed_leaf(leaf: clap::Command) -> clap::Command {
+        Cli::command().subcommand(clap::Command::new("orchestration").subcommand(leaf))
+    }
+
+    fn planted_leaf_hit(hits: &[(String, Vec<&'static str>)], artefact: &str) -> bool {
+        hits.iter().any(|(path, found)| {
+            path == "nysia orchestration dispatch" && found.contains(&artefact)
+        })
     }
 
     #[test]
@@ -1016,36 +1108,64 @@ mod tests {
         rendered_help_tree(&cmd, cmd.get_name(), &mut hits);
         assert!(
             hits.is_empty(),
-            "rendered --help must not talk to a maintainer, got {hits:?}"
+            "rendered -h/--help must not talk to a maintainer, got {hits:?}"
         );
     }
 
     #[test]
     fn the_help_artefact_check_trips_on_a_subcommand_it_was_not_named() {
         // Trap 12: a walker handed a list of verbs is one a new verb can drop out of.
-        // This plants each artefact on `orchestration`, which Cli does not have, so the
-        // tree walk has to find a command it was never told about. Emptying any one
-        // probe goes red here rather than on a real verb.
+        // Each artefact is planted on `orchestration dispatch`, which Cli does not
+        // have, two levels down — the depth the original leaks sat at. Emptying any
+        // one probe goes red here rather than on a real verb.
         let cases: &[(&str, &str)] = &[
             ("Forward a payload (D-16)", "decision id (D-n)"),
+            ("fold into the D16 envelope", "decision id (Dn)"),
             ("keyed by its **branch**", "markdown emphasis (**)"),
             ("see [`Verb`]", "rustdoc link ([`)"),
+            ("see `crate::hook`", "rust path (::)"),
+            ("the SessionKind spelling", "wire type"),
+            ("TODO(#412): fold the envelope", "TODO(#n)"),
             ("described in v0.3 §3", "section mark (§)"),
             ("bindings from ts-rs", "ts-rs"),
             ("the trap this avoids", "trap"),
         ];
         for (about, artefact) in cases {
-            let cmd = Cli::command().subcommand(clap::Command::new("orchestration").about(*about));
+            let cmd = with_unnamed_leaf(clap::Command::new("dispatch").about(*about));
             let mut hits = Vec::new();
             rendered_help_tree(&cmd, cmd.get_name(), &mut hits);
             assert!(
-                hits.iter().any(|(path, found)| {
-                    path.split_whitespace().last() == Some("orchestration")
-                        && found.iter().any(|hit| hit == artefact)
-                }),
-                "planted {artefact:?} on `orchestration` must redden the check, got {hits:?}"
+                planted_leaf_hit(&hits, artefact),
+                "planted {artefact:?} on `orchestration dispatch` must redden the check, got {hits:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_help_artefact_check_trips_on_short_help_the_long_help_hides() {
+        // The root sets `about` and `long_about` separately. `-h` is the only clap
+        // rendering that shows `about`; a walker that only calls `render_long_help`
+        // never sees it.
+        let cmd = with_unnamed_leaf(
+            clap::Command::new("dispatch")
+                .about("Forward a payload (D-16)")
+                .long_about("Dispatch an orchestration payload."),
+        );
+        let mut hits = Vec::new();
+        rendered_help_tree(&cmd, cmd.get_name(), &mut hits);
+        assert!(
+            planted_leaf_hit(&hits, "decision id (D-n)"),
+            "planted D-16 on -h-only about must redden the check, got {hits:?}"
+        );
+    }
+
+    #[test]
+    fn maintainer_artefact_probes_ignore_lookalikes() {
+        // The old `trap` substring matched `strap` and `entrapment`; the old D-n
+        // window matched the `D-3` in `CMD-3` and the `D-1` in `ID-1`.
+        assert!(maintainer_artefacts("a strap and an entrapment").is_empty());
+        assert!(maintainer_artefacts("CMD-3").is_empty());
+        assert!(maintainer_artefacts("ID-1").is_empty());
     }
 
     #[test]
