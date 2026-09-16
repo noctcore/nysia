@@ -22,11 +22,11 @@ use nysia_proto::{
     AgentHook, AgentStatus, AgentStatusGet, AgentStatusList, AgentStatusSubscribe,
     AgentStatusSubscribed, AgentStatusUnsubscribe, ClientId, ClientRole, DaemonIdentity, ErrorCode,
     ErrorEnvelope, HelloRequest, HelloResponse, PROTOCOL_VERSION, PaneKey, Project, ProjectForget,
-    ProjectId, ProjectList, ProjectRegister, ProjectRegistered, RejectReason, RequestEnvelope,
-    RequestId, RequestPayload, ResponseEnvelope, ResponsePayload, SessionClose, SessionCreate,
-    SessionCreated, SessionHandle, SessionList, SessionSummary, StreamAttach, StreamAttached,
-    StreamDetach, StreamId, TerminalRead, TerminalReadResult, TerminalResize, TerminalSend,
-    TerminalWait, TerminalWaitResult,
+    ProjectId, ProjectList, ProjectRegister, ProjectRegistered, ProjectStart, ProjectStarted,
+    RejectReason, RequestEnvelope, RequestId, RequestPayload, ResponseEnvelope, ResponsePayload,
+    SessionClose, SessionCreate, SessionCreated, SessionHandle, SessionList, SessionSummary,
+    StreamAttach, StreamAttached, StreamDetach, StreamId, TerminalRead, TerminalReadResult,
+    TerminalResize, TerminalSend, TerminalWait, TerminalWaitResult,
 };
 
 use crate::rpc::control::{ControlError, ControlReader, ControlWriter};
@@ -483,6 +483,27 @@ impl Client {
         {
             ResponsePayload::ProjectForget => Ok(()),
             other => Err(mismatched("project_forget", &other)),
+        }
+    }
+
+    /// `Start ->`: a branch-keyed worktree, a session in it, and what opens a tab.
+    ///
+    /// The request carries a project and a **branch** and has no field for an issue number
+    /// (D-6). Deriving a branch from an issue belongs to the caller, before the request
+    /// exists.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`]. A branch git will not accept, and one whose worktree is
+    /// registered with its directory deleted, are both refused with the command that fixes
+    /// them in the answer's next steps.
+    pub async fn project_start(
+        &mut self,
+        request: ProjectStart,
+    ) -> Result<ProjectStarted, ClientError> {
+        match self.request(RequestPayload::ProjectStart(request)).await? {
+            ResponsePayload::ProjectStart(started) => Ok(started),
+            other => Err(mismatched("project_start", &other)),
         }
     }
 

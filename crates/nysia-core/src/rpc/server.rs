@@ -878,6 +878,13 @@ impl Daemon {
                 let projects = Arc::clone(&self.projects);
                 blocking(move || projects.forget(&request)).await
             }
+            RequestPayload::ProjectStart(request) => {
+                // The heaviest verb the daemon serves: four git invocations and a pty spawn.
+                // Blocking twice over, and a person is watching it, which is why it keeps the
+                // chokepoint's ordinary deadline rather than `project_list`'s short one.
+                let projects = Arc::clone(&self.projects);
+                blocking(move || projects.start(&request)).await
+            }
         }
     }
 
