@@ -167,12 +167,15 @@ use std::path::{Path, PathBuf};
 ///   one writer that applies this module's rule to it before it reaches the file.
 /// - Traps 6 and 11 are ConPTY teardown, and that is the failure someone would most want a
 ///   line for — but the crate makes no `log::` call around `ClosePseudoConsole`, the reader
-///   drain or EOF, so there is no teardown line to give up. `rg 'log::' pty/src` at that rev
-///   is how that was established; it returns nine call sites, and the ones not listed in the
-///   module docs are `serial.rs`, which Nysia never reaches because it opens ptys through
-///   `native_pty_system` and never a serial port.
-/// - What is genuinely given up is `cmdbuilder.rs`'s Unix shell-resolution warnings, and
-///   those are the leak.
+///   drain or EOF, so there is no teardown line to give up. `rg 'log::' pty/src` at that rev
+///   is how that was established: every call site it returns is either one this module
+///   already names or one in `serial.rs`, which Nysia never reaches because it opens ptys
+///   through `native_pty_system` and never a serial port. How many there were is not
+///   quoted, because nothing in this repo runs that `rg` — and an unchecked count is what
+///   the rest of this module is careful not to write down.
+/// - What is genuinely given up is `cmdbuilder.rs`'s Unix shell resolution warnings: the
+///   `$SHELL` one, and the passwd-lookup ones its `cfg(unix)` `get_shell` writes beside
+///   it. Those are the leak.
 ///
 /// # Adding to this list
 ///
