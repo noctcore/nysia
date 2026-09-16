@@ -98,6 +98,25 @@ describe('reading the issue list', () => {
     expect(() => readIssues([{ ...ROW, number: 1.5 }])).toThrow();
   });
 
+  it('refuses two rows sharing one issue number', () => {
+    // Load-bearing rather than tidy. The whole argument that a derived branch name is unique
+    // is that an issue number is unique within a repository, so two of them would be two
+    // `Start →` buttons asking for one worktree — and two table rows under one React key.
+    // GitHub cannot produce this, which is exactly why meeting it means the answer is not
+    // what this module thinks it is.
+    expect(() => readIssues([ROW, { ...ROW, title: 'a different title' }])).toThrow(
+      /sharing one number/,
+    );
+  });
+
+  it('collapses a repeated label instead of refusing the list over one', () => {
+    // Unlike a repeated number, a repeated label says nothing about whether the rest of the
+    // answer can be trusted — so it costs one pill, not a hundred issues.
+    expect(readIssues([{ ...ROW, labels: ['bug', 'bug', { name: 'bug' }] }])[0]?.labels).toEqual(
+      ['bug'],
+    );
+  });
+
   it('reads an empty list as an empty list, which is a real answer', () => {
     // The whole point of the screen's fourth ending: a repository with no open issues is a
     // fact, and it must reach the store as `loaded` rather than as anything else.
