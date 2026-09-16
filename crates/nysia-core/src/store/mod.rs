@@ -1,25 +1,31 @@
 //! Persistent state: SQLite for anything queried, JSON for anything hand-edited.
 //!
-//! D-12. Sessions, worktrees, orchestration, agent status and the scrollback index go into
-//! a WAL-mode SQLite database, because orchestration needs indexes and transactions.
-//! Settings and the project list stay JSON, written atomically, because a human is
-//! expected to open them in an editor.
+//! D-12. Sessions, worktrees, orchestration, agent status, the project list and the
+//! scrollback index go into a WAL-mode SQLite database, because orchestration needs indexes
+//! and transactions. Settings stay JSON, written atomically, because a human is expected to
+//! open them in an editor.
+//!
+//! The project list was on the JSON side of that line until v0.3 moved it: `v0.3-delivery-
+//! plan.md` §3.3 asks for the registration to survive a daemon restart, and nobody
+//! hand-edits which folders are registered — the dialog does it.
 //!
 //! There is no local task domain model: tasks are GitHub Issues, queried live (D-5).
 //!
 //! # What is here
 //!
-//! The first table, and the runner that will carry the rest:
-//!
 //! | Module | What it owns |
 //! |---|---|
 //! | [`migrate`] | the versioned schema, applied forward once, in a transaction |
 //! | [`status`] | the §2.2 agent-status row, its history cap and its rehydration |
+//! | [`project`] | the v0.3 §3.1 registration: one folder, one id, one row |
 //! | [`error`] | one error type, every variant carrying the path it failed on |
 //!
-//! Scrollback, worktrees and orchestration are later waves and later migrations. Nothing
+//! Scrollback, sessions and orchestration are later waves and later migrations. Nothing
 //! here reads or writes the disk spool: that is `nysia hook`'s and the daemon's (W4). The
 //! store persists what the drain hands it, through [`Store::restore_status`].
+//!
+//! Worktrees are **not** a later migration and [`project`] says why: they are what git says
+//! about a registered folder, and git is asked rather than cached.
 //!
 //! # It is synchronous, and that is deliberate
 //!
@@ -33,7 +39,12 @@
 //!
 //! A `waiting` row carries a tool's input verbatim, and a tool's input can be a secret the
 //! same way scrollback can. (The architecture doc's register numbers this 14; `CLAUDE.md`
-//! §5 numbers the same trap 13.) Two things follow, and both are load-bearing:
+//! §5 numbers the same trap 13.) Since v0.3 the same file also holds every registered
+//! repository path, which names a person's disk and is the same class of thing — so what
+//! follows protects two payloads rather than one, and [`project`] does not widen it: no
+//! error there carries a registered path, and the wire's project types carry none either.
+//!
+//! Three things follow, and all of them are load-bearing:
 //!
 //! - The file is created `0600` **before SQLite opens it**, so the `-wal` and `-shm`
 //!   sidecars — which SQLite creates with the mode of the main database — are owner-only
@@ -53,10 +64,11 @@
 //! Traps register #13 — every gate ships a proof that it trips. Each rule below has a named
 //! test, and each was **run against the mutation beside it** rather than asserted to be
 //! capable of failing. To repeat one: apply the edit, run
-//! `cargo test -p nysia-core <module>::tests::<name>` from the crate directory, revert. The
-//! module is `store::status::tests` for the rows naming `status::`, and `store::tests` for the
-//! rest — including the `migrate::apply` row, whose test lives with the other `Store::open`
-//! tests rather than beside the code it mutates.
+//! `cargo test -p nysia-core <name>` from the crate directory, revert. The tests live in the
+//! module the mutated code does, with two exceptions worth knowing before hunting for one:
+//! the `migrate::apply` row's test is with the other `Store::open` tests in `store::tests`,
+//! and every project row's test is in `store::project::tests` — including the three that
+//! mutate `migrate`'s own migration 2.
 //!
 //! | Mutate | To | Turns red |
 //! |---|---|---|
@@ -67,6 +79,26 @@
 //! | `status::live_row_at_least_as_recent`'s `restored_unconfirmed = 0` | dropped | `an_out_of_order_drain_still_lands` |
 //! | `migrate::apply`'s `migration.version <= found` guard | dropped | `opening_a_current_store_takes_no_write_lock` |
 //! | `Store::open`'s `refuse_symlink` call | dropped | `a_symlinked_database_path_is_refused` (unix) |
+//! | `Store::register_project`'s existing-row check | dropped, with `INSERT OR REPLACE` | `registering_the_same_folder_twice_is_one_project` |
+//! | `Store::register_project`'s `begin` | `conn.transaction()`, so deferred | `two_daemons_racing_one_registration_create_one_project` |
+//! | `Store::register_project`'s bound `name` | formatted into the statement | `a_name_or_group_carries_whatever_a_folder_name_can` |
+//! | `Store::projects`'s `ORDER BY seq` | `ORDER BY name` | `the_project_list_is_in_registration_order` |
+//! | `Store::projects`'s `raw.decode(…)?` | `if let Ok(…)`, so the row is skipped | `an_id_this_build_cannot_read_is_an_error` |
+//! | `Store::forget_project`'s zero-row answer | `Forgotten::Removed` | `forgetting_an_unknown_project_says_so` |
+//! | migration 2's `UNIQUE` on `projects.id` | dropped | `the_projects_table_refuses_a_duplicate_id` |
+//! | migration 2's tables | given one with `REFERENCES projects(id) ON DELETE CASCADE` | `nothing_cascades_from_forgetting_a_project` |
+//! | migration 2's column list | given a sixth column | `the_table_has_the_three_stored_fields_of_the_contract_and_two_keys` |
+//!
+//! Two rows earned their wording the hard way. The deferred-transaction mutation turned
+//! `two_daemons_racing_one_registration_create_one_project` red in **two runs of five**
+//! before a barrier was put between opening the stores and registering — four threads drift
+//! apart over `Store::open`'s WAL check and migration scan, so they were not racing at all.
+//! It is eight of eight now. And `one_folder_spelled_two_ways_is_still_one_project` has no
+//! row here on purpose: no mutation inside this module can turn it red, because
+//! [`crate::git::CanonicalPath`] has resolved both spellings into one string before
+//! `register_project` is reached. It carries its own proof instead — it asserts the two
+//! spellings derive **different** ids before they are resolved — which is what stops it
+//! passing on two spellings that were never different.
 //!
 //! The tests assert **literal** numbers — twenty rows, `1_800_000` milliseconds — rather
 //! than recomputing them from the constants they are checking. A test that derives its
