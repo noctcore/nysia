@@ -65,6 +65,7 @@ fn main() -> ExitCode {
             commands::terminal_resize,
             commands::host_platform,
             commands::project_list,
+            commands::tasks_list,
             commands::project_register,
             commands::project_pick_folder,
             commands::client_log,
