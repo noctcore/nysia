@@ -29,6 +29,14 @@ pub(super) const PROGRAM: &str = "claude";
 /// The agent's name, for messages.
 pub(super) const AGENT: &str = "claude";
 
+/// What a session running it is called on its tab.
+///
+/// Here rather than in the neutral half for the same reason [`PROGRAM`] is: what an agent is
+/// called is one of the things a second agent changes, and D-4 keeps every one of those in
+/// this module. It is a name and never a path — a tab showing `C:\Users\…\claude.exe` puts
+/// somebody's disk in every screenshot of the app (traps register #13).
+pub(super) const LABEL: &str = "Claude";
+
 /// Resolve the Claude CLI and build the argument vector to launch it with.
 ///
 /// # Errors
@@ -51,7 +59,12 @@ where
             agent: AGENT,
             source,
         })?;
-    Ok(AgentLaunch::new(AGENT, resolved.program.clone(), argv))
+    Ok(AgentLaunch::new(
+        AGENT,
+        LABEL,
+        resolved.program.clone(),
+        argv,
+    ))
 }
 
 /// Traps register #8, proved on the leg that has it.
@@ -83,18 +96,39 @@ where
 /// asserts on its output. No shared state, and nothing to serialise against the pty tests
 /// next door.
 ///
-/// # What it does not cover
+/// # The session, and why the fixture had to grow
 ///
-/// The spawn here is [`std::process::Command`], not a pty. That is deliberate and it is
-/// already on the record: `pty/resolve.rs` notes that a `cmd /c` one-shot inside a ConPTY
-/// never reports its exit through `try_wait` and its output never reaches the master. So
-/// this proves resolution-and-launch, which is the whole of trap #8; it does not prove a
-/// pty-hosted agent session, which needs a `ShellProfile` that does not exist yet and is
-/// wave C's to add.
+/// The trap-#8 tests above spawn through [`std::process::Command`], which proves resolution
+/// and launch and stops there. An agent *session* is a different claim — a long-lived
+/// interactive process in a pty — and on Windows it runs through the one wrapper this
+/// repository had recorded as not coming back: `pty/resolve.rs` measured that a `cmd /c`
+/// one-shot inside a ConPTY never reports its exit through `try_wait` and its output never
+/// reaches the master, and left hosting an interactive child there untested. Every
+/// npm-installed user is on that path.
+///
+/// [`tests::an_agent_session_reaches_an_interactive_prompt`] closes it, on **both** legs and
+/// with no CLI installed anywhere: [`tests::write_interactive_shims`] writes a `claude` that
+/// hands over to the platform's shell, and the child drives the session through
+/// [`crate::rpc::SessionRegistry`] until the screen shows a token the shell had to *compute*.
+/// It then checks the parts that must not differ between the two session kinds — the tab's
+/// title, the minted pane, the first incarnation, and a close that stops the handle
+/// resolving. [`tests::an_absent_cli_refuses_the_session_before_a_pty_is_opened`] is the
+/// other half: `PATH` is one empty directory, and the refusal is
+/// [`crate::rpc::SessionError::Launch`] with nothing left in the registry.
+///
+/// # What it still does not cover
+///
+/// Whether the real CLI **authenticates** inside a session the daemon spawned, and whether
+/// its status hooks resolve to the right pane. Neither is a fixture's to answer — one is a
+/// machine's credential state and the other is the process tree of a program this repository
+/// does not ship — so both were driven by hand and written up in the change that added this.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::scratch::Scratch;
+    use crate::rpc::session::{OwnedSession, SessionRegistry};
+    use crate::rpc::testing::{DEADLINE, TOKEN};
+    use nysia_proto::{SessionCreate, SessionKind};
     use std::path::Path;
     use std::process::Command;
 
@@ -128,6 +162,38 @@ mod tests {
             format!("Write-Output '{MARKER}'\r\n"),
         )
         .expect("the ps1 shim");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.join(PROGRAM), std::fs::Permissions::from_mode(0o755))
+                .expect("the sh shim is executable");
+        }
+    }
+
+    /// Write the same three files, but with a CLI that **stays running and reads input**.
+    ///
+    /// [`write_npm_shims`] is enough to prove resolution, because resolution is answered
+    /// before anything is spawned. It is not enough to prove a *session*: an agent session is
+    /// a long-lived interactive process in a pty, and the failure this fixture exists to
+    /// catch is Windows-only and specific — a `.cmd` shim is launched as `cmd /c call
+    /// <shim>`, and `pty/resolve.rs` records that a `cmd /c` **one-shot** inside a ConPTY
+    /// never comes back. Whether the same wrapper hosts an *interactive* child had never been
+    /// run, and every npm-installed user is on that path.
+    ///
+    /// So each file hands over to the platform's interactive shell by absolute path:
+    /// `%ComSpec%` and `/bin/sh`, because `PATH` in the child is the fixture directory and
+    /// nothing else. What the session then answers is a shell prompt, which is all a caller
+    /// of this module ever promises — resolving a CLI and hosting it, not what it says.
+    fn write_interactive_shims(dir: &Path) {
+        std::fs::write(dir.join(PROGRAM), "#!/bin/sh\nexec /bin/sh -i\n").expect("the sh shim");
+        std::fs::write(
+            dir.join(format!("{PROGRAM}.cmd")),
+            "@echo off\r\n\"%ComSpec%\" /k\r\n",
+        )
+        .expect("the cmd shim");
+        std::fs::write(dir.join(format!("{PROGRAM}.ps1")), "& $env:ComSpec /k\r\n")
+            .expect("the ps1 shim");
 
         #[cfg(unix)]
         {
@@ -298,6 +364,153 @@ mod tests {
         assert!(String::from_utf8_lossy(&output.stdout).contains(MARKER));
 
         println!("{CHILD_OK}");
+    }
+
+    // -----------------------------------------------------------------------------------
+    // The session itself, on both legs. Neither CI runner has the CLI, and neither needs
+    // one: the fixture *is* the CLI, so this exercises the same code on every machine
+    // rather than passing vacuously where the program happens to be installed.
+    // -----------------------------------------------------------------------------------
+
+    /// Lines that make the fixture's shell **compute** [`TOKEN`].
+    ///
+    /// Computed and never typed, for `rpc::testing`'s reason: a token that also appears in
+    /// the line as typed is satisfied by kernel echo alone, with the shell having run
+    /// nothing.
+    fn probe_lines() -> Vec<&'static str> {
+        if cfg!(windows) {
+            // `cmd` expands `%NYS%` when it parses the line, so the assignment has to be a
+            // separate command.
+            vec!["set /a NYS=6*7", "echo NYSIA-%NYS%"]
+        } else {
+            vec!["echo NYSIA-$((6*7))"]
+        }
+    }
+
+    /// Wait until the session's screen satisfies `predicate`, or give up at [`DEADLINE`].
+    fn until(session: &OwnedSession, predicate: impl Fn(&str) -> bool) -> String {
+        let deadline = std::time::Instant::now() + DEADLINE;
+        loop {
+            let text = session
+                .read(nysia_proto::ReadMode::Screen, None, None)
+                .lines
+                .join("\n");
+            if predicate(&text) || std::time::Instant::now() >= deadline {
+                return text;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn an_agent_session_reaches_an_interactive_prompt() {
+        let scratch = Scratch::new("agent-session");
+        write_interactive_shims(scratch.path());
+        let (ok, output) = drive_child("child_hosts_an_agent_session", scratch.path());
+        assert!(ok, "the child test failed:\n{output}");
+        assert!(output.contains(CHILD_OK), "the child never ran:\n{output}");
+    }
+
+    #[test]
+    #[ignore = "driven by its outer test, which writes an interactive CLI and owns PATH"]
+    fn child_hosts_an_agent_session() {
+        let registry = SessionRegistry::new();
+        let created = registry
+            .create(&agent_request())
+            .expect("an agent session must start from a resolved CLI");
+        let session = registry
+            .get(&created.handle)
+            .expect("it is in the registry");
+
+        // 1. It is an agent, and its tab carries the agent's name rather than the path the
+        //    fixture happens to live at (traps register #13).
+        let summary = session.summary();
+        assert_eq!(summary.kind, SessionKind::Agent);
+        assert_eq!(summary.title, LABEL);
+
+        // 2. Pane and incarnation are minted exactly as a shell's are: no key was asked for,
+        //    so the daemon made one, and this is that pane's first spawn.
+        assert_eq!(created.pane_key, summary.pane_key);
+        assert_eq!(created.incarnation.generation(), 0);
+        assert_eq!(created.incarnation.pane_key(), created.pane_key);
+
+        // 3. And it is a live terminal. On Windows this is the whole point: the `cmd /c call
+        //    <shim>` wrapper that a one-shot never returns from is hosting an interactive
+        //    child here, output reaching the master and input reaching the child.
+        assert!(
+            !until(&session, |text| !text.trim().is_empty())
+                .trim()
+                .is_empty(),
+            "the agent session painted nothing"
+        );
+        let _ = session.wait(nysia_proto::WaitFor::Idle, Some(DEADLINE));
+        for line in probe_lines() {
+            session
+                .send(&nysia_proto::TerminalSend::line(
+                    created.handle.clone(),
+                    line,
+                ))
+                .expect("the session takes input");
+            let _ = session.wait(nysia_proto::WaitFor::Idle, Some(DEADLINE));
+        }
+        let screen = until(&session, |text| text.contains(TOKEN));
+        assert!(
+            screen.contains(TOKEN),
+            "the agent session never ran the probe; screen was:\n{screen}"
+        );
+
+        // 4. Teardown is the shell's teardown.
+        registry.close(&created.handle).expect("it closes");
+        assert!(
+            registry.get(&created.handle).is_err(),
+            "a closed session stops resolving"
+        );
+
+        println!("{CHILD_OK}");
+    }
+
+    #[test]
+    fn an_absent_cli_refuses_the_session_before_a_pty_is_opened() {
+        let scratch = Scratch::new("agent-session-missing");
+        // An empty directory as the whole of PATH.
+        let (ok, output) = drive_child("child_refuses_a_session_with_no_cli", scratch.path());
+        assert!(ok, "the child test failed:\n{output}");
+        assert!(output.contains(CHILD_OK), "the child never ran:\n{output}");
+    }
+
+    #[test]
+    #[ignore = "driven by its outer test, which points PATH at an empty directory"]
+    fn child_refuses_a_session_with_no_cli() {
+        let registry = SessionRegistry::new();
+        let Err(err) = registry.create(&agent_request()) else {
+            panic!("a session cannot start from a CLI that is not there");
+        };
+        // The shape that matters is `Launch`, not `Spawn`: the refusal is answered from
+        // resolution, before a pty is opened, which is the only place either platform reports
+        // it usefully (traps register #8 and #11).
+        assert!(
+            matches!(&err, crate::rpc::SessionError::Launch(_)),
+            "a missing CLI is a launch refusal, not {err}"
+        );
+        assert_eq!(
+            registry.len(),
+            0,
+            "a refused session leaves nothing in the registry"
+        );
+        println!("{CHILD_OK}");
+    }
+
+    /// A request for an agent session with nothing else asked for.
+    fn agent_request() -> SessionCreate {
+        SessionCreate {
+            kind: SessionKind::Agent,
+            pane_key: None,
+            profile: None,
+            cwd: None,
+            env_overrides: std::collections::BTreeMap::new(),
+            cols: 80,
+            rows: 24,
+        }
     }
 
     // -----------------------------------------------------------------------------------

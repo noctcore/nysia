@@ -92,6 +92,13 @@ pub enum SessionError {
     /// The shell could not be started.
     #[error("could not start the session: {0}")]
     Spawn(#[source] crate::pty::SpawnError),
+    /// The agent's CLI could not be resolved to something launchable.
+    ///
+    /// Separate from [`Self::Spawn`] because it is answered **before** anything is spawned
+    /// and because the thing to do about it is different: a shell that will not start is a
+    /// machine problem, and this is a program that is not installed.
+    #[error("could not start the agent: {0}")]
+    Launch(#[source] crate::agent::LaunchError),
     /// The requested working directory was refused.
     #[error("the working directory {} was refused: {reason}", path.display())]
     PathRefused {
@@ -99,12 +106,6 @@ pub enum SessionError {
         path: PathBuf,
         /// Why.
         reason: String,
-    },
-    /// The request named something this build does not serve.
-    #[error("{what} is not available in this build")]
-    Unsupported {
-        /// What was asked for.
-        what: String,
     },
     /// The request was not well formed.
     #[error("{0}")]
@@ -151,11 +152,19 @@ impl IntoEnvelope for SessionError {
                 "pass an absolute path to a directory that exists",
                 &["omit --cwd to start the session where the daemon is running"],
             ),
-            Self::Unsupported { .. } => envelope(
-                ErrorCode::Unsupported,
+            // The agent's own name is in `message`, put there by `LaunchError`'s `Display`.
+            // Naming it here instead would be the D-4 seam in the wrong place, and it would
+            // be wrong twice over on the day a second agent lands.
+            Self::Launch(_) => envelope(
+                ErrorCode::SpawnFailed,
                 message,
-                "v0.1 serves shell sessions; agent sessions land in v0.2",
-                &["`nysia session create --profile pwsh` starts a shell"],
+                "install the agent's CLI and make sure a terminal can run it by name",
+                &[
+                    "the daemon resolves the CLI on `PATH` at the moment a session is asked \
+                     for, so an install does not need a daemon restart",
+                    "a session started in a worktree searches the daemon's `PATH`, not the \
+                     project's",
+                ],
             ),
             Self::Invalid(_) => envelope(
                 ErrorCode::InvalidRequest,
@@ -570,6 +579,41 @@ fn core_profile(profile: Option<&WireProfile>) -> ShellProfile {
     }
 }
 
+/// What a request asks to be run, as a spec with nothing else filled in yet.
+///
+/// The one place the two session kinds differ, and the difference is only *where the program
+/// comes from*: a shell is named on the wire and [`ShellProfile`] resolves it, an agent's CLI
+/// is resolved by [`crate::agent`] and arrives already validated. Everything after this —
+/// the confined directory, the caller's environment, the pane key that goes on last, the
+/// pump, the teardown — is the same code for both, which is the point of returning a spec
+/// rather than branching twice.
+///
+/// **Nothing here names an agent** (D-4). [`crate::agent::launch`] answers with a label and
+/// an argv, and the agent's own name reaches a person only through [`LaunchError`]'s
+/// `Display`. A literal in this file would be the seam in the wrong place, and
+/// `no-claude-specifics-outside-agent` would say so with a line number.
+///
+/// # Errors
+///
+/// Returns [`SessionError::Launch`] when the agent's CLI cannot be resolved to something
+/// this platform will launch — **before** the spawn, because neither platform reports that
+/// usefully afterwards (traps register #8 and #11).
+fn program_for(request: &SessionCreate) -> Result<SessionSpec, SessionError> {
+    match request.kind {
+        SessionKind::Shell => Ok(SessionSpec::new(core_profile(request.profile.as_ref()))),
+        SessionKind::Agent => {
+            // No arguments: a session is the CLI's interactive form, and everything a person
+            // would pass on a command line they type at the prompt instead.
+            let launch = crate::agent::launch(NO_ARGUMENTS).map_err(SessionError::Launch)?;
+            SessionSpec::for_program(launch.argv().to_vec(), launch.label())
+                .map_err(SessionError::Spawn)
+        }
+    }
+}
+
+/// What an agent session is launched with, which is nothing.
+const NO_ARGUMENTS: [&std::ffi::OsStr; 0] = [];
+
 /// Confine a requested working directory.
 ///
 /// v0.1's confinement is deliberately narrow: absolute, existing, and a directory. §7.5's
@@ -623,16 +667,18 @@ impl SessionRegistry {
 
     /// Spawn a session and start its pump.
     ///
+    /// Both kinds come through here and take the same path (§3): [`program_for`] decides what
+    /// is spawned and everything after it — the confined directory, the caller's environment,
+    /// the daemon's pane key last, the pump, the teardown when the pump will not start — is
+    /// one piece of code serving a shell and an agent alike. That is what makes "every tab is
+    /// a session" true of the daemon rather than only of the window.
+    ///
     /// # Errors
     ///
     /// Returns [`SessionError`] when the pane is taken, the working directory is refused, the
-    /// request names something this build does not serve, or the shell will not start.
+    /// request is not well formed, the agent's CLI cannot be resolved, or the program will
+    /// not start.
     pub fn create(&self, request: &SessionCreate) -> Result<SessionCreated, SessionError> {
-        if request.kind == SessionKind::Agent {
-            return Err(SessionError::Unsupported {
-                what: "an agent session".to_owned(),
-            });
-        }
         if request.cols == 0 || request.rows == 0 {
             return Err(SessionError::Invalid(
                 "a session is at least one cell in each direction".to_owned(),
@@ -657,10 +703,10 @@ impl SessionRegistry {
             None => synthetic_pane(),
         };
 
-        let profile = core_profile(request.profile.as_ref());
-        let title = profile.label();
+        let mut spec = program_for(request)?;
+        let title = spec.program.label();
         let size = TerminalSize::new(request.cols, request.rows);
-        let mut spec = SessionSpec::new(profile).with_size(size);
+        spec = spec.with_size(size);
         let confined = confine_cwd(request.cwd.as_ref())?;
         if let Some(cwd) = confined.clone() {
             spec = spec.with_cwd(cwd);
@@ -1431,10 +1477,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_agent_session_says_which_version_serves_it_rather_than_failing_blankly() {
-        let registry = SessionRegistry::new();
-        let refused = registry.create(&SessionCreate {
+    /// A request for an agent session, with nothing else asked for.
+    fn agent_request() -> SessionCreate {
+        SessionCreate {
             kind: SessionKind::Agent,
             pane_key: None,
             profile: None,
@@ -1442,18 +1487,67 @@ mod tests {
             env_overrides: BTreeMap::new(),
             cols: 80,
             rows: 24,
+        }
+    }
+
+    #[test]
+    fn an_agent_request_is_a_program_to_resolve_rather_than_a_refusal() {
+        // The whole of the gap this closes, stated as the two answers that are allowed. One
+        // of them depends on whether a CLI is installed, so neither is asserted on its own —
+        // what is asserted is that **nothing else** may come back, which is what a blanket
+        // refusal was.
+        //
+        // Both legs of CI take the `Launch` arm, because neither runner has the CLI. The
+        // other arm is proved on both legs by
+        // `agent::claude::launch::tests::an_agent_session_reaches_an_interactive_prompt`,
+        // which writes its own CLI onto a controlled `PATH` rather than waiting for one.
+        match program_for(&agent_request()) {
+            Ok(spec) => {
+                assert!(
+                    spec.program.shell().is_none(),
+                    "an agent session is not one of the shells"
+                );
+                let label = spec.program.label();
+                assert!(!label.is_empty(), "a tab needs something to be called");
+                assert!(
+                    !label.contains('/') && !label.contains('\\'),
+                    "a tab is labelled with a name, never a path: {label:?}"
+                );
+            }
+            Err(SessionError::Launch(_)) => {}
+            Err(other) => panic!(
+                "an agent request is served or says the CLI is missing, and nothing else: \
+                 {other}"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_missing_agent_cli_is_actionable_rather_than_a_blank_refusal() {
+        // Constructed rather than provoked, so this runs the same way on a machine with the
+        // CLI and on one without — and it is the arm both CI legs take for real.
+        let error = SessionError::Launch(crate::agent::LaunchError::Unavailable {
+            agent: "an-agent",
+            source: crate::pty::ResolveError::NotFound {
+                program: "an-agent".to_owned(),
+            },
         });
-        let Err(error) = refused else {
-            panic!("v0.1 serves no agent sessions");
-        };
         let envelope = error.into_envelope();
-        assert_eq!(*envelope.code(), ErrorCode::Unsupported);
+
+        assert_eq!(
+            *envelope.code(),
+            ErrorCode::SpawnFailed,
+            "a CLI that is not installed is a spawn that will not happen, not a verb this \
+             build does not serve"
+        );
         assert!(
-            envelope
-                .next_steps()
-                .iter()
-                .any(|step| step.contains("v0.2")),
-            "an agent request should name the version that serves it"
+            envelope.message().contains("an-agent"),
+            "the refusal names which agent: {:?}",
+            envelope.message()
+        );
+        assert!(
+            !envelope.next_steps().is_empty(),
+            "§6.2 makes a next step non-optional"
         );
     }
 
