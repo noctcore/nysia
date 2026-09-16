@@ -15,17 +15,33 @@ import {
  *
  * `an empty list for any of those is a lie` is the contract's own phrasing, and the test it
  * turns into is the one below: every ending that draws a table with nothing in it produces a
- * heading, and no two of those headings are equal. Asserted over the reasons *derived from
- * the type* rather than a list written out here, so a fourth reason added to
- * `TaskUnavailableReason` without a heading fails this file rather than shipping as a blank
- * screen.
+ * heading, and no two of those headings are equal.
  */
 
-const EVERY_REASON: readonly TaskUnavailableReason[] = [
-  'gh_missing',
-  'gh_unauthenticated',
-  'query_failed',
-];
+/**
+ * Every reason, in a shape the type will not let grow past.
+ *
+ * **A `Record` keyed by the union, not an array annotated with it**, and the difference is
+ * the whole of what this holds. `readonly TaskUnavailableReason[]` accepts a list of three
+ * when the union has four — a subset is a perfectly good array — so the roster this file
+ * used to carry typechecked, iterated three, passed, and said in a comment that it was
+ * derived from the type. It was not. The check that really held that property was `tsc` on
+ * `Record<TaskUnavailableReason, TasksNotice>` in `tasks.ts`, a different gate in a
+ * different file; here a fourth reason went unnoticed, and a fourth reason *repeating* an
+ * existing heading went unnoticed everywhere.
+ *
+ * A `Record` has to name every member, so adding one to the union fails to compile on this
+ * object — and because {@link Object.values} then hands the tests a list that includes it,
+ * the duplicate-heading assertion below covers it too. Same shape as `UNAVAILABLE_NOTICES`
+ * itself, for the same reason.
+ */
+const REASON_ROSTER: Readonly<Record<TaskUnavailableReason, TaskUnavailableReason>> = {
+  gh_missing: 'gh_missing',
+  gh_unauthenticated: 'gh_unauthenticated',
+  query_failed: 'query_failed',
+};
+
+const EVERY_REASON: readonly TaskUnavailableReason[] = Object.values(REASON_ROSTER);
 
 function unavailable(reason: TaskUnavailableReason): TasksState {
   return { phase: 'unavailable', reason, message: 'the daemon said so', nextSteps: ['do this'] };
