@@ -9,23 +9,29 @@ worktrees are the spine. Tasks come from GitHub Issues.
 the orchestration state and the agent-status endpoint. The window is a client. Updating or
 crashing the UI never interrupts a running agent.
 
-**Status: v0.1, the walking skeleton.** The daemon, its socket protocol, PTY shell sessions,
-the Rust VT state, the multiplexed output channel and the app chrome are built and running.
-The acceptance criterion holds: close the window and the shell survives; relaunch and the tab
-comes back with its scrollback replayed and the session still taking input. What v0.1
-deliberately does **not** have is agent sessions — Claude, hooks and status detection are
-v0.2. See [CHANGELOG.md](CHANGELOG.md) for what shipped and the
+**Status: v0.3, projects and tasks.** The acceptance criterion holds: point Nysia at a folder
+and it appears in the sidebar and survives a daemon restart, and a GitHub issue in it starts
+into a branch-keyed worktree with a session and a tab. Under it, v0.1's walking skeleton still
+holds — close the window and the shell survives; relaunch and the tab comes back with its
+scrollback replayed and the session still taking input — and v0.2's live status dots run on
+Claude's own hooks rather than on terminal-title guessing. What v0.3 deliberately does **not**
+have is the worktree manager: merging, diffing and discarding the worktrees it creates are
+v0.4, with the usage meter. See [CHANGELOG.md](CHANGELOG.md) for what each milestone shipped
+and where it stopped, and the
 [issue backlog](https://github.com/noctcore/nysia/issues) for what is still wrong.
 
-The one to know before you lean on it: scrollback lives in the daemon's memory and nothing is
-written to SQLite yet, so it survives a closed window but not a restarted daemon — a real
-regression against Orca's history checkpoints, and §12 question 2 of the architecture is the
-honest write-up of it.
+The one to know before you lean on it: SQLite holds registered projects and agent status and
+not one byte of terminal output, so scrollback still survives a closed window but not a
+restarted daemon — a real regression against Orca's history checkpoints, and §12 question 2 of
+the architecture is the honest write-up of it. The other: Nysia does not install Claude's
+status hooks for you and offers no verb that would, so an agent session started from the window
+runs, and its dot does not move until you install them yourself.
 
 - [Architecture and founding decisions](docs/design/2026-09-13-nysia-architecture.md)
 - [Design system spec](docs/design/design-spec.md)
 - [Design sources and provenance](docs/design/README.md)
-- [v0.1 delivery plan](docs/plans/v0.1-delivery-plan.md)
+- Delivery plans: [v0.1](docs/plans/v0.1-delivery-plan.md) ·
+  [v0.2](docs/plans/v0.2-delivery-plan.md) · [v0.3](docs/plans/v0.3-delivery-plan.md)
 - [Working rules](CLAUDE.md)
 
 ## Development
@@ -161,7 +167,8 @@ anything is worse than no check:
 pnpm prove:ts-drift      # mutates nysia-proto, asserts the drift guard exits 1, restores it
 pnpm prove:lint-meta     # runs every architecture rule against fixtures that break it
 pnpm prove:eslint-bans   # lints virtual files to prove no-restricted-imports still bites
-pnpm prove               # all three
+pnpm prove:sidecar       # drives stage and verify, asserts a bundle with no runtime fails
+pnpm prove               # every one of them
 ```
 
 ### Regenerating the TypeScript bindings
