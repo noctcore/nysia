@@ -520,6 +520,25 @@ export class DaemonStore implements Store {
     if (project === null) {
       throw this.fail('startTask', 'No project is selected, so there is nowhere to start it.');
     }
+    // The row has to be one of the rows currently loaded, by **identity**, and that closes a
+    // frame-long window rather than a hypothetical one. A React tree renders the issues from
+    // one snapshot and re-renders on the next; between those two, the list underneath can
+    // already have been thrown away — `selectProject` does it synchronously — so a click that
+    // has been dispatched hands over a row belonging to a repository that is no longer the
+    // active one. The branch is derived from that row, and the request carries the *new*
+    // project: a worktree for one repository's issue, made in another, which is the exact
+    // hazard three comments in this file cite as the reason the list is reset at all.
+    //
+    // Identity rather than an issue number, for `#settleStart`'s reason: a refresh replaces
+    // every row object, and a number that survives a refresh says nothing about whether the
+    // title the branch is derived from did.
+    const listed = this.#snapshot.tasks;
+    if (listed.phase !== 'loaded' || !listed.issues.includes(issue)) {
+      throw this.fail(
+        'startTask',
+        'That issue is not in the list on screen any more. Refresh it and start it again.',
+      );
+    }
     // A refusal rather than a resolve. `store/storeContract.ts` requires this verb to start or
     // to reject, and resolving here left `taskStart` on `starting` — the one shape it forbids,
     // because a caller that saw a resolved promise and a spinning row would have no way to
