@@ -434,6 +434,12 @@ export class DaemonStore implements Store {
     // is still in flight, which is reachable by pressing `↻` while one runs. Clearing that
     // would un-busy the row mid-worktree and then flip it back when the answer landed, so a
     // start in progress outlives the list it was started from.
+    //
+    // **Carried across by reference, not rebuilt**, and that is load-bearing rather than
+    // incidental: `#settleStart` claims the phase by object identity, so spreading it into a
+    // new object here would orphan every start that had `↻` pressed during it.
+    // `leaves a start able to finish after a refresh landed on top of it` in
+    // `DaemonStore.test.ts` is what holds that, because a comment cannot.
     this.#update((current) => ({
       ...current,
       tasks: { phase: 'loading' },

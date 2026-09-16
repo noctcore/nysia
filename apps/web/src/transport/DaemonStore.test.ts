@@ -1397,6 +1397,40 @@ describe('starting an issue', () => {
     expect(store.getSnapshot().taskStart.phase).toBe('started');
   });
 
+  it('leaves a start able to finish after a refresh landed on top of it', async () => {
+    // The claim `refreshTasks` makes in a comment, made checkable. Pressing `↻` while a
+    // worktree is being made is ordinary, and what keeps the start alive across it is that the
+    // refresh carries the `starting` state over **by reference** — `#settleStart` claims the
+    // phase by object identity, so a spread would orphan the start that is still running.
+    //
+    // That is load-bearing and invisible, and nothing in the tree exercised it: no test called
+    // `refreshTasks()` while a start was in flight. Writing `taskStart: { ...current.taskStart }`
+    // keeps every by-value assertion passing and breaks every start that had `↻` pressed during
+    // it — the row spins for ever, the confirmation never appears, and the worktree is made.
+    // The last line below is the one that catches it.
+    const { store, daemon } = build();
+    await ready(store);
+    const row = await aLoadedRow(store);
+    const held = hold(daemon, 'project_start');
+
+    const starting = store.startTask(row);
+    await until(() => store.getSnapshot().taskStart.phase === 'starting');
+
+    await store.refreshTasks();
+    expect(
+      store.getSnapshot().taskStart,
+      'the refresh un-busied a row whose worktree was still being made',
+    ).toEqual({ phase: 'starting', issue: 200 });
+    expect(store.getSnapshot().tasks.phase, 'the refresh did not land').toBe('loaded');
+
+    held.release(0);
+    await starting;
+    expect(
+      store.getSnapshot().taskStart.phase,
+      'the start could not find its own claim after the refresh rebuilt it',
+    ).toBe('started');
+  });
+
   it('drops a confirmation the screen has already moved past', async () => {
     // `discards an answer that arrives after the project changed`, for the other verb, and
     // one notch worse. A worktree takes seconds, so switching projects mid-start is ordinary
