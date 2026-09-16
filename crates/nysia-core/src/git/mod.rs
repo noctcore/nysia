@@ -26,18 +26,37 @@
 //!
 //! # How the hardening is arranged
 //!
-//! [`command`] holds the spawn and is worth reading before adding a verb: the `-c`
-//! neutralisers that keep a repository's own `.git/config` from naming a program git will
-//! run, the `GIT_*` scrub that keeps this process's environment from redirecting the answer,
-//! the deadline every invocation carries, and the tree-kill that enforces it.
+//! Two layers, split along the line between *running a program safely* and *what one
+//! particular program's arguments and environment have to be*.
 //!
-//! Two of those are load-bearing in a way that is not obvious from the names.
+//! - [`runner`] owns the first: resolve-once, the working directory as a type, the deadline,
+//!   the tree-kill that enforces it, the two-thread drain, and the split between "the child
+//!   exited" and "the pipe reached EOF". It knows nothing about any program.
+//! - [`command`] owns git's half and is worth reading before adding a verb: the `-c`
+//!   neutralisers that keep a repository's own `.git/config` from naming a program git will
+//!   run, and the `GIT_*` scrub that keeps this process's environment from redirecting the
+//!   answer.
+//!
+//! Two of git's settings are load-bearing in a way that is not obvious from the names.
 //! `GIT_TERMINAL_PROMPT=0` exists because a credential prompt is the worst failure available
 //! to this module — it hangs, invisibly, in a daemon that lives for days (D-1). And the
 //! `GIT_DIR` scrub is not hygiene: with `GIT_DIR` set in the daemon's environment,
 //! `git rev-parse` in a folder that is not a repository at all exits 0 and reports the
 //! repository the variable names, so a plain folder would register as a project pointing at
 //! somebody else's git directory.
+//!
+//! The split exists because **`gh` is a spawn with the same four concerns and a different
+//! policy.** D-5 queries GitHub Issues live, which is a program that reaches the network and
+//! authenticates, so it needs the deadline and the tree-kill more sharply than git does — and
+//! it cannot use git's argument vector, which prepends `-c` pairs and `--no-pager` that gh
+//! would reject before reading the verb. Writing a second spawner was the alternative, and
+//! [`runner`]'s own documentation says why it was not taken.
+//!
+//! An environment list belongs to its program and never to the runner. That is not tidiness:
+//! git's scrub list is safe for gh only by accident, and a shared one that grew toward
+//! "anything naming a credential" would take `GH_TOKEN` with it and leave every machine
+//! permanently unauthenticated. The program whose credentials are at stake names them in a
+//! list of its own, so that scrubbing one is a compile error rather than a convention.
 //!
 //! # What this module needs from git
 //!
@@ -50,6 +69,7 @@ pub(crate) mod command;
 mod error;
 mod inspect;
 mod path;
+pub(crate) mod runner;
 #[cfg(test)]
 pub(crate) mod testing;
 
