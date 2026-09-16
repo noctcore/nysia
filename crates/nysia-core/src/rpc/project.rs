@@ -233,7 +233,22 @@ impl ProjectService {
     /// The timed-out work is not cancelled, because a blocking `stat` on a dead share cannot
     /// be: the deadline bounds how long the *caller* waits, and the thread is returned to the
     /// pool whenever the OS gives up on it.
+    ///
+    /// **A machine with no git is not one of those cases**, and telling them apart is the
+    /// point. Every project would be unreachable for the same reason, and the answer — every
+    /// project with no worktrees — is indistinguishable from a person's repositories all
+    /// being bare. This verb is the one the sidebar calls, so it is where that is met first,
+    /// and it says so the way [`ProjectService::register`] already does.
     pub async fn list(self: &Arc<Self>) -> ResponsePayload {
+        // **Said, rather than shown as an empty sidebar.** `reached` answers `None` when git
+        // could not be resolved, and `None` is the same answer a folder on an unplugged drive
+        // gets — so a machine with no git listed every project with no worktrees, which is
+        // exactly what a machine full of bare repositories looks like. `register` and `start`
+        // both name the missing git; this one was the odd one out, and it is the verb the
+        // sidebar calls, so it is the one a person meets first.
+        if let Err(envelope) = self.git() {
+            return ResponsePayload::Error(envelope);
+        }
         let service = Arc::clone(self);
         let stored = match tokio::task::spawn_blocking(move || service.store.projects()).await {
             Ok(Ok(stored)) => stored,
@@ -370,6 +385,15 @@ impl ProjectService {
             project = %stored.id,
             branch,
             adopted = started.adopted(),
+            // **Which worktree it landed in, as far as a log can say it without a path.**
+            // `ensure` adopts by branch alone (D-6), and git will not check one branch out
+            // twice — so starting the branch a project is already on adopts the *main*
+            // checkout, and the session opens where a person's uncommitted work is rather
+            // than in a fresh worktree. That is git-correct and `adopted: true` discloses
+            // that something was adopted; `ProjectStarted` has no field for *which*, and
+            // adding one is a wire change this task is not. Until it has one, this is the
+            // record.
+            main_worktree = worktree.is_main,
             handle = %created.handle,
             pane_key = %created.pane_key,
             "started a branch"
@@ -501,11 +525,59 @@ fn without_worktrees(stored: &StoredProject) -> Project {
 /// rather than a defensive `else`: a **bare** repository reached from outside its own
 /// directory has no worktree containing the folder, and it is still something a person may
 /// register.
+///
+/// # Nysia's own worktrees fold back to the project they belong to
+///
+/// "Registering a linked worktree makes it primary" is the documented rule and it stays: a
+/// worktree a person made, wherever they made it, is a folder they may want as its own
+/// project. What changed underneath it is that #94 started putting linked worktrees
+/// **inside the project folder**, at `<project>/.nysia/worktrees/<slug>` — somewhere a
+/// folder picker reaches by accident. Registering one of those yielded a second `proj_…`
+/// named after the slug, listing the same worktrees with `isPrimary` flipped, beside the
+/// original, with nothing to tell a person which was which.
+///
+/// So the one case that folds is the one Nysia created: a primary worktree sitting under
+/// another worktree's [`crate::worktree::WORKTREE_BASE`] registers that outer worktree
+/// instead. It is decided from the path shape this module owns rather than from a marker
+/// file, and it is deliberately narrow — a worktree the person put anywhere else is still
+/// their own project, because it is still their decision.
 fn registration_root(repository: &Repository, requested: &CanonicalPath) -> CanonicalPath {
-    repository
+    let Some(primary) = repository
         .primary()
         .and_then(|worktree| worktree.canonical.clone())
-        .unwrap_or_else(|| requested.clone())
+    else {
+        return requested.clone();
+    };
+    holder_of(repository, &primary).unwrap_or(primary)
+}
+
+/// The worktree whose own `.nysia/worktrees` directory contains `path`, if one does.
+///
+/// Compared component-wise through [`CanonicalPath::contains`] and then by the two names,
+/// never by a string search for `.nysia`: a person's repository may perfectly well live in a
+/// folder called `.nysia`, and matching on the text would swallow it.
+fn holder_of(repository: &Repository, path: &CanonicalPath) -> Option<CanonicalPath> {
+    repository
+        .worktrees
+        .iter()
+        .filter_map(|worktree| worktree.canonical.clone())
+        .find(|candidate| {
+            candidate != path
+                && candidate.contains(path)
+                && path
+                    .as_path()
+                    .strip_prefix(candidate.as_path())
+                    .is_ok_and(|rest| {
+                        let mut components = rest.components();
+                        let base = crate::worktree::WORKTREE_BASE;
+                        components
+                            .next()
+                            .is_some_and(|first| first.as_os_str() == std::ffi::OsStr::new(base[0]))
+                            && components.next().is_some_and(|second| {
+                                second.as_os_str() == std::ffi::OsStr::new(base[1])
+                            })
+                    })
+        })
 }
 
 /// The refusal a git failure becomes.
@@ -1855,5 +1927,150 @@ mod tests {
                 );
             }
         }
+    }
+    /// Registering a worktree **Nysia** created is the project it belongs to, not a new one.
+    ///
+    /// #94's finding. "Registering a linked worktree makes it primary" is the documented rule
+    /// and it still holds for a worktree a person made; what changed underneath it is that
+    /// #94 started putting linked worktrees at `<project>/.nysia/worktrees/<slug>`, inside
+    /// the project folder, where a folder picker reaches one by accident. Measured then:
+    /// registering `<repo>\.nysia\worktrees\feat-x` answered a second `proj_…` named
+    /// `feat-x`, listing the same two worktrees with `isPrimary` flipped, beside the original.
+    #[tokio::test]
+    async fn registering_a_worktree_nysia_made_is_the_project_it_belongs_to() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-own-worktree");
+        let repo = scratch.repository("repo");
+        let (dir, service) = service("own-worktree");
+        let first = register(&service, &repo);
+
+        let started = match service.start(&ProjectStart {
+            project: first.project.id.clone(),
+            branch: "feat/x".to_owned(),
+            kind: SessionKind::Shell,
+            profile: None,
+        }) {
+            ResponsePayload::ProjectStart(started) => started,
+            other => panic!("the branch should have started, got {other:?}"),
+        };
+        let worktree = repo
+            .join(crate::worktree::WORKTREE_BASE[0])
+            .join(crate::worktree::WORKTREE_BASE[1])
+            .join("feat-x");
+        assert!(worktree.is_dir(), "{} is not there", worktree.display());
+
+        let again = register(&service, &worktree);
+        assert_eq!(
+            again.project.id, first.project.id,
+            "a worktree Nysia put inside the project folder is that project, not a second one"
+        );
+        assert!(again.already_registered);
+        assert_eq!(
+            listed(&service).await.len(),
+            1,
+            "one repository is one project however it is pointed at"
+        );
+
+        let _ = service.sessions.close(&started.handle);
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A worktree the **person** put somewhere else is still their own project.
+    ///
+    /// The other half of the rule above, and the reason the fold is decided from the path
+    /// shape this module owns rather than from "is it a linked worktree". `git worktree add`
+    /// to a sibling directory is a thing people do, and it stays registerable on its own.
+    #[tokio::test]
+    async fn registering_a_worktree_somebody_else_made_is_still_their_own_project() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-their-worktree");
+        let repo = scratch.repository("repo");
+        let elsewhere = scratch.root().join("their-own-worktree");
+        let (dir, service) = service("their-worktree");
+        let first = register(&service, &repo);
+
+        let added = std::process::Command::new("git")
+            .arg("worktree")
+            .arg("add")
+            .arg("-b")
+            .arg("feat/theirs")
+            .arg(&elsewhere)
+            .current_dir(&repo)
+            .output()
+            .expect("git worktree add runs");
+        assert!(
+            added.status.success(),
+            "the fixture worktree was not created: {}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+
+        let their = register(&service, &elsewhere);
+        assert_ne!(
+            their.project.id, first.project.id,
+            "a worktree outside the project folder is the person's to register"
+        );
+        assert_eq!(listed(&service).await.len(), 2);
+
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// On a machine with no git, listing says so rather than emptying the sidebar.
+    ///
+    /// #94's finding: `reached` answers `None` when git could not be resolved, and `None` is
+    /// the same answer a folder on an unplugged drive gets — so every project listed with no
+    /// worktrees, which is indistinguishable from a person's repositories all being bare.
+    /// `register` and `start` both named the missing git; `list` is the verb the sidebar
+    /// calls, so it is the one a person meets first.
+    ///
+    /// The service is built by hand because `ProjectService::new` resolves git from `PATH`,
+    /// and a test that removed git from `PATH` would be mutating the environment under every
+    /// other test in this binary.
+    #[tokio::test]
+    async fn listing_on_a_machine_with_no_git_says_so_rather_than_listing_nothing() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-no-git");
+        let repo = scratch.repository("repo");
+        let (dir, service) = service("no-git");
+        let registered = register(&service, &repo);
+        assert_eq!(listed(&service).await.len(), 1, "with git, it lists");
+
+        let gitless = Arc::new(ProjectService {
+            store: Arc::clone(&service.store),
+            sessions: Arc::clone(&service.sessions),
+            git: Err(no_git_envelope()),
+        });
+        let envelope = match gitless.list().await {
+            ResponsePayload::Error(envelope) => envelope,
+            other => panic!("a machine with no git cannot list projects, got {other:?}"),
+        };
+        assert_eq!(*envelope.code(), ErrorCode::Internal);
+        assert!(
+            envelope.message().contains("git"),
+            "the answer names what is missing: {:?}",
+            envelope.message()
+        );
+        assert!(!envelope.is_retryable(), "installing git is not a retry");
+
+        // And the registration is untouched: a verb that cannot answer has not forgotten
+        // anything.
+        assert!(
+            service
+                .store
+                .project(&registered.project.id)
+                .expect("the store reads")
+                .is_some()
+        );
+
+        drop(gitless);
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
