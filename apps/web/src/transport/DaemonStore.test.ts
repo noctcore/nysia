@@ -1237,6 +1237,27 @@ describe('starting an issue', () => {
     expect(errors.at(-1)?.message).toContain('Close the other worktree');
   });
 
+  it('refuses a second start rather than resolving with the row still spinning', async () => {
+    // `store/storeContract.ts` requires this verb to start or to reject. Resolving while
+    // `taskStart` stayed on `starting` satisfied neither: the caller saw a promise settle and
+    // the screen said a worktree was being made, and nothing distinguished that from the
+    // start that really was running. The table disables every other `Start →` while one is in
+    // flight, so the only caller who can reach this is one that is not the table — which is
+    // exactly the caller with no other way to find out.
+    const { store, daemon } = build();
+    await ready(store);
+    const held = hold(daemon, 'task_start');
+
+    const first = store.startTask(A_ROW);
+    await until(() => store.getSnapshot().taskStart.phase === 'starting');
+    await expect(store.startTask(A_ROW)).rejects.toBeInstanceOf(StoreCommandError);
+    expect(store.getSnapshot().errors.at(-1)?.message).toContain('already starting');
+
+    held.release(0);
+    await first;
+    expect(store.getSnapshot().taskStart.phase).toBe('started');
+  });
+
   it('drops a confirmation the screen has already moved past', async () => {
     // `discards an answer that arrives after the project changed`, for the other verb, and
     // one notch worse. A worktree takes seconds, so switching projects mid-start is ordinary
