@@ -175,6 +175,24 @@ fn where_it_is(written: &str, needle: &str) -> String {
     )
 }
 
+/// The note the confined daemon owes about [`ASKED`], built from [`ASKED`] itself.
+///
+/// Through the same screen the daemon ran rather than a second copy of the directive written
+/// out here, which could drift out of step with the value being set and leave this asserting
+/// a line nothing writes. The panic is a control of its own: an [`ASKED`] the screen refuses
+/// nothing of is an [`ASKED`] that has stopped exercising the screen at all, and the confined
+/// leg below would then be measuring the fold and calling it the screen.
+fn the_note_the_screen_owes() -> String {
+    let screened = log_file::screen_directives(ASKED);
+    let refused = screened.refused.first().unwrap_or_else(|| {
+        panic!(
+            "the screen refuses nothing in {}={ASKED}",
+            log_file::LOG_ENV
+        )
+    });
+    log_file::refusal_note(refused)
+}
+
 /// The shell profile this machine can actually start.
 ///
 /// `pwsh` where §9 says it is — both CI runners have it — `cmd` on a Windows box without it,
@@ -394,9 +412,9 @@ fn open_a_session(daemon: &Nysiad, dir: &Path) -> Run {
 
 #[test]
 fn the_shipped_binarys_log_is_confined_unless_the_way_out_is_named() {
-    // The control, first and in the same body, because every assertion about the confined
-    // daemon below is a `!contains` — which a wrong target name, a session that never
-    // started, or a `portable_pty` that stopped logging would each satisfy on its own.
+    // The control, first and in the same body, because the claim the confined leg below leads
+    // up to is a `!contains` — which a wrong target name, a session that never started, or a
+    // `portable_pty` that stopped logging would each satisfy on its own.
     //
     // One difference between the two daemons: `NYSIA_LOG_UNCONFINED`. Same binary, same
     // `NYSIA_LOG`, same profile, same planted values, same file read the same way.
@@ -431,10 +449,32 @@ fn the_shipped_binarys_log_is_confined_unless_the_way_out_is_named() {
     let held = Nysiad::start("held", false);
     open_a_session(&held, &plant.dir);
     let written = held.log_until(&leaked);
+
+    // Two controls, and neither is the other in a different spelling.
+    //
+    // The first is the refusal the confined daemon owes whoever set `ASKED`, which nothing on
+    // this side held it to — `nysia-desktop`'s `log` module asserts the window's equivalent
+    // and this file asserted neither. `starts_with` rather than `contains` because
+    // `unconfined_note`'s own words are *said into the log it is about, before anything else
+    // is written there*, and that is a claim about position. It is also the control that owes
+    // nothing to `tracing`: `filter` writes this to stderr before a subscriber exists, so it
+    // says the file is this daemon's and that the screen ran on `ASKED`, whatever the
+    // subscriber went on to do.
+    //
+    // The second is what the subscriber itself put there, which is the half the first cannot
+    // reach: a daemon that announced the refusal and then wrote through a subscriber pointed
+    // somewhere else would satisfy it and leave the `!contains` below vacuous.
+    let announced = the_note_the_screen_owes();
+    assert!(
+        written.starts_with(&announced),
+        "the confined daemon did not open its log by saying which directive it would not \
+         honour: {}",
+        where_it_is(&written, &announced)
+    );
     assert!(
         written.contains(A_TARGET_ONLY_THE_SUBSCRIBER_WRITES),
         "the confined daemon's subscriber wrote nothing, so the assertion below would hold \
-         against a file only stdout had touched: {}",
+         against a file only `filter` and stdout had touched: {}",
         where_it_is(&written, A_TARGET_ONLY_THE_SUBSCRIBER_WRITES)
     );
     assert!(
