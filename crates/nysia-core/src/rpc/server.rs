@@ -44,8 +44,9 @@ use nysia_proto::{
     AgentStatusList, AgentStatusSubscribe, AgentStatusSubscribed, ClientId, ClientRole,
     CreditFrame, CreditWindow, DaemonIdentity, ErrorCode, ErrorEnvelope, FrameDecoder, FrameKind,
     HelloAccepted, HelloRejected, HelloRequest, HelloResponse, LaunchNonce, MutationReceipt,
-    PROTOCOL_VERSION, PaneKey, ProtocolRange, RejectReason, RequestEnvelope, RequestId,
-    RequestPayload, ResponseEnvelope, ResponsePayload, SessionList, StreamAttached, StreamId,
+    PROTOCOL_VERSION, PaneKey, ProjectList, ProtocolRange, RejectReason, RequestEnvelope,
+    RequestId, RequestPayload, ResponseEnvelope, ResponsePayload, SessionList, StreamAttached,
+    StreamId,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -56,6 +57,7 @@ use crate::rpc::errors::{IntoEnvelope, envelope};
 use crate::rpc::lease::PidRecordFile;
 use crate::rpc::log_file::{self, Trimmed};
 use crate::rpc::peer::{CallerSession, PeerCredentials};
+use crate::rpc::project::ProjectService;
 use crate::rpc::session::{OwnedSession, SessionRegistry};
 use crate::rpc::stream::{BoundStream, ConnectionKey, CreditOutcome, StreamRegistry, StreamSink};
 use crate::rpc::transport::{Connection, Listener, TransportError};
@@ -167,6 +169,7 @@ pub struct Daemon {
     sessions: Arc<SessionRegistry>,
     streams: Arc<StreamRegistry>,
     status: Arc<AgentStatusService>,
+    projects: Arc<ProjectService>,
     receipts: Mutex<Receipts>,
     clients: AtomicUsize,
     in_flight: AtomicUsize,
@@ -202,6 +205,14 @@ impl Daemon {
         let listener = Listener::bind(&config.endpoint)?;
         let status = Arc::new(AgentStatusService::open(&config.store_path)?);
         drain_spool(config.endpoint.runtime_dir(), &status);
+        // One store, opened once, shared by the two services that persist through it. A
+        // second `Store::open` on the same file would be a second connection to a database
+        // this daemon already holds the write lock on.
+        let sessions = Arc::new(SessionRegistry::new());
+        let projects = Arc::new(ProjectService::new(
+            Arc::clone(status.store()),
+            Arc::clone(&sessions),
+        ));
         let identity = DaemonIdentity {
             pid: std::process::id(),
             started_at_ms: SystemTime::now()
@@ -221,9 +232,10 @@ impl Daemon {
                 endpoint: config.endpoint,
                 lease,
                 idle_retire_after: config.idle_retire_after,
-                sessions: Arc::new(SessionRegistry::new()),
+                sessions,
                 streams: Arc::new(StreamRegistry::with_window(config.credit_window)),
                 status,
+                projects,
                 receipts: Mutex::new(Receipts::default()),
                 clients: AtomicUsize::new(0),
                 in_flight: AtomicUsize::new(0),
@@ -847,17 +859,24 @@ impl Daemon {
                 self.streams.detach(&caller.client_id, request.stream_id);
                 ResponsePayload::AgentStatusUnsubscribe
             }
-            // Scaffolding, and **v0.3 wave C1 replaces it** with the three real handlers.
-            // The verbs are on the wire from wave A so that the store, the window and this
-            // daemon are built against one definition of them; a daemon that is asked one
-            // before C1 lands still has to answer something, and `unsupported` is the code
-            // for a verb this daemon does not serve. One arm rather than a wildcard, on
-            // purpose: the match stays exhaustive, so the next verb added to the wire fails
-            // the build here rather than being answered silently by a catch-all.
-            RequestPayload::ProjectRegister(_)
-            | RequestPayload::ProjectList(_)
-            | RequestPayload::ProjectForget(_) => {
-                ResponsePayload::Error(nysia_proto::project::unsupported_envelope())
+            // v0.3's three project verbs. Still no `_` arm, for the reason the scaffolding
+            // this replaces was written without one: a verb added to the wire later must fail
+            // the build here rather than be served silently by a catch-all.
+            RequestPayload::ProjectRegister(request) => {
+                // Registration canonicalises a path and spawns git, and the first of those
+                // blocks for the OS's own timeout on a disconnected share — outside any git
+                // deadline, because `fs::canonicalize` is a syscall git never sees. On a
+                // runtime worker that is every session sharing it stalled behind one folder.
+                let projects = Arc::clone(&self.projects);
+                blocking(move || projects.register(&request)).await
+            }
+            // Not `blocking`: `list` fans out over the projects itself and bounds each one,
+            // so it is already async and handing it to the blocking pool would serialise
+            // exactly what it exists to run at once.
+            RequestPayload::ProjectList(ProjectList {}) => self.projects.list().await,
+            RequestPayload::ProjectForget(request) => {
+                let projects = Arc::clone(&self.projects);
+                blocking(move || projects.forget(&request)).await
             }
         }
     }

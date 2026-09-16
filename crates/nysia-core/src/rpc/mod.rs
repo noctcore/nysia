@@ -22,6 +22,7 @@
 //! | [`control`] | newline-delimited JSON: the handshake and the verb envelopes |
 //! | [`lease`] | the pid record that says which daemon this is |
 //! | [`session`] | the sessions the daemon owns: PTY, terminal state, and the pump between |
+//! | [`project`] | v0.3's three project verbs, over [`crate::store`] and [`crate::git`] |
 //! | [`stream`] | length-prefixed binary output under a credit window (§7.3) |
 //! | [`server`] | the accept loop, the verb dispatch and idle retire |
 //! | [`client`] | the other half, which the CLI and the Tauri shell both use |
@@ -81,6 +82,7 @@ pub(crate) mod errors;
 pub mod lease;
 pub mod log_file;
 pub mod peer;
+pub mod project;
 pub mod server;
 pub mod session;
 pub mod spool;
@@ -107,6 +109,7 @@ pub use log_file::{
     trim,
 };
 pub use peer::{CallerSession, PeerCredentials, PeerError, ancestry, parent_of};
+pub use project::ProjectService;
 pub use server::{Daemon, DaemonConfig, STORE_FILE, ServerError};
 pub use session::{OwnedSession, PANE_KEY_VAR, SessionError, SessionRegistry};
 pub use spool::{Drained, SpoolError};
