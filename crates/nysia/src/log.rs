@@ -302,11 +302,31 @@ mod tests {
     ///
     /// Tagged and suffixed with the pid the way `log_file`'s own `scratch` is, so two tests
     /// planting spawns at the same time cannot delete each other's.
-    fn a_marked_directory(tag: &str) -> (String, PathBuf) {
+    struct Marked {
+        /// The directory's own name, which is what a planted spawn carries into the log.
+        marker: String,
+        /// The directory itself.
+        dir: PathBuf,
+    }
+
+    /// Removed here rather than by a line at the foot of each test body, because that line
+    /// does not run when an assertion panics — so the run that most wants looking at was also
+    /// the one that left `ZZZ-SPAWN-*` directories behind in the temp directory, and a guard
+    /// that litters when it fails is a guard people stop running.
+    ///
+    /// Best effort still: nothing here waits on a process, and `remove_dir_all` is allowed to
+    /// fail.
+    impl Drop for Marked {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn a_marked_directory(tag: &str) -> Marked {
         let marker = format!("ZZZ-SPAWN-{tag}-{}", std::process::id());
         let dir = std::env::temp_dir().join(&marker);
         let _ = std::fs::create_dir_all(&dir);
-        (marker, dir)
+        Marked { marker, dir }
     }
 
     /// Fail a spawn in the two ways that hand `portable_pty` a caller-offered path.
@@ -534,12 +554,12 @@ mod tests {
         // `info` is the shipped default with no `NYSIA_LOG` at all, so what this shows is not
         // a debug-only leak. It is what the daemon wrote into its file on an ordinary day.
         bridge_log_to_tracing();
-        let (marker, dir) = a_marked_directory("unconfined");
+        let plant = a_marked_directory("unconfined");
 
-        let written = through(EnvFilter::new("info"), || plant_a_failed_spawn(&dir));
+        let written = through(EnvFilter::new("info"), || plant_a_failed_spawn(&plant.dir));
 
         assert!(
-            written.contains(&marker),
+            written.contains(&plant.marker),
             "nothing wrote this path, so the confined case proves nothing: {written}"
         );
         assert!(
@@ -548,7 +568,6 @@ mod tests {
              `portable_pty` may have moved the call site, which `log_file`'s docs cite by \
              file and line: {written}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -575,14 +594,14 @@ mod tests {
             "portable_pty::win::pseudocon=trace",
             "portable_pty::cmdbuilder=trace",
         ] {
-            let (marker, dir) = a_marked_directory("confined");
+            let plant = a_marked_directory("confined");
 
             let written = through(confined(asked), || {
-                plant_a_failed_spawn(&dir);
+                plant_a_failed_spawn(&plant.dir);
             });
 
             assert!(
-                !written.contains(&marker),
+                !written.contains(&plant.marker),
                 "NYSIA_LOG={asked}: a path the caller offered reached the log: {written}"
             );
             // Not only the marker. On Windows `portable_pty::cmdbuilder` prints the whole
@@ -593,7 +612,6 @@ mod tests {
                 !written.contains("portable_pty"),
                 "NYSIA_LOG={asked}: `portable_pty` is held off and wrote anyway: {written}"
             );
-            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
@@ -677,9 +695,9 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            let (marker, dir) = a_marked_directory(&format!("branch-{nth}"));
+            let plant = a_marked_directory(&format!("branch-{nth}"));
 
-            let (ok, lifted) = drive_child(leaf, &dir, asked, true);
+            let (ok, lifted) = drive_child(leaf, &plant.dir, asked, true);
             assert!(
                 ok,
                 "NYSIA_LOG={asked:?}: the control child failed:\n{lifted}"
@@ -690,7 +708,7 @@ mod tests {
                  nothing below it means anything:\n{lifted}"
             );
             assert!(
-                lifted.contains(&marker),
+                lifted.contains(&plant.marker),
                 "NYSIA_LOG={asked:?}: nothing leaked even with the way out named, so the \
                  confined leg would hold for the wrong reason:\n{lifted}"
             );
@@ -701,7 +719,7 @@ mod tests {
                  `log_file`'s docs cite by file and line:\n{lifted}"
             );
 
-            let (ok, held) = drive_child(leaf, &dir, asked, false);
+            let (ok, held) = drive_child(leaf, &plant.dir, asked, false);
             assert!(
                 ok,
                 "NYSIA_LOG={asked:?}: the confined child failed:\n{held}"
@@ -712,12 +730,10 @@ mod tests {
                  the assertion below would hold for the wrong reason:\n{held}"
             );
             assert!(
-                !held.contains(&marker),
+                !held.contains(&plant.marker),
                 "NYSIA_LOG={asked:?}: a path the caller offered reached the log of a process \
                  nobody told to lift the confinement:\n{held}"
             );
-
-            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
