@@ -422,6 +422,17 @@ impl ProjectService {
     /// module docs state about branchless and pruned worktrees are applied once.
     fn compose(&self, stored: &StoredProject, repository: &Repository) -> Project {
         let project = without_worktrees(stored);
+        // **Every worktree with a directory**, including the ones the loop below leaves out.
+        // Nysia's own worktrees live inside the main one, so deciding which worktree a session
+        // is in is a question about the whole set rather than about each in turn — see
+        // `SessionRegistry::summaries_under`. A branchless worktree cannot be put on the wire
+        // and is still a directory a session can be inside, so it has to be in this set or
+        // every session in one floats up to the main worktree.
+        let folders: Vec<CanonicalPath> = repository
+            .worktrees
+            .iter()
+            .filter_map(|worktree| worktree.canonical.clone())
+            .collect();
         let mut worktrees = Vec::with_capacity(repository.worktrees.len());
         for worktree in &repository.worktrees {
             let Some(branch) = worktree.head.branch() else {
@@ -444,7 +455,7 @@ impl ProjectService {
             worktrees.push(Worktree {
                 branch: branch.to_owned(),
                 is_primary: worktree.is_primary,
-                sessions: self.sessions.summaries_under(canonical),
+                sessions: self.sessions.summaries_under(canonical, &folders),
             });
         }
         Project {
@@ -1066,14 +1077,24 @@ mod tests {
         // The session is in the worktree, not in the project root. `summaries_under` is what
         // the sidebar lists a worktree's sessions with, so asking it is asking the same
         // question the window asks.
+        let root = CanonicalPath::of(&repo).expect("the project root is on disk");
         let worktree =
             CanonicalPath::of(repo.join(".nysia").join("worktrees").join("feat-projects"))
                 .expect("the worktree is on disk");
-        let inside = service.sessions.summaries_under(&worktree);
+        let folders = vec![root.clone(), worktree.clone()];
+        let inside = service.sessions.summaries_under(&worktree, &folders);
         assert_eq!(
             inside.iter().map(|s| &s.handle).collect::<Vec<_>>(),
             vec![&first.handle],
             "the session it opened is the session that worktree holds"
+        );
+        // **And the main worktree does not also hold it.** Nysia's worktrees live *inside*
+        // the main one, so `contains` is true of both and the positive assertion above passes
+        // either way — which is why it was green while one session was listed twice.
+        assert!(
+            service.sessions.summaries_under(&root, &folders).is_empty(),
+            "a session in a nested worktree belongs to the deepest worktree containing it, \
+             not to every one"
         );
 
         let second = match service.start(&ProjectStart {
@@ -1114,6 +1135,17 @@ mod tests {
             started.sessions.len(),
             2,
             "both sessions are listed under it"
+        );
+        let primary = project
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.is_primary)
+            .expect("the checkout the project was registered from");
+        assert!(
+            primary.sessions.is_empty(),
+            "and under nothing else: the primary checkout contains the worktree they are in, \
+             which is what listed each of them under both, got {:?}",
+            primary.sessions
         );
 
         for handle in [first.handle, second.handle] {
