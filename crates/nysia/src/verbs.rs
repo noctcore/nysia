@@ -21,10 +21,11 @@ use nysia_core::rpc::{
     Client, ClientError, Discovered, DiscoveryError, Endpoint, SpawnPolicy, discover,
 };
 use nysia_proto::{
-    AgentStatus, AgentStatusRow, ClientId, ClientRole, ErrorEnvelope, ExitStatus, LineCursor,
-    PaneKey, Project, ProjectId, ProjectRegistered, ProjectStart, ProjectStarted, SessionCreate,
-    SessionCreated, SessionHandle, SessionKind, SessionSummary, TerminalRead, TerminalReadResult,
-    TerminalResize, TerminalSend, TerminalWait, TerminalWaitResult, UnixMillis, WaitOutcome,
+    AgentStatus, AgentStatusRow, ClientId, ClientRole, ErrorEnvelope, ExitStatus, Issue,
+    LineCursor, PaneKey, Project, ProjectId, ProjectRegistered, ProjectStart, ProjectStarted,
+    SessionCreate, SessionCreated, SessionHandle, SessionKind, SessionSummary, TerminalRead,
+    TerminalReadResult, TerminalResize, TerminalSend, TerminalWait, TerminalWaitResult, UnixMillis,
+    WaitOutcome,
 };
 
 use crate::cli::{
@@ -220,6 +221,10 @@ pub async fn run(verb: Verb, no_spawn: bool) -> Result<(), VerbError> {
             let started = client.project_start(request).await?;
             print_started(&started, json);
         }
+        Prepared::TasksList(project) => {
+            let issues = client.tasks_list(project).await?;
+            print_issues(&issues, json);
+        }
     }
     Ok(())
 }
@@ -242,6 +247,7 @@ enum Prepared {
     ProjectList,
     ProjectForget(ProjectId),
     ProjectStart(ProjectStart),
+    TasksList(ProjectId),
 }
 
 /// Check a verb's arguments, without touching the socket.
@@ -259,6 +265,7 @@ fn prepare(verb: Verb) -> Result<Prepared, VerbError> {
         Verb::ProjectList { .. } => Prepared::ProjectList,
         Verb::ProjectForget { id, .. } => Prepared::ProjectForget(parse_project_id(&id)?),
         Verb::ProjectStart(args) => Prepared::ProjectStart(start_request(&args)?),
+        Verb::TasksList { id, .. } => Prepared::TasksList(parse_project_id(&id)?),
     })
 }
 
@@ -574,6 +581,39 @@ fn print_projects(projects: &[Project], json: bool) {
             project.name,
             project.group,
             branches(project)
+        );
+    }
+}
+
+/// Print `tasks list`.
+///
+/// The JSON shape is `project list`'s: a **bare array** on stdout, one object per issue. That
+/// is also what the window's reader takes, so `nysia tasks list --json` and the Tasks screen
+/// are reading the same document — which is what makes the CLI a real test of the verb
+/// rather than a second rendering of it.
+///
+/// **An empty list is not silence.** It prints `[]` under `--json` and says "no open issues"
+/// otherwise, because the whole point of the verb is that a repository with nothing to do and
+/// a machine that could not ask are different answers. A refusal never reaches here at all —
+/// it arrives as a `ClientError` carrying the daemon's own code and next steps.
+fn print_issues(issues: &[Issue], json: bool) {
+    if json {
+        emit_json(&issues);
+        return;
+    }
+    if issues.is_empty() {
+        let _ = writeln!(std::io::stderr(), "no open issues");
+        return;
+    }
+    for issue in issues {
+        println!(
+            "{:<6}  {:<12}  {:<50}  {}",
+            issue.number,
+            // The login, or a word rather than a blank: GitHub reports no author for a
+            // deleted account, and an empty column reads as a rendering fault.
+            issue.author.as_deref().unwrap_or("(no author)"),
+            issue.title,
+            issue.labels.join(", ")
         );
     }
 }

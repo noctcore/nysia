@@ -129,6 +129,19 @@ impl TasksService {
             unreadable()
         })?;
 
+        // A list that comes back at exactly the cap is the one answer this verb cannot
+        // promise is complete, and gh reports a capped list and a complete one identically —
+        // so the count is the only signal there is. Logged rather than refused or flagged on
+        // the wire: 500 open issues is a real repository, not a fault, and the screen showing
+        // the first 500 of them is the right behaviour. This is what makes it *diagnosable*
+        // when somebody asks why an issue they can see on github.com is not in the list.
+        if issues.len() as u32 >= crate::git::gh::ISSUE_LIMIT {
+            tracing::warn!(
+                project = %stored.id,
+                limit = crate::git::gh::ISSUE_LIMIT,
+                "a project's issue list reached the query limit; it may be short"
+            );
+        }
         tracing::info!(
             project = %stored.id,
             issues = issues.len(),

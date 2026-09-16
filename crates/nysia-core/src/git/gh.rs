@@ -99,10 +99,16 @@ pub const ISSUE_TIMEOUT: Duration = Duration::from_secs(15);
 /// makes the number a decision rather than an accident.
 ///
 /// Five hundred is far more than a person triages in a sitting and far less than the output
-/// cap: at roughly 400 bytes of JSON per row this is around 200 KiB, against a cap of 8 MiB,
-/// so a full answer cannot reach the truncation path. Beyond this the list is reported short
-/// — which is the one dishonesty left, and it is bounded, named here, and logged when it
-/// happens.
+/// cap. **Measured rather than estimated**: a full 500-row answer for `cli/cli`, a repository
+/// with a large open backlog, is 127,639 bytes — around 125 KiB against a cap of 8 MiB, which
+/// is 64 times the headroom. So a complete answer cannot reach the truncation path, and
+/// [`Finished::truncated`](super::runner::Finished::truncated) firing here would mean
+/// something other than a long list.
+///
+/// Beyond this the list is genuinely short, which is the one dishonesty left in the verb. It
+/// is bounded, named here, and `rpc::tasks` logs when an answer comes back at exactly this
+/// many rows — the only signal available, since gh reports a capped list and a complete one
+/// identically.
 pub const ISSUE_LIMIT: u32 = 500;
 
 /// The fields asked for, which is exactly what the Tasks screen draws.

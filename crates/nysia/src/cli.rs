@@ -86,6 +86,28 @@ enum Command {
         #[command(subcommand)]
         action: ProjectAction,
     },
+    /// List a project's GitHub issues (D-5).
+    Tasks {
+        #[command(subcommand)]
+        action: TasksAction,
+    },
+}
+
+/// `nysia tasks …`
+#[derive(Debug, Subcommand)]
+enum TasksAction {
+    /// List a registered project's open GitHub issues, queried live.
+    ///
+    /// Tasks are GitHub Issues and nothing is stored (D-5), so this is a live query every
+    /// time. It needs the GitHub CLI installed and signed in; when either is missing the
+    /// refusal says which, because "no issues" and "no credentials" are different answers.
+    List {
+        /// The project id, `proj_<32 hex digits>`.
+        id: String,
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `nysia project …`
@@ -457,6 +479,13 @@ pub enum Verb {
         /// Print the result as JSON.
         json: bool,
     },
+    /// `nysia tasks list`
+    TasksList {
+        /// The project id, as typed.
+        id: String,
+        /// Print the result as JSON.
+        json: bool,
+    },
 }
 
 impl Verb {
@@ -474,6 +503,7 @@ impl Verb {
             Self::ProjectRegister(args) => args.json,
             Self::ProjectStart(args) => args.json,
             Self::ProjectList { json } | Self::ProjectForget { json, .. } => *json,
+            Self::TasksList { json, .. } => *json,
         }
     }
 }
@@ -536,6 +566,9 @@ impl Cli {
                 ProjectAction::Start(args) => Verb::ProjectStart(args),
                 ProjectAction::Forget { id, json } => Verb::ProjectForget { id, json },
             })),
+            Some(Command::Tasks { action }) => Mode::Client(Box::new(match action {
+                TasksAction::List { id, json } => Verb::TasksList { id, json },
+            })),
             Some(Command::Hook(args)) => Mode::Hook(args),
             // `arg_required_else_help` means clap has already exited when there is no
             // subcommand and no flag, so `None` here is only reachable from a unit test. It
@@ -594,7 +627,7 @@ mod tests {
     fn every_verb_takes_json() {
         // §6.2's contract only holds if it holds everywhere. A verb without --json is one an
         // agent has to scrape.
-        let cases: [&[&str]; 12] = [
+        let cases: [&[&str]; 13] = [
             &["nysia", "session", "create", "--json"],
             &["nysia", "session", "list", "--json"],
             &["nysia", "session", "close", "sess_x", "--json"],
@@ -613,6 +646,7 @@ mod tests {
             &[
                 "nysia", "project", "start", "proj_x", "--branch", "feat/x", "--json",
             ],
+            &["nysia", "tasks", "list", "proj_x", "--json"],
         ];
         for argv in cases {
             match parse(argv).into_mode() {
@@ -620,6 +654,27 @@ mod tests {
                 other => panic!("{argv:?} should be a client verb, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_task_list_routes_to_the_spelling_the_acceptance_test_drives() {
+        // `nysia tasks list <id> --json` is what makes the verb testable end to end without
+        // a window, which is the reason it is in the spec at all — so the spelling is pinned
+        // rather than left to whoever reads the help next.
+        let Mode::Client(verb) = parse(&["nysia", "tasks", "list", "proj_x", "--json"]).into_mode()
+        else {
+            panic!("a task list is a client verb");
+        };
+        let Verb::TasksList { id, json } = *verb else {
+            panic!("a task list parses as a task list");
+        };
+        assert_eq!(id, "proj_x");
+        assert!(json);
+
+        // The project is required. A bare `nysia tasks list` has no folder to fall back on —
+        // unlike `project register`, the daemon's working directory is not the caller's, so
+        // there is nothing sensible to default to and clap refuses it here instead.
+        assert!(Cli::parse_from_argv(["nysia", "tasks", "list"]).is_err());
     }
 
     #[test]
