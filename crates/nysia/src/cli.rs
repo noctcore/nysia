@@ -979,7 +979,7 @@ mod tests {
         if help.contains("ts-rs") {
             found.push("ts-rs");
         }
-        if contains_word(help, "trap") {
+        if contains_trap_word(help) {
             found.push("trap");
         }
         if contains_wire_type(help) {
@@ -1041,11 +1041,49 @@ mod tests {
         })
     }
 
-    /// SessionKind is the type `--kind` already leaked. Request is the type a
-    /// maintainer writes when pointing at the envelope. A user types `shell` or
-    /// `agent`, not these.
+    /// `trap` as a word, including `Trap`, `traps` and `Traps`. The alphabetic
+    /// boundary keeps `strap` and `entrapment` out; a trailing `s` is allowed
+    /// because this codebase writes "the traps this avoids".
+    fn contains_trap_word(help: &str) -> bool {
+        let hay = help.as_bytes();
+        let stem = b"trap";
+        if hay.len() < stem.len() {
+            return false;
+        }
+        hay.windows(stem.len()).enumerate().any(|(i, window)| {
+            window.eq_ignore_ascii_case(stem) && (i == 0 || !hay[i - 1].is_ascii_alphabetic()) && {
+                let after = i + stem.len();
+                let end = if after < hay.len() && hay[after].eq_ignore_ascii_case(&b's') {
+                    after + 1
+                } else {
+                    after
+                };
+                end == hay.len() || !hay[end].is_ascii_alphabetic()
+            }
+        })
+    }
+
+    /// The proto types this file already imports, as whole words. Naming them
+    /// as turbofish types makes dropping one from the `use` a compile error; a
+    /// type this file does not import is not a help leak this probe covers.
+    /// `Request` is not among them: it is the English verb the about lines
+    /// already use (`Create`, `Read`, `Forward`).
     fn contains_wire_type(help: &str) -> bool {
-        help.contains("SessionKind") || contains_word(help, "Request")
+        [
+            wire_type_ident::<SessionKind>(),
+            wire_type_ident::<ReadMode>(),
+            wire_type_ident::<ShellProfile>(),
+            wire_type_ident::<WaitFor>(),
+        ]
+        .into_iter()
+        .any(|name| contains_word(help, name))
+    }
+
+    fn wire_type_ident<T>() -> &'static str {
+        std::any::type_name::<T>()
+            .rsplit("::")
+            .next()
+            .expect("std::any::type_name is never empty")
     }
 
     fn rendered_help(cmd: &clap::Command) -> String {
@@ -1125,10 +1163,18 @@ mod tests {
             ("see [`Verb`]", "rustdoc link ([`)"),
             ("see `crate::hook`", "rust path (::)"),
             ("the SessionKind spelling", "wire type"),
+            ("A ShellProfile on the wire.", "wire type"),
+            ("ReadMode names the projection", "wire type"),
+            ("WaitFor names the wait", "wire type"),
             ("TODO(#412): fold the envelope", "TODO(#n)"),
             ("described in v0.3 §3", "section mark (§)"),
             ("bindings from ts-rs", "ts-rs"),
             ("the trap this avoids", "trap"),
+            (
+                "The traps this avoids are listed in the design doc.",
+                "trap",
+            ),
+            ("Trap 12: keep the walker off a roster", "trap"),
         ];
         for (about, artefact) in cases {
             let cmd = with_unnamed_leaf(clap::Command::new("dispatch").about(*about));
@@ -1162,10 +1208,12 @@ mod tests {
     #[test]
     fn maintainer_artefact_probes_ignore_lookalikes() {
         // The old `trap` substring matched `strap` and `entrapment`; the old D-n
-        // window matched the `D-3` in `CMD-3` and the `D-1` in `ID-1`.
+        // window matched the `D-3` in `CMD-3` and the `D-1` in `ID-1`. Bare
+        // `Request` matched the imperative the about lines already use.
         assert!(maintainer_artefacts("a strap and an entrapment").is_empty());
         assert!(maintainer_artefacts("CMD-3").is_empty());
         assert!(maintainer_artefacts("ID-1").is_empty());
+        assert!(maintainer_artefacts("Request the daemon to start a worktree session.").is_empty());
     }
 
     #[test]
