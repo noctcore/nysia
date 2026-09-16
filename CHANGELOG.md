@@ -274,6 +274,16 @@ that did not ship, and it lands in 0.3.0.
 - **A busy or refusing endpoint is no longer read as an empty one.** The window classifies dial
   failures the way `nysia_core::rpc::transport` does, so only `NotFound` — and, on Unix, a
   socket that refuses — leads it to start a daemon.
+- **The session pane no longer draws an input nothing reads.** It transcribed the design
+  spec's §3 item 4 — an accent chevron, "Send a message", a block cursor and a focus ring
+  permanently on — as a decorative row under the terminal. Every session in v0.1 is a pty
+  whose only place to type is the terminal itself, so a second input was not dead chrome but
+  a false claim about how the app works. The terminal fills the pane now, with the
+  `flex-1 min-h-0` the root was missing — without it the pane sizes to its content and
+  `fit()` measures a box xterm had already chosen, so the fit follows the window only by
+  accident. The prompt and the chips row are recorded as belonging to the agent surface
+  rather than to this component, and a render test holds the row gone so it cannot come back
+  from the spec.
 
 ### Security
 
