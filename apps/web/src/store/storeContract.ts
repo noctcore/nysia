@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { isAddProjectBusy } from './addProject';
 import { StoreCommandError, hasDistinctIds } from './errors';
 import type { Store, StoreSnapshot } from './types';
 
@@ -349,6 +350,37 @@ export function describeStoreContract(name: string, create: StoreFactory): void 
 
         await store.closeTab(other?.paneKey ?? '');
         expect(store.getSnapshot().activeTab).toBe(activeTab);
+      });
+    });
+
+    describe('adding a project', () => {
+      it('resolves whatever the answer was, and settles somewhere the sidebar can draw', async () => {
+        // The one rule every provider owes here, and it is not "it succeeds": browsing can
+        // be cancelled, the daemon can refuse, and §3.2's refusals are *answers* rather than
+        // failures. So the requirement is that it resolves and stops — a provider that
+        // rejected would put "addProject failed" in the notice list for a folder that is
+        // simply already registered, and one that stayed on `browsing` would hold the `+`
+        // shut for the life of the window.
+        //
+        // The three providers land in three different places on purpose: the mock has no
+        // filesystem and cancels, the probe refuses, the daemon-backed one registers. All
+        // three have to satisfy this.
+        const store = await ready();
+        await expect(store.addProject()).resolves.toBeUndefined();
+        expect(
+          isAddProjectBusy(store.getSnapshot().addProject),
+          'the + is held shut until this settles',
+        ).toBe(false);
+      });
+
+      it('dismisses whatever it said, and dismissing twice is not an error', async () => {
+        const store = await ready();
+        await store.addProject();
+
+        await store.dismissAddProject();
+        expect(store.getSnapshot().addProject).toEqual({ phase: 'idle' });
+        await expect(store.dismissAddProject()).resolves.toBeUndefined();
+        expect(store.getSnapshot().addProject).toEqual({ phase: 'idle' });
       });
     });
 
