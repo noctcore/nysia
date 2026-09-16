@@ -38,8 +38,9 @@
 //!   that is the flag to test rather than the path.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::git::command::GitCommand;
 use crate::git::{CanonicalPath, Git, GitError};
 
 /// The oid git prints for a branch that has no commit yet.
@@ -178,6 +179,321 @@ fn mark_primary(worktrees: &mut [Worktree], at: &CanonicalPath) {
     if let Some(index) = deepest {
         worktrees[index].is_primary = true;
     }
+}
+
+/// Where Nysia puts a worktree it creates, under the repository's main worktree.
+///
+/// `docs/design/2026-09-13-nysia-architecture.md` line 340 decides this — *"Keyed by branch,
+/// not task (D-6). Path shape `<project>/.nysia/worktrees/<branch-slug>`"* — and
+/// [`mark_primary`] was already written for it: every worktree here is inside the main one,
+/// which is why that function takes the deepest match rather than the first.
+///
+/// Two components rather than one `".nysia/worktrees"` string, so the separator is the
+/// platform's and never a literal in a path.
+pub const WORKTREE_BASE: [&str; 2] = [".nysia", "worktrees"];
+
+/// The most directory names to try before giving up on a branch.
+///
+/// A slug is not unique — `feat/x` and `feat-x` reduce to the same name — so a collision is
+/// a real case rather than a defensive one. The suffix is only ever a *location*: a worktree
+/// is keyed by its branch (D-6) and found again by asking git, never by its directory name,
+/// so numbering them costs nothing that matters.
+const MAX_DIRECTORY_ATTEMPTS: u32 = 9;
+
+/// The longest a slug may be, in bytes.
+///
+/// Windows' classic path limit is the binding constraint and it applies to the whole path,
+/// not this component — so this is not a guarantee, it is a refusal to be the reason one is
+/// hit. A branch name long enough to be truncated is still keyed by its full name.
+const MAX_SLUG_BYTES: usize = 60;
+
+/// Names Windows will not give a directory, whatever the filesystem says.
+///
+/// `CON`, `NUL` and friends are devices in every directory, case-insensitively and with any
+/// extension. `git switch -c nul` is perfectly legal, so this is reachable from an ordinary
+/// branch name rather than from a hostile one — and the failure without it is
+/// `CreateDirectory` refusing for a reason nothing in the error mentions.
+const RESERVED_ON_WINDOWS: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// What [`ensure`] found or made.
+#[derive(Debug)]
+pub enum Started {
+    /// Nysia created the worktree.
+    Created(Worktree),
+    /// A worktree for that branch was already on disk, and this is it.
+    ///
+    /// From an earlier `Start →`, or from a `git worktree add` somebody ran themselves.
+    /// Adopting rather than failing is the contract: a verb that refused here would make the
+    /// second `Start →` on a branch an error to resolve by hand, in the one workflow v0.3
+    /// exists to make routine.
+    Adopted(Worktree),
+}
+
+impl Started {
+    /// The worktree, whichever of the two happened.
+    #[must_use]
+    pub fn worktree(&self) -> &Worktree {
+        match self {
+            Self::Created(worktree) | Self::Adopted(worktree) => worktree,
+        }
+    }
+
+    /// Whether the worktree was already there.
+    #[must_use]
+    pub const fn adopted(&self) -> bool {
+        matches!(self, Self::Adopted(_))
+    }
+}
+
+/// Why a branch could not become a worktree.
+///
+/// **No variant carries a path.** Every one of them names the branch instead, which the
+/// caller supplied and already has; a worktree's directory is under the person's project and
+/// is exactly what traps register #13/#14 keeps out of an envelope and a log line.
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    /// git could not be run, or did not answer.
+    #[error(transparent)]
+    Git(#[from] GitError),
+    /// The branch name is one git would not accept, or one that could be read as an option.
+    #[error("{branch:?} is not a branch name this can use: {reason}")]
+    BranchRefused {
+        /// The name as the caller spelled it.
+        branch: String,
+        /// Which of the two, in a few words.
+        reason: &'static str,
+    },
+    /// git still lists a worktree for that branch and its directory is gone.
+    ///
+    /// Its own case because the answer is a specific command. Adoption is impossible — there
+    /// is nothing to adopt — and creation is refused by git, which will not check a branch
+    /// out twice. `git worktree prune` is what clears it, and saying so is the difference
+    /// between a dead end and one command.
+    #[error("{branch:?} has a worktree registered whose directory is gone")]
+    BranchPrunable {
+        /// The branch.
+        branch: String,
+    },
+    /// Every directory name this would have used is taken.
+    #[error("no free directory for {branch:?} after {MAX_DIRECTORY_ATTEMPTS} attempts")]
+    NoDirectory {
+        /// The branch.
+        branch: String,
+    },
+}
+
+/// The worktree for `branch` in the repository containing `at`, creating it if it is not there.
+///
+/// **Keyed by branch and by nothing else** (D-6). Adoption is decided from `git worktree
+/// list`, which is repository-wide, so a worktree made outside Nysia — or in a directory
+/// whose name has nothing to do with the branch — is found and used.
+///
+/// # What it runs, and why each one
+///
+/// 1. `check-ref-format refs/heads/<branch>`, so legality is **git's answer** rather than a
+///    subset of git's rules restated here, which would refuse names git accepts.
+/// 2. `worktree list`, to adopt.
+/// 3. `for-each-ref refs/heads/<branch>`, to choose between checking the branch out and
+///    creating it. Its matches are compared for equality: git's ref patterns match at `/`
+///    boundaries, so `refs/heads/feat` also finds `refs/heads/feat/x`, and a prefix test
+///    would have this check out a branch that does not exist.
+/// 4. `worktree add`.
+///
+/// Four spawns for something a person clicked, each under the chokepoint's deadline.
+///
+/// # Errors
+///
+/// See [`StartError`]. A worktree that was created and then could not be used is **left
+/// where it is**: removing worktrees is v0.4's verb and the destructive one, and a retry
+/// adopts this one rather than making a second.
+pub fn ensure(git: &Git, at: &CanonicalPath, branch: &str) -> Result<Started, StartError> {
+    let refuse = |reason: &'static str| StartError::BranchRefused {
+        branch: branch.to_owned(),
+        reason,
+    };
+    if branch.is_empty() {
+        return Err(refuse("it is empty"));
+    }
+    // **The argument-injection guard, and it is not a restatement of git's rules.**
+    // `git check-ref-format refs/heads/-dashy` exits 0 — the *ref* does not begin with a
+    // dash, only the branch does — so step 1 below does not catch this and cannot be asked
+    // to. `worktree add -b <branch>` passes the name as a bare argument, which is the one
+    // place a caller's string meets git's option parser.
+    if branch.starts_with('-') {
+        return Err(refuse(
+            "a branch that starts with `-` would be read as an option",
+        ));
+    }
+    if !is_valid_branch(git, at, branch)? {
+        return Err(refuse("git check-ref-format refused it"));
+    }
+
+    let worktrees = list(git, at)?;
+    if let Some(existing) = worktrees
+        .iter()
+        .find(|worktree| worktree.head.branch() == Some(branch))
+    {
+        return if existing.canonical.is_some() {
+            Ok(Started::Adopted(existing.clone()))
+        } else {
+            Err(StartError::BranchPrunable {
+                branch: branch.to_owned(),
+            })
+        };
+    }
+
+    let path = free_directory(&base_dir(&worktrees, at), branch)?;
+    let existing_branch = branch_exists(git, at, branch)?;
+    let mut command = if existing_branch {
+        // The branch is there and unused: check it out.
+        GitCommand::new(["worktree", "add"])
+    } else {
+        // `-b` is the only place `branch` is a bare argument rather than an operand, which is
+        // what the leading-dash guard above is for.
+        GitCommand::new(["worktree", "add", "-b", branch])
+    }
+    .operand_path(&path);
+    if existing_branch {
+        // `<commit-ish>`, after the `--` that makes it an operand whatever it is spelled.
+        command = command.operand_branch(branch);
+    }
+    git.run(&command, at)?;
+
+    // Asked again rather than assumed. `worktree add` prints what it did and this needs the
+    // parsed record — the head it landed on, whether it is the main one, the resolved path —
+    // and a second `worktree list` is git's own answer to all three rather than this
+    // module's guess at what it just caused.
+    let worktrees = list(git, at)?;
+    worktrees
+        .into_iter()
+        .find(|worktree| worktree.head.branch() == Some(branch))
+        .map(Started::Created)
+        .ok_or_else(|| {
+            GitError::Unparsable {
+                args: "worktree list --porcelain -z".to_owned(),
+                problem: "the worktree that was just added is not in the list".to_owned(),
+            }
+            .into()
+        })
+}
+
+/// Whether git would accept `branch` as a branch name.
+///
+/// `refs/heads/<branch>` rather than `--branch <branch>`: the ref form is pure syntax, where
+/// `--branch` also expands `@{-1}` and friends, and embedding the name means this particular
+/// spawn cannot see it as an option however it is spelled.
+fn is_valid_branch(git: &Git, at: &CanonicalPath, branch: &str) -> Result<bool, GitError> {
+    let command = GitCommand::new(["check-ref-format", &format!("refs/heads/{branch}")]);
+    let finished = git.capture(&command, at)?;
+    // `capture` and not `run`, because a non-zero exit here **is the answer** rather than a
+    // failure. `failure` is still what judges everything else: a git too old for the option,
+    // a timeout, a signal — classifying those from the exit code alone is the mistake
+    // `Finished::failure` exists to stop each caller making separately.
+    match finished.code {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(finished
+            .failure(&command, at, git.timeout())
+            .unwrap_or(GitError::Unparsable {
+                args: "check-ref-format".to_owned(),
+                problem: "git neither accepted nor refused the name".to_owned(),
+            })),
+    }
+}
+
+/// Whether a local branch of exactly this name already exists.
+fn branch_exists(git: &Git, at: &CanonicalPath, branch: &str) -> Result<bool, GitError> {
+    let wanted = format!("refs/heads/{branch}");
+    let command = GitCommand::new(["for-each-ref", "--format=%(refname)", &wanted]);
+    let stdout = git.run(&command, at)?;
+    // Equality per line, never a prefix: git matches a ref pattern at `/` boundaries, so
+    // `refs/heads/feat` lists `refs/heads/feat/x` as well. Treating that as a hit would have
+    // `worktree add` check out a branch nobody created.
+    Ok(String::from_utf8_lossy(&stdout)
+        .lines()
+        .any(|line| line.trim_end_matches('\r') == wanted))
+}
+
+/// The directory new worktrees go under.
+///
+/// The **main** worktree's root, so every worktree of a repository lands in one place
+/// whichever checkout the project was registered from — registering a linked worktree must
+/// not scatter a second base directory inside the first. Falls back to the folder that was
+/// inspected when git lists no main worktree with a directory, which is what a bare
+/// repository looks like.
+fn base_dir(worktrees: &[Worktree], at: &CanonicalPath) -> PathBuf {
+    let root = worktrees
+        .iter()
+        .find(|worktree| worktree.is_main)
+        .and_then(|worktree| worktree.canonical.as_ref())
+        .map_or_else(
+            || at.as_path().to_path_buf(),
+            |path| path.as_path().to_path_buf(),
+        );
+    root.join(WORKTREE_BASE[0]).join(WORKTREE_BASE[1])
+}
+
+/// A directory under `base` that nothing is using yet.
+fn free_directory(base: &Path, branch: &str) -> Result<PathBuf, StartError> {
+    let slug = slug(branch);
+    for attempt in 1..=MAX_DIRECTORY_ATTEMPTS {
+        let name = if attempt == 1 {
+            slug.clone()
+        } else {
+            format!("{slug}-{attempt}")
+        };
+        let candidate = base.join(&name);
+        // Confinement, checked rather than reasoned about. `slug` yields one component with
+        // no separator and no `..`, so this cannot fail — which is the point of asserting it
+        // here rather than trusting the sanitiser to stay that way.
+        if !candidate.starts_with(base) {
+            break;
+        }
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(StartError::NoDirectory {
+        branch: branch.to_owned(),
+    })
+}
+
+/// A branch name as one directory component.
+///
+/// The name is a **location and never a key**: `ensure` finds a worktree by asking git which
+/// branch each one is on, so two branches that reduce to the same slug are told apart by
+/// git rather than by their directories, and `free_directory` only has to find a free name.
+/// That is what lets this be lossy without being wrong.
+fn slug(branch: &str) -> String {
+    let mut slug = String::with_capacity(branch.len());
+    for character in branch.chars() {
+        // ASCII only. A non-ASCII branch name is legal in git and its bytes are not portable
+        // across the two filesystems Nysia runs on, so they become separators like anything
+        // else rather than a directory one platform can name and the other cannot.
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+            slug.push(character);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+        if slug.len() >= MAX_SLUG_BYTES {
+            break;
+        }
+    }
+    // Leading dots would make a hidden directory, and `.`/`..` would not be a new directory
+    // at all — which is the whole of why this function exists rather than a `replace` call.
+    let trimmed = slug.trim_matches(['-', '.'].as_slice());
+    if trimmed.is_empty() {
+        return "branch".to_owned();
+    }
+    // A reserved device name is reserved with any extension, so the test is on the stem.
+    let stem = trimmed.split('.').next().unwrap_or(trimmed);
+    if RESERVED_ON_WINDOWS.contains(&stem.to_ascii_lowercase().as_str()) {
+        return format!("{trimmed}-branch");
+    }
+    trimmed.to_owned()
 }
 
 /// Parse `git worktree list --porcelain -z`.
@@ -380,6 +696,175 @@ mod tests {
             out.push(0);
         }
         out
+    }
+
+    #[test]
+    fn a_slug_is_one_directory_component_whatever_the_branch_is_called() {
+        // A branch is keyed by its name; the slug is only where the directory goes, so it may
+        // be lossy. What it may never be is more than one component, or a name that resolves
+        // somewhere else.
+        assert_eq!(slug("trunk"), "trunk");
+        assert_eq!(slug("feat/projects"), "feat-projects");
+        assert_eq!(slug("Shironex/nysia-projverbs"), "Shironex-nysia-projverbs");
+        assert_eq!(slug("release/v1.2.3"), "release-v1.2.3");
+        // Runs collapse rather than stacking up into `a---b`.
+        assert_eq!(slug("a//b\\\\c"), "a-b-c");
+        // Leading dots would make a hidden directory; `.` and `..` would not be a directory
+        // at all. This is the case that makes the function more than a `replace` call.
+        assert_eq!(slug(".."), "branch");
+        assert_eq!(slug("."), "branch");
+        assert_eq!(slug("///"), "branch");
+        assert_eq!(slug(".hidden"), "hidden");
+        // Non-ASCII is not portable across the two filesystems Nysia runs on.
+        assert_eq!(slug("feature/café"), "feature-caf");
+
+        for branch in [
+            "feat/projects",
+            "..",
+            "a//b",
+            ".hidden",
+            "release/v1.2.3",
+            "café",
+        ] {
+            let slug = slug(branch);
+            assert_eq!(
+                Path::new(&slug).components().count(),
+                1,
+                "{branch:?} produced {slug:?}, which is not one component"
+            );
+            assert!(!slug.starts_with('.'), "{slug:?} would be hidden");
+        }
+    }
+
+    #[test]
+    fn a_branch_named_for_a_windows_device_does_not_become_a_directory_nobody_can_make() {
+        // `git switch -c nul` is legal, and `CreateDirectory("nul")` is not — on Windows a
+        // device name is reserved in every directory, case-insensitively and with any
+        // extension. Reached from an ordinary branch name rather than a hostile one.
+        assert_eq!(slug("nul"), "nul-branch");
+        assert_eq!(slug("CON"), "CON-branch");
+        assert_eq!(slug("com1"), "com1-branch");
+        assert_eq!(slug("nul.txt"), "nul.txt-branch");
+        // Not a false positive on a name that merely starts with one.
+        assert_eq!(slug("console"), "console");
+        assert_eq!(slug("nullable"), "nullable");
+    }
+
+    #[test]
+    fn a_slug_is_bounded_so_a_branch_name_is_never_the_reason_a_path_limit_is_hit() {
+        let slug = slug(&"a/".repeat(200));
+        assert!(
+            slug.len() <= MAX_SLUG_BYTES,
+            "{} bytes is past the cap",
+            slug.len()
+        );
+        assert_eq!(Path::new(&slug).components().count(), 1);
+    }
+
+    #[test]
+    fn a_branch_that_could_be_read_as_an_option_is_refused_before_git_sees_it() {
+        let Some(git) = crate::git::testing::git_or_skip() else {
+            return;
+        };
+        let scratch = crate::git::testing::Scratch::new("worktree-dashy");
+        let repo = scratch.repository("repo");
+        let at = CanonicalPath::of(&repo).expect("the repository resolves");
+
+        // **This is not a restatement of git's rules, and the proof is that git accepts it.**
+        // `git check-ref-format refs/heads/-dashy` exits 0 — the *ref* does not begin with a
+        // dash, only the branch does — so the validation step cannot catch this and is not
+        // asked to. `worktree add -b <branch>` is where the name meets git's option parser.
+        assert!(
+            is_valid_branch(&git, &at, "-dashy").expect("git answers"),
+            "git itself accepts this name, which is why the guard in `ensure` is needed"
+        );
+        let refused = ensure(&git, &at, "-dashy");
+        assert!(
+            matches!(refused, Err(StartError::BranchRefused { .. })),
+            "got {refused:?}"
+        );
+
+        // And a name git really will not take is refused too, by asking git rather than by
+        // guessing.
+        assert!(matches!(
+            ensure(&git, &at, "bad..name"),
+            Err(StartError::BranchRefused { .. })
+        ));
+        assert!(matches!(
+            ensure(&git, &at, ""),
+            Err(StartError::BranchRefused { .. })
+        ));
+    }
+
+    #[test]
+    fn a_branch_is_created_once_and_adopted_afterwards() {
+        let Some(git) = crate::git::testing::git_or_skip() else {
+            return;
+        };
+        let scratch = crate::git::testing::Scratch::new("worktree-ensure");
+        let repo = scratch.repository("repo");
+        let at = CanonicalPath::of(&repo).expect("the repository resolves");
+
+        let created = ensure(&git, &at, "feat/projects").expect("the branch starts");
+        assert!(!created.adopted(), "nothing was there to adopt");
+        let made = created.worktree().canonical.clone().expect("it is on disk");
+        assert_eq!(created.worktree().head.branch(), Some("feat/projects"));
+        assert!(
+            made.as_path().ends_with(Path::new("feat-projects")),
+            "the architecture doc fixes the path shape: {}",
+            made
+        );
+        assert!(
+            made.as_path()
+                .starts_with(repo.join(".nysia").join("worktrees")),
+            "a worktree is confined to the base directory: {made}"
+        );
+
+        // The second call is the contract: adopt, never a second worktree and never a
+        // failure. Keyed by the branch, so the directory name plays no part in finding it.
+        let adopted = ensure(&git, &at, "feat/projects").expect("the branch starts again");
+        assert!(adopted.adopted(), "the worktree was already there");
+        assert_eq!(adopted.worktree().canonical.as_ref(), Some(&made));
+
+        // An existing branch with no worktree is checked out rather than re-created, which is
+        // the other half of `branch_exists`.
+        git.run(&GitCommand::new(["branch", "already-there"]), &at)
+            .expect("a branch with no worktree");
+        let existing = ensure(&git, &at, "already-there").expect("an existing branch starts");
+        assert!(!existing.adopted());
+        assert_eq!(existing.worktree().head.branch(), Some("already-there"));
+
+        // Two branches whose slugs collide get two directories, because a slug is a location
+        // and the branch is the key.
+        let collided = ensure(&git, &at, "feat-projects").expect("the colliding branch starts");
+        assert_ne!(
+            collided.worktree().canonical.as_ref(),
+            Some(&made),
+            "two branches must not share one worktree directory"
+        );
+    }
+
+    #[test]
+    fn a_branch_whose_worktree_directory_was_deleted_says_which_command_clears_it() {
+        let Some(git) = crate::git::testing::git_or_skip() else {
+            return;
+        };
+        let scratch = crate::git::testing::Scratch::new("worktree-prunable");
+        let repo = scratch.repository("repo");
+        let at = CanonicalPath::of(&repo).expect("the repository resolves");
+
+        let created = ensure(&git, &at, "feat/gone").expect("the branch starts");
+        let made = created.worktree().canonical.clone().expect("it is on disk");
+        std::fs::remove_dir_all(made.as_path()).expect("the directory can be removed");
+
+        // git still lists the registration, so there is nothing to adopt and `worktree add`
+        // would refuse to check the branch out twice. Its own case because the answer is one
+        // command, and a caller told only "could not start" has nowhere to go.
+        let refused = ensure(&git, &at, "feat/gone");
+        assert!(
+            matches!(refused, Err(StartError::BranchPrunable { .. })),
+            "got {refused:?}"
+        );
     }
 
     #[test]
