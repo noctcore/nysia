@@ -49,11 +49,25 @@ function malformed(verb: string, problem: string): Error {
 /**
  * The issue rows, or a refusal.
  *
- * Every field is checked because every field is rendered. `labels` is the one worth naming:
- * `gh` sends objects with a name, a description and a **hex colour**, and only the name
- * survives — a wire colour on screen is a pixel the theme switcher cannot reach, which is a
- * bug by this repository's own rule. Whether the daemon flattens them or sends the objects
- * is C1's to decide, so both spellings are read and neither is guessed at.
+ * **Every field is checked because every field is rendered, and the three that were merely
+ * coerced are the reason that sentence is worth writing down.** `state` was the worst of
+ * them: anything that was not the string `OPEN` read as `closed`, so a field C1 spelled
+ * `status`, or sent as a number, painted an accent **Closed** pill on every row — directly
+ * under a filter bar that says `is:issue is:open`, with nothing refused and nothing logged.
+ * `author` as `gh`'s own object — `{id, is_bot, login, name}`, which is what `gh issue list
+ * --json author` really returns — read as *"no author"*. A non-array `labels` read as no
+ * labels, and so did an array of objects keyed `title` instead of `name`.
+ *
+ * All three now refuse, because a quiet wrong answer is the one thing this repository ranks
+ * below a loud failure, and because a reader that hides a shape it cannot read is exactly
+ * what the whole parse exists instead of. What a refusal costs is a screen saying the query
+ * failed, with the daemon's verb in it; what a coercion cost was a table that looked right.
+ *
+ * `labels` is still the one worth naming for a second reason: `gh` sends objects with a
+ * name, a description and a **hex colour**, and only the name survives — a wire colour on
+ * screen is a pixel the theme switcher cannot reach, which is a bug by this repository's own
+ * rule. Whether the daemon flattens them or sends the objects is C1's to decide, so both
+ * spellings are read and neither is guessed at.
  */
 export function readIssues(answer: unknown): readonly Issue[] {
   if (!Array.isArray(answer)) {
@@ -80,7 +94,10 @@ function readIssue(row: unknown, index: number): Issue {
     throw malformed('tasks_list', `a row at position ${index} that is not an issue`);
   }
   const { number, title, state, updatedAt, url, author, labels } = fields;
-  if (typeof number !== 'number' || !Number.isInteger(number)) {
+  // Positive, because GitHub numbers issues from 1. A negative one is not a number this
+  // module can be handed by anything it is talking to, and `tasks/branchName.ts` would turn
+  // it into `issue/-5-…` — a branch whose name begins with a flag.
+  if (typeof number !== 'number' || !Number.isInteger(number) || number <= 0) {
     throw malformed('tasks_list', `a row at position ${index} with no issue number`);
   }
   if (typeof title !== 'string' || typeof updatedAt !== 'string' || typeof url !== 'string') {
@@ -89,32 +106,71 @@ function readIssue(row: unknown, index: number): Issue {
   return {
     number,
     title,
-    state: readState(state),
+    state: readState(state, number),
     updatedAt,
     url,
-    // `null` rather than a refusal: GitHub really does answer with no author for an issue
-    // whose account is gone, and a row that renders without a name is better than a list
-    // that will not render at all.
-    author: typeof author === 'string' && author !== '' ? author : null,
-    labels: readLabels(labels),
+    author: readAuthor(author, number),
+    labels: readLabels(labels, number),
   };
 }
 
-/** `gh` sends `OPEN` and `CLOSED`; anything else is read as closed rather than refused. */
-function readState(state: unknown): IssueState {
-  return typeof state === 'string' && state.toLowerCase() === 'open' ? 'open' : 'closed';
+/**
+ * `open` or `closed`, or a refusal. `gh` sends these uppercase.
+ *
+ * **Not a coercion with a default**, which is what this was and is the trap the whole module
+ * is built against. Reading everything-that-is-not-`OPEN` as closed means a field C1 named
+ * differently, or typed differently, produces a full table of rows whose pills all read
+ * **Closed** under a filter bar saying `is:issue is:open` — every row wrong, nothing refused,
+ * nothing logged, and no way to tell it from a repository whose issues really are all shut.
+ */
+function readState(state: unknown, issue: number): IssueState {
+  if (typeof state === 'string') {
+    const spelling = state.toLowerCase();
+    if (spelling === 'open' || spelling === 'closed') {
+      return spelling;
+    }
+  }
+  throw malformed('tasks_list', `an issue #${issue} that is neither open nor closed`);
+}
+
+/**
+ * The login, `null` where there genuinely is none, or a refusal.
+ *
+ * `null` is right for an *absent* author and only for that: GitHub really does answer with
+ * no author for an issue whose account is gone, and a row that renders without a name is
+ * better than a list that will not render at all.
+ *
+ * A value of some other shape is a different thing wearing the same answer, and it is
+ * measured rather than hypothetical — `gh issue list --json author` returns
+ * `{"id":…,"is_bot":false,"login":"…","name":""}`. C1 has been asked for the login string,
+ * but this reader is the half that would have hidden the disagreement if it sent the object,
+ * quietly reporting *"no author"* for every row in the table. It refuses a shape it cannot
+ * read instead, and does not reach into the object to guess which key the login is under.
+ */
+function readAuthor(author: unknown, issue: number): string | null {
+  if (author === null || author === undefined || author === '') {
+    return null;
+  }
+  if (typeof author !== 'string') {
+    throw malformed('tasks_list', `an issue #${issue} whose author is not a login`);
+  }
+  return author;
 }
 
 /**
  * Label names, from either spelling, with the colour dropped.
  *
- * A label that is neither a string nor an object with a name is skipped rather than refused:
- * a list is still perfectly readable without one pill, and refusing the whole query over a
- * label would be the tail wagging the dog.
+ * **Refused rather than skipped**, which reverses what this did. The argument for skipping
+ * was that a list is readable without one pill and that refusing a hundred issues over a
+ * label is the tail wagging the dog — true of *one* malformed label among good ones, and
+ * false of the case that actually happens, which is a whole answer keyed the other way.
+ * `{nodes: […]}`, a comma-separated string, or objects carrying `title` instead of `name`
+ * all produced the same empty array as an issue with no labels, on every row at once. That
+ * is not a missing pill, it is the screen saying the repository does not label its work.
  */
-function readLabels(labels: unknown): readonly string[] {
+function readLabels(labels: unknown, issue: number): readonly string[] {
   if (!Array.isArray(labels)) {
-    return [];
+    throw malformed('tasks_list', `an issue #${issue} whose labels are not a list`);
   }
   // A `Set`, so a repeated name is one pill rather than two React children under one key.
   // Unlike a repeated issue number this is not worth refusing a list over — a duplicate label
@@ -126,9 +182,10 @@ function readLabels(labels: unknown): readonly string[] {
       continue;
     }
     const name = asRecord(label)?.name;
-    if (typeof name === 'string') {
-      names.add(name);
+    if (typeof name !== 'string') {
+      throw malformed('tasks_list', `an issue #${issue} with a label it cannot name`);
     }
+    names.add(name);
   }
   return [...names];
 }
