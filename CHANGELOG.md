@@ -15,9 +15,10 @@ honest about where it stops.
 Nysia at a folder on disk and it appears in the sidebar, survives a daemon restart, and a
 GitHub issue in it can be started into a branch-keyed worktree with a session and a tab.*
 `crates/nysia/tests/projects.rs` landed written to fail, naming the wave that would land the
-verbs, and passes now with no assertion, no timeout and no step of the harness moved. It is
-also the release where an agent session first exists — the one thing 0.2.0's ladder row
-promised and did not ship, though not yet the dot that row was for; see *Known defects*.
+verbs, and passes now with no assertion, no timeout and, at the unignore, no step of the
+harness moved. It is also the release where an agent session first exists — the one thing
+0.2.0's ladder row promised and did not ship, though not yet the dot that row was for; see
+*Known defects*.
 
 ### Added
 
