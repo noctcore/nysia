@@ -308,11 +308,33 @@ pub enum StartError {
 ///
 /// Four spawns for something a person clicked, each under the chokepoint's deadline.
 ///
+/// # What a start that cannot finish leaves behind
+///
+/// A decision rather than a side effect of the order the steps happen to be in, because the
+/// order used to be an accident: `conceal` — which creates `.nysia/` and writes a
+/// `.gitignore` into it — ran *before* the name check, the free-directory search and the
+/// branch lookup, so `--branch HEAD` and `--branch nul` both answered "git reported a
+/// failure" with a new directory already sitting in the person's repository, mentioned by
+/// nothing in the answer.
+///
+/// Steps 1 to 3 above read and refuse. Nothing is created until they have all passed, so a
+/// name git will not take, a branch whose worktree needs pruning and a base with no free
+/// directory left now leave the repository exactly as they found it.
+///
+/// Past that point two things can remain, and both stay on purpose:
+///
+/// - **`.nysia/` and its `.gitignore`**, when `worktree add` itself fails. Deleting a
+///   directory inside somebody's repository on a failure path is the destructive operation
+///   §3.1 says Nysia does not do — and it would race another `Start →` creating a worktree
+///   underneath it. What is left is Nysia's own directory, ignored by git including itself,
+///   reused by the next start.
+/// - **The worktree**, when it was created and its session then would not start. Removing
+///   worktrees is v0.4's verb and the destructive one, and a retry adopts this one rather
+///   than making a second.
+///
 /// # Errors
 ///
-/// See [`StartError`]. A worktree that was created and then could not be used is **left
-/// where it is**: removing worktrees is v0.4's verb and the destructive one, and a retry
-/// adopts this one rather than making a second.
+/// See [`StartError`].
 pub fn ensure(git: &Git, at: &CanonicalPath, branch: &str) -> Result<Started, StartError> {
     let refuse = |reason: &'static str| StartError::BranchRefused {
         branch: branch.to_owned(),
@@ -350,9 +372,15 @@ pub fn ensure(git: &Git, at: &CanonicalPath, branch: &str) -> Result<Started, St
     }
 
     let nysia_dir = nysia_dir(&worktrees, at);
-    conceal(&nysia_dir);
+    // **Everything that can refuse runs before anything is created.** `free_directory` only
+    // reads — a candidate that does not exist is the one it hands back — and `branch_exists`
+    // is a `for-each-ref`, so both can answer before `.nysia/` is on disk. `conceal` is the
+    // first syscall that writes, and it is deliberately the last thing before `worktree add`:
+    // a branch git refuses, a branch whose worktree needs pruning, and a base with no free
+    // name now all leave the person's repository exactly as they found it.
     let path = free_directory(&nysia_dir.join(WORKTREE_BASE[1]), branch)?;
     let existing_branch = branch_exists(git, at, branch)?;
+    conceal(&nysia_dir);
     let mut command = if existing_branch {
         // The branch is there and unused: check it out.
         GitCommand::new(["worktree", "add"])

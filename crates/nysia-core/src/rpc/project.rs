@@ -326,6 +326,29 @@ impl ProjectService {
             )
         })?;
 
+        // **Before `ensure`, which is the first step that writes.** `create` used to refuse
+        // `kind: agent` as its own first statement — after a branch and a worktree had been
+        // made for a session that was never going to start, and with nothing in the answer
+        // saying so. Serving agent sessions removes that particular refusal; it does not
+        // remove the shape, because an agent whose CLI is not installed reaches the same
+        // place. Asking first is the fix that outlives the refusal.
+        let opening = SessionCreate {
+            kind: request.kind,
+            // **Minted by the daemon**, because `Start →` creates the session before any
+            // window has a leaf to name — the tab is opened *from* this answer. That is the
+            // rule `SessionCreate::pane_key` already states for a null key, reached by a
+            // different route.
+            pane_key: None,
+            profile: request.profile.clone(),
+            cwd: None,
+            env_overrides: BTreeMap::new(),
+            cols: START_COLS,
+            rows: START_ROWS,
+        };
+        self.sessions
+            .precheck(&opening)
+            .map_err(IntoEnvelope::into_envelope)?;
+
         let started = crate::worktree::ensure(git, &at, &request.branch).map_err(start_refusal)?;
         // `canonical` is `Some` for every worktree `ensure` answers with: it adopts only one
         // that has a directory and refuses the registered-but-deleted case by name.
@@ -338,17 +361,8 @@ impl ProjectService {
         let created = self
             .sessions
             .create(&SessionCreate {
-                kind: request.kind,
-                // **Minted by the daemon**, because `Start →` creates the session before any
-                // window has a leaf to name — the tab is opened *from* this answer. That is
-                // the rule `SessionCreate::pane_key` already states for a null key, reached
-                // by a different route.
-                pane_key: None,
-                profile: request.profile.clone(),
                 cwd: Some(cwd.as_path().to_path_buf()),
-                env_overrides: BTreeMap::new(),
-                cols: START_COLS,
-                rows: START_ROWS,
+                ..opening
             })
             .map_err(IntoEnvelope::into_envelope)?;
 
@@ -626,9 +640,23 @@ fn start_refusal(err: StartError) -> ErrorEnvelope {
                 tracing::warn!(kind = git_kind(&other), "git would not start a branch");
                 envelope(
                     ErrorCode::Internal,
-                    format!("git could not open a worktree for that branch: {}", git_kind(&other)),
+                    format!(
+                        "git could not open a worktree for that branch: {}",
+                        git_kind(&other)
+                    ),
                     "check that `git worktree list` answers in that project",
-                    &["a worktree cannot be created while another git command holds the index lock"],
+                    &[
+                        "a worktree cannot be created while another git command holds the \
+                         index lock",
+                        // Said rather than left to be discovered. Everything a caller can be
+                        // refused for is answered before anything is created, so this is the
+                        // one step that can fail with something already on disk — and what
+                        // is there is Nysia's own directory, ignored by git including itself
+                        // and reused by the next start.
+                        "Nysia's `.nysia` directory may have been created in the project; it \
+                         holds nothing but a `.gitignore` that hides it, and starting the \
+                         branch again reuses it",
+                    ],
                 )
                 .retryable(true)
             }
@@ -636,9 +664,11 @@ fn start_refusal(err: StartError) -> ErrorEnvelope {
         StartError::BranchRefused { branch, reason } => envelope(
             ErrorCode::InvalidRequest,
             format!("{branch:?} cannot be used as a branch: {reason}"),
-            "choose a branch name git accepts — `git check-ref-format --branch <name>` is the              same question this asked",
+            "choose a branch name git accepts — `git check-ref-format --branch <name>` is the \
+                 same question this asked",
             &[
-                "a name beginning with `-` is refused whatever git thinks of it, because it                would reach git's option parser",
+                "a name beginning with `-` is refused whatever git thinks of it, because it \
+                 would reach git's option parser",
             ],
         ),
         StartError::BranchPrunable { branch } => envelope(
@@ -646,7 +676,8 @@ fn start_refusal(err: StartError) -> ErrorEnvelope {
             format!("{branch:?} already has a worktree whose directory is gone"),
             "run `git worktree prune` in that project, then start the branch again",
             &[
-                "git will not check one branch out twice, and the registration it is refusing                  over no longer has a directory behind it",
+                "git will not check one branch out twice, and the registration it is refusing \
+                 over no longer has a directory behind it",
             ],
         ),
         StartError::NoDirectory { branch } => envelope(
@@ -1550,6 +1581,169 @@ mod tests {
                 return ours;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    /// Everything a `Start →` leaves behind when it cannot finish, measured.
+    ///
+    /// #94's finding: `conceal` ran before the free-directory search and the branch lookup,
+    /// so a start that was going to be refused created `.nysia/` and a `.gitignore` in
+    /// somebody's repository first, and the refusal mentioned neither. `--branch HEAD` and
+    /// `--branch nul` were the two measured — both pass `git check-ref-format` and both fail
+    /// at `worktree add`, which is confirmed here rather than taken on trust.
+    ///
+    /// What is asserted is the decision `worktree::ensure` now documents:
+    ///
+    /// - refused **before** anything is created, and the repository is untouched
+    /// - refused **at `worktree add`**, and what remains is Nysia's own directory holding
+    ///   nothing but the `.gitignore` that hides it — no worktree, no branch, and `git
+    ///   status` still clean — with the answer saying so
+    #[tokio::test]
+    async fn a_start_that_cannot_finish_says_what_it_left_behind() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-leftovers");
+        let repo = scratch.repository("repo");
+        let (dir, service) = service("leftovers");
+        let registered = register(&service, &repo);
+        let nysia_dir = repo.join(crate::worktree::WORKTREE_BASE[0]);
+
+        // 1. A name git will not take at all. Refused from `check-ref-format`, before the
+        //    first syscall that writes.
+        let refusal = refused(service.start(&ProjectStart {
+            project: registered.project.id.clone(),
+            branch: "feat/bad..name".to_owned(),
+            kind: SessionKind::Shell,
+            profile: None,
+        }));
+        assert_eq!(*refusal.code(), ErrorCode::InvalidRequest);
+        assert!(
+            !nysia_dir.exists(),
+            "a start refused for its name must leave the repository exactly as it found it"
+        );
+
+        // 2. A refusal from **past** the name check: every directory the branch could use is
+        //    taken. This is the case the ordering fix is for and the one part 1 cannot see —
+        //    `check-ref-format` refuses before `nysia_dir` is even computed, so it was
+        //    already leaving nothing. `conceal` used to run before the free-directory search,
+        //    so this branch is where it wrote a `.gitignore` for a start that was never going
+        //    to happen.
+        let base = nysia_dir.join(crate::worktree::WORKTREE_BASE[1]);
+        for attempt in 1..=16 {
+            let name = if attempt == 1 {
+                "crowded".to_owned()
+            } else {
+                format!("crowded-{attempt}")
+            };
+            std::fs::create_dir_all(base.join(name)).expect("an occupied directory");
+        }
+        let refusal = refused(service.start(&ProjectStart {
+            project: registered.project.id.clone(),
+            branch: "crowded".to_owned(),
+            kind: SessionKind::Shell,
+            profile: None,
+        }));
+        assert_eq!(*refusal.code(), ErrorCode::InvalidRequest);
+        assert!(
+            !nysia_dir.join(".gitignore").exists(),
+            "a start refused after the name check must not have written anything either; \
+             concealment belongs immediately before `worktree add`, which is the only step \
+             that can fail with something on disk"
+        );
+        std::fs::remove_dir_all(&nysia_dir).expect("the fixture's own directories");
+
+        // 3. A name `check-ref-format` accepts and `worktree add` will not. This is the one
+        //    step that can fail with something already on disk.
+        let refusal = refused(service.start(&ProjectStart {
+            project: registered.project.id.clone(),
+            branch: "HEAD".to_owned(),
+            kind: SessionKind::Shell,
+            profile: None,
+        }));
+        assert_eq!(*refusal.code(), ErrorCode::Internal);
+        assert!(
+            refusal
+                .next_steps()
+                .iter()
+                .any(|step| step.contains(".nysia")),
+            "the answer must name what it left behind, got {:?}",
+            refusal.next_steps()
+        );
+
+        // And what it left is only that: no worktree, no branch, nothing `git status` sees.
+        assert!(nysia_dir.is_dir());
+        let left: Vec<String> = std::fs::read_dir(&nysia_dir)
+            .expect("Nysia's directory reads")
+            .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            left,
+            vec![".gitignore".to_owned()],
+            "the only thing a failed start leaves is the file that hides it"
+        );
+        let status = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&repo)
+                .output()
+                .expect("git status runs")
+                .stdout,
+        )
+        .into_owned();
+        assert!(status.trim().is_empty(), "git sees it: {status:?}");
+
+        let projects = listed(&service).await;
+        let [project] = projects.as_slice() else {
+            panic!("one repository is one project, got {projects:?}");
+        };
+        assert_eq!(
+            project.worktrees.len(),
+            1,
+            "no worktree was made, so the project still has only its checkout"
+        );
+
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// No next step reaches a person with the source's own indentation in it.
+    ///
+    /// #94's finding, as a rule rather than as three fixed strings: a Rust string literal
+    /// split across lines without a trailing `\` keeps every space of the continuation, so
+    /// `` `git check-ref-format --branch <name>` is the              same question this
+    /// asked `` is what a user saw. Nothing this module says has a reason to contain a run of
+    /// spaces, so the rule is simply that none does — and every envelope the module can build
+    /// is put through it, so a fourth one added later is covered without anybody remembering
+    /// to add it here.
+    #[test]
+    fn nothing_this_module_says_carries_the_source_indentation_with_it() {
+        let envelopes = vec![
+            start_refusal(StartError::BranchRefused {
+                branch: "feat/x".to_owned(),
+                reason: "git check-ref-format refused it",
+            }),
+            start_refusal(StartError::BranchPrunable {
+                branch: "feat/x".to_owned(),
+            }),
+            start_refusal(StartError::NoDirectory {
+                branch: "feat/x".to_owned(),
+            }),
+            no_git_envelope(),
+            internal_start("something"),
+            joining("something"),
+            unknown_project(
+                &ProjectId::from_canonical_path(std::path::Path::new("C:/x")).expect("an id"),
+            ),
+        ];
+        for envelope in &envelopes {
+            for text in std::iter::once(envelope.message())
+                .chain(envelope.next_steps().iter().map(String::as_str))
+            {
+                assert!(
+                    !text.contains("  "),
+                    "a wrapped literal kept its indentation: {text:?}"
+                );
+            }
         }
     }
 }
