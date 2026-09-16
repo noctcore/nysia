@@ -35,10 +35,11 @@
 //!
 //! # What this module does not do
 //!
-//! It does not spawn a pty. [`launch`] resolves and pre-validates the CLI and hands back the
-//! argument vector; hosting that in a session needs a [`crate::pty::ShellProfile`] that does
-//! not exist yet, and that is wave C's. It does not implement `nysia hook` either — it
-//! installs entries that point at it.
+//! It does not spawn a pty. [`launch`] resolves and pre-validates the CLI and hands back an
+//! [`AgentLaunch`]; hosting one in a session is [`crate::rpc::SessionRegistry::create`]'s,
+//! through [`crate::pty::SessionSpec::for_program`] — which takes an argv and a label and is
+//! neutral by construction, so the pty layer spawns what it is handed without learning what
+//! it is. It does not implement `nysia hook` either — it installs entries that point at it.
 
 pub mod hooks;
 
