@@ -457,6 +457,86 @@ mod tests {
         out
     }
 
+    #[test]
+    fn an_excerpt_names_a_line_without_the_path_that_line_carried() {
+        // [`where_it_is`] is the message every `!contains` in this module fails with, so what
+        // it may print is the module's own subject. This holds it against a line written out
+        // here rather than against one a run produced: the leak it has to not repeat is a user
+        // name, and neither CI runner has the one that would show a failure to strip it.
+        //
+        // The line is `portable_pty::win::pseudocon`'s, which is the line that carries the
+        // marker on Windows and the one the old excerpt printed a home directory out of. It
+        // appears twice, because the two writers this module reads disagree about colour:
+        // [`through`] sets `.with_ansi(false)` and the child [`drive_child`] runs does not.
+        // The coloured leg is what holds [`without_ansi`], and it is the assertion on the
+        // target that holds it — with the strip removed the escape stops the target scan
+        // before it starts, and the excerpt still names a level and still leaves the path
+        // out, which is the shape of a fix that looks like it worked.
+        //
+        // Printing `said` on a failure is the carve-out this module's docs already name: every
+        // value in it is one written here, and `NOBODY` is nobody.
+        const TARGET: &str = "portable_pty::win::pseudocon";
+        const PLANTED: &str = "ZZZ-SPAWN-synthetic-0";
+
+        let cwd = format!(r"C:\Users\NOBODY\AppData\Local\Temp\{PLANTED}");
+        let message =
+            format!(r#"CreateProcessW `"nysia-no-such-program-4f3e9a"` in cwd `Some("{cwd}")`"#);
+        let quiet = "2026-09-16T00:00:00.000000Z  INFO nysia::log: a line carrying nothing";
+
+        for (colour, line) in [
+            (
+                "uncoloured",
+                format!("2026-09-16T00:00:00.000000Z ERROR {TARGET}: {message}"),
+            ),
+            (
+                "coloured",
+                format!(
+                    "2026-09-16T00:00:00.000000Z \u{1b}[31mERROR\u{1b}[0m \
+                     \u{1b}[2m{TARGET}\u{1b}[0m\u{1b}[2m:\u{1b}[0m {message}"
+                ),
+            ),
+        ] {
+            let said = where_it_is(&format!("{quiet}\n{line}\n"), PLANTED);
+
+            // What the excerpt owes the reader. Without all three it has traded a leak for a
+            // message that cannot be acted on, which is the other way to fail this.
+            assert!(
+                said.contains("ERROR"),
+                "{colour}: the excerpt does not say at what level: {said}"
+            );
+            assert!(
+                said.contains(&format!("`{TARGET}`")),
+                "{colour}: the excerpt does not name {TARGET} as the target: {said}"
+            );
+            assert!(
+                said.contains(PLANTED),
+                "{colour}: the excerpt does not say which needle it is about: {said}"
+            );
+
+            // And what it owes the person whose machine ran it.
+            for carried in ["NOBODY", "AppData", r"C:\", "CreateProcessW"] {
+                assert!(
+                    !said.contains(carried),
+                    "{colour}: `{carried}` came off the line and into the message that \
+                     reports it: {said}"
+                );
+            }
+        }
+
+        // A line no subscriber wrote — the notes `filter` puts on stderr before one exists, and
+        // anything libtest prints. Every caller below reaches this arm only through a needle it
+        // asserted the *presence* of, so it is unreachable on a failing run; it still may not
+        // answer with the line.
+        let said = where_it_is(
+            &format!("no level here, only {PLANTED} and {cwd}\n"),
+            PLANTED,
+        );
+        assert!(
+            !said.contains("NOBODY"),
+            "a line with no level is answered with the line: {said}"
+        );
+    }
+
     /// Why a child failed, without everything it logged on the way there.
     ///
     /// [`drive_child`] hands back the child's whole stdout and stderr, and on the leg with the
