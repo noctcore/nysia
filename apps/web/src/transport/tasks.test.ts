@@ -62,11 +62,23 @@ describe('reading the issue list', () => {
     ]);
   });
 
-  it('skips a label it cannot read rather than refusing the whole list', () => {
-    // A list is perfectly readable without one pill. Refusing a hundred issues over a
-    // malformed label would be the tail wagging the dog.
-    const labels = readIssues([{ ...ROW, labels: ['bug', 42, null, { color: 'red' }] }]);
-    expect(labels[0]?.labels).toEqual(['bug']);
+  it('refuses a label it cannot name rather than dropping it', () => {
+    // The reverse of what this file used to assert, and the reason is which case actually
+    // happens. Skipping is defensible for one bad label among good ones; the shape a daemon
+    // really sends is keyed the other way *for every row at once*, and skipping turned that
+    // into a table saying the repository does not label its work.
+    expect(() => readIssues([{ ...ROW, labels: ['bug', { color: 'red' }] }])).toThrow(/label/);
+    expect(() => readIssues([{ ...ROW, labels: [{ title: 'area:web' }] }])).toThrow(/label/);
+    expect(() => readIssues([{ ...ROW, labels: [42] }])).toThrow(/label/);
+  });
+
+  it('refuses labels that are not a list, rather than reading them as none', () => {
+    // Every one of these produced `[]` — the same answer as an issue with nothing on it.
+    expect(() => readIssues([{ ...ROW, labels: { nodes: [{ name: 'bug' }] } }])).toThrow(
+      /not a list/,
+    );
+    expect(() => readIssues([{ ...ROW, labels: 'bug,P1-high' }])).toThrow(/not a list/);
+    expect(() => readIssues([{ ...ROW, labels: undefined }])).toThrow(/not a list/);
   });
 
   it('accepts an issue with no author, because GitHub really sends one', () => {
@@ -74,6 +86,31 @@ describe('reading the issue list', () => {
     // better than a list that will not render at all.
     expect(readIssues([{ ...ROW, author: null }])[0]?.author).toBeNull();
     expect(readIssues([{ ...ROW, author: '' }])[0]?.author).toBeNull();
+    expect(readIssues([{ ...ROW, author: undefined }])[0]?.author).toBeNull();
+  });
+
+  it('refuses gh’s author object rather than reporting no author', () => {
+    // Measured, not hypothetical: `gh issue list --json author` answers with this object.
+    // C1 has been asked for the login string, but this reader is the half that would have
+    // hidden the disagreement — quietly saying "no author" on every row in the table.
+    expect(() =>
+      readIssues([{ ...ROW, author: { id: 'U_1', is_bot: false, login: 'Shironex', name: '' } }]),
+    ).toThrow(/author/);
+    expect(() => readIssues([{ ...ROW, author: 42 }])).toThrow(/author/);
+  });
+
+  it('refuses a state it does not recognise instead of calling it closed', () => {
+    // The worst of the three. `TaskTable` paints the pill unconditionally, so reading
+    // everything-but-OPEN as closed put an accent `Closed` on *every* row, directly under a
+    // filter bar reading `is:issue is:open` — and nothing anywhere said so.
+    expect(() => readIssues([{ ...ROW, state: 'merged' }])).toThrow(/open nor closed/);
+    expect(() => readIssues([{ ...ROW, state: 1 }])).toThrow(/open nor closed/);
+    expect(() => readIssues([{ ...ROW, state: { name: 'OPEN' } }])).toThrow(/open nor closed/);
+    // Misnamed rather than missing, which is the likeliest disagreement of the lot: the
+    // field is there, under a key this module does not read.
+    const misnamed: Record<string, unknown> = { ...ROW, status: 'OPEN' };
+    delete misnamed.state;
+    expect(() => readIssues([misnamed])).toThrow(/open nor closed/);
   });
 
   it('refuses an answer that is not a list at all', () => {
@@ -96,6 +133,10 @@ describe('reading the issue list', () => {
   it('refuses a number that is not one, rather than printing NaN as an id', () => {
     expect(() => readIssues([{ ...ROW, number: '200' }])).toThrow();
     expect(() => readIssues([{ ...ROW, number: 1.5 }])).toThrow();
+    // GitHub numbers issues from 1. A negative one reached `tasks/branchName.ts` and came
+    // out as `issue/-5-…` — a branch whose name starts with a flag.
+    expect(() => readIssues([{ ...ROW, number: -5 }])).toThrow();
+    expect(() => readIssues([{ ...ROW, number: 0 }])).toThrow();
   });
 
   it('refuses two rows sharing one issue number', () => {
