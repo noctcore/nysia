@@ -745,8 +745,11 @@ mod tests {
         // Removed is the shipped default and every ordinary run of this binary. `trace` is
         // somebody raising the level to debug the spawn that just failed. The third names
         // the module that actually wrote the line, which is the spelling the screen exists
-        // for — and the one that also has this process print a refusal, so the confined leg
-        // is not silent about what it would not honour.
+        // for — and the only one of the three the screen refuses, so it is also the only one
+        // with a refusal to be held to. Each leg is held to what it owes the reader as well
+        // as to what it writes, because a leg that stopped announcing itself would leave
+        // whoever set the value holding a directive that silently does nothing — and this
+        // comment asserting it on the code's behalf.
         //
         // Neither leg's text is printed on a failure. See [`where_it_is`]: with the way out
         // named and `trace` asked for, what the control child wrote is this machine's own
@@ -759,6 +762,20 @@ mod tests {
             .enumerate()
         {
             let plant = a_marked_directory(&format!("branch-{nth}"));
+
+            // What the confined child owes this value, put through the same screen the child
+            // runs rather than written out again here — so a value that stops being refused,
+            // or starts being, changes this with it instead of leaving it asserting a line
+            // nothing writes. Empty for the two values the screen honours whole.
+            let owed: Vec<String> = asked
+                .map(|value| {
+                    log_file::screen_directives(value)
+                        .refused
+                        .iter()
+                        .map(|directive| log_file::refusal_note(directive))
+                        .collect()
+                })
+                .unwrap_or_default();
 
             let (ok, lifted) = drive_child(leaf, &plant.dir, asked, true);
             assert!(
@@ -785,6 +802,16 @@ mod tests {
                  `log_file`'s docs cite by file and line: {}",
                 where_it_is(&lifted, LEAKING_TARGET)
             );
+            // What the way out owes the reader, which `nysia-desktop`'s `log` module asserts
+            // of the window and nothing here asserted of this binary. A log that has stopped
+            // being confined and does not say so is the case `unconfined_note` exists for.
+            let lifted_note = log_file::unconfined_note();
+            assert!(
+                lifted.contains(&lifted_note),
+                "NYSIA_LOG={asked:?}: the way out was taken and the child never said the log \
+                 had stopped being confined: {}",
+                where_it_is(&lifted, &lifted_note)
+            );
 
             let (ok, held) = drive_child(leaf, &plant.dir, asked, false);
             assert!(
@@ -798,6 +825,15 @@ mod tests {
                  the assertion below would hold for the wrong reason: {}",
                 where_it_is(&held, CHILD_OK)
             );
+            for note in &owed {
+                assert!(
+                    held.contains(note),
+                    "NYSIA_LOG={asked:?}: the child would not honour a directive and never \
+                     said so, which leaves whoever set it holding one that silently does \
+                     nothing: {}",
+                    where_it_is(&held, note)
+                );
+            }
             assert!(
                 !held.contains(&plant.marker),
                 "NYSIA_LOG={asked:?}: a path the caller offered reached the log of a process \
