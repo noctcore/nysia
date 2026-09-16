@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 
 import { repositoryOf, updatedPhrase, type Issue } from './issue';
 import {
+  isStarting,
   isTasksBusy,
   issuesOf,
+  startedPhrase,
   tasksNotice,
   unavailableReason,
+  type TaskStartState,
   type TasksNotice,
   type TaskUnavailableReason,
   type TasksState,
@@ -189,6 +192,50 @@ describe('the state', () => {
     expect(issuesOf({ phase: 'loaded', issues: [AN_ISSUE] })).toEqual([AN_ISSUE]);
     expect(issuesOf({ phase: 'loading' })).toEqual([]);
     expect(issuesOf(unavailable('gh_missing'))).toEqual([]);
+  });
+});
+
+describe('what Start → says it did', () => {
+  const started = (adopted: boolean): TaskStartState => ({
+    phase: 'started',
+    issue: 200,
+    branch: 'issue/200-add-the-tasks-screen',
+    paneKey: 'tab_9:leaf_1',
+    adopted,
+  });
+
+  it('says adopting a worktree and making one differently', () => {
+    // `adopted` is not decoration, and this is the whole of what it buys. `ProjectStarted`'s
+    // own comment asks the window to say *"opened the worktree you already had"* rather than
+    // implying it made one — because "created a worktree" and "moved into the one that was
+    // there, with whatever is in it" are different enough to act on. A flag carried across the
+    // wire, parsed, refused when missing, and then rendered into one sentence either way would
+    // be four steps in aid of nothing.
+    const adopted = startedPhrase(started(true));
+    const created = startedPhrase(started(false));
+    expect(adopted).toBeTruthy();
+    expect(created).toBeTruthy();
+    expect(adopted).not.toBe(created);
+    expect(adopted).toContain('already');
+    expect(created).toContain('new worktree');
+  });
+
+  it('names the branch, because that is what the worktree is keyed by', () => {
+    // D-6. The issue number is in the line as a label for the row somebody pressed; the branch
+    // is the thing that outlives the query.
+    expect(startedPhrase(started(false))).toContain('issue/200-add-the-tasks-screen');
+  });
+
+  it('has nothing to confirm until something has started', () => {
+    expect(startedPhrase({ phase: 'idle' })).toBeNull();
+    expect(startedPhrase({ phase: 'starting', issue: 200 })).toBeNull();
+  });
+
+  it('busies only the row that was pressed', () => {
+    expect(isStarting({ phase: 'starting', issue: 200 }, 200)).toBe(true);
+    expect(isStarting({ phase: 'starting', issue: 200 }, 199)).toBe(false);
+    expect(isStarting({ phase: 'idle' }, 200)).toBe(false);
+    expect(isStarting(started(true), 200)).toBe(false);
   });
 });
 
