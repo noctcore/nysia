@@ -416,6 +416,54 @@ mod tests {
     }
 
     #[test]
+    fn a_v0_2_database_arrives_at_the_fresh_schema_with_its_rows() {
+        // The same property as `a_stepped_database_matches_a_fresh_one`, asked of the two
+        // migrations this build actually ships rather than of two synthetic steps. v0.2 noted
+        // the property was trivial with one migration in the list; it is not trivial now, and
+        // this is the pair a daemon updating in the field will really apply.
+        //
+        // The row is the half a schema comparison cannot see. `schema_of` would be satisfied
+        // by a migration that dropped and recreated `agent_status`, and a person whose agent
+        // history vanished on upgrade would have no way to tell that from a schema that
+        // matched.
+        let (dir, upgraded_path) = temp_db("migrate-v0-2");
+        let fresh_path = dir.join("fresh.sqlite3");
+
+        // A v0.2 database: migration 1, and a status row somebody's history depends on.
+        let mut upgraded = Connection::open(&upgraded_path).expect("open the v0.2 database");
+        apply(&mut upgraded, &MIGRATIONS[..1], &upgraded_path).expect("apply v0.2's migration");
+        assert_eq!(schema_of(&upgraded).0, 1, "a v0.2 database is at version 1");
+        assert!(!table_exists(&upgraded, "projects"));
+        upgraded
+            .execute(
+                "INSERT INTO agent_status
+                     (pane, state, question, is_interrupt, session_boundary, agent_id,
+                      observed_at, restored_unconfirmed)
+                 VALUES ('tab1:leaf1', 'working', NULL, 0, 0, NULL, 1000, 0)",
+                [],
+            )
+            .expect("write a v0.2 row");
+
+        // The upgrade a daemon performs on its first start after this build lands.
+        apply(&mut upgraded, MIGRATIONS, &upgraded_path).expect("apply v0.3's migration");
+
+        let mut fresh = Connection::open(&fresh_path).expect("open the fresh database");
+        apply(&mut fresh, MIGRATIONS, &fresh_path).expect("apply both at once");
+
+        assert_eq!(
+            schema_of(&upgraded),
+            schema_of(&fresh),
+            "a v0.2 database brought forward must be indistinguishable from a fresh one"
+        );
+        assert!(table_exists(&upgraded, "projects"));
+        let kept: i64 = upgraded
+            .query_row("SELECT COUNT(*) FROM agent_status", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(kept, 1, "the upgrade must not cost a person their history");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn applying_the_list_twice_changes_nothing() {
         let (dir, path) = temp_db("migrate-twice");
         let mut conn = Connection::open(&path).expect("open");
