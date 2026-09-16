@@ -347,10 +347,12 @@ mod tests {
     /// caller's paths" — leaked by the message announcing the leak.
     ///
     /// [`provenance`] assembles the answer instead, out of three things that cannot carry a
-    /// path: a level out of a fixed vocabulary, a target, and `needle`, which every caller
-    /// takes from a const or from a marker this module composed. There is no prefix left to
-    /// grow, so a needle that matches late in a long line is no longer a long message; the one
-    /// piece that is not a fixed vocabulary is the target, and [`TARGET_CAP`] bounds it.
+    /// path: a level out of a fixed vocabulary, a target, and `needle`. `needle` is printed
+    /// back, so hand it a const or a marker this module composed and never a value read off
+    /// the machine — that is the one thing this helper asks of a caller in exchange. There is
+    /// no prefix left to grow, so a needle that matches late in a long line is no longer a
+    /// long message; the one piece that is not a fixed vocabulary is the target, and
+    /// [`TARGET_CAP`] bounds it.
     ///
     /// The tests whose text is only what the test itself logged — a sentinel through
     /// [`through`] — still print it, because that is a synthetic buffer of a few lines with
@@ -389,9 +391,9 @@ mod tests {
     /// How much of a target [`provenance`] will print.
     ///
     /// A target is a module path and the only part of an excerpt this module does not choose,
-    /// so it is the only part with a length to bound. 64 is past the longest this repo or its
-    /// terminal crates produce — `portable_pty::win::pseudocon` is 28 — which is what makes it
-    /// a guard against a line that is not shaped the way this expects rather than a trim.
+    /// so it is the only part with a length to bound. 64 leaves room over the targets these
+    /// tests actually read — `portable_pty::win::pseudocon` is 28 — which is what makes it a
+    /// guard against a line that is not shaped the way this expects rather than a trim.
     const TARGET_CAP: usize = 64;
 
     /// Where a line came from, in words that cannot carry what the line was carrying.
@@ -491,7 +493,7 @@ mod tests {
             (
                 "coloured",
                 format!(
-                    "2026-09-16T00:00:00.000000Z \u{1b}[31mERROR\u{1b}[0m \
+                    "\u{1b}[2m2026-09-16T00:00:00.000000Z\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m \
                      \u{1b}[2m{TARGET}\u{1b}[0m\u{1b}[2m:\u{1b}[0m {message}"
                 ),
             ),
@@ -524,9 +526,8 @@ mod tests {
         }
 
         // A line no subscriber wrote — the notes `filter` puts on stderr before one exists, and
-        // anything libtest prints. Every caller below reaches this arm only through a needle it
-        // asserted the *presence* of, so it is unreachable on a failing run; it still may not
-        // answer with the line.
+        // anything libtest prints. It has no level to name and so nothing to say, and what it
+        // may not do about that is answer with the line.
         let said = where_it_is(
             &format!("no level here, only {PLANTED} and {cwd}\n"),
             PLANTED,
