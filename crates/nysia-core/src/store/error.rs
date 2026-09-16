@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use nysia_proto::AgentError;
+use nysia_proto::{AgentError, ProjectError};
 
 /// Why a store operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -117,6 +117,24 @@ pub enum StoreError {
         /// What `nysia-proto` made of it.
         #[source]
         source: nysia_proto::IdentityError,
+    },
+    /// A project's id could not be derived from its path, or read back from the table.
+    ///
+    /// The path in the message is the **database's**, as it is in every variant above, and
+    /// never the repository's. A registered path names a person's disk (traps register
+    /// #13/#14) and `nysia-proto`'s project types carry none for that reason; this variant
+    /// does not reintroduce one. Its source cannot either: [`ProjectError::ProjectIdShape`]
+    /// echoes a stored id, which is a digest, and [`ProjectError::PathNotUnicode`] carries
+    /// nothing at all.
+    #[error("could not {action} the store at {}: {source}", path.display())]
+    Project {
+        /// What was being attempted.
+        action: &'static str,
+        /// Which database.
+        path: PathBuf,
+        /// What `nysia-proto` made of it.
+        #[source]
+        source: ProjectError,
     },
     /// A question payload could not be encoded to, or decoded from, its stored JSON.
     #[error("could not {action} a question payload for the store at {}: {source}", path.display())]

@@ -7,6 +7,9 @@ use std::path::PathBuf;
 
 use nysia_proto::{AgentState, AgentStatusRow, PaneKey, UnixMillis};
 
+use super::Registration;
+use crate::git::CanonicalPath;
+
 /// A directory of this test's own, and the database path inside it.
 ///
 /// Returns the directory too, so the caller can remove it: the `-wal` and `-shm` live beside
@@ -24,6 +27,27 @@ pub(super) fn temp_db(tag: &str) -> (PathBuf, PathBuf) {
     std::fs::create_dir_all(&dir).expect("create the test directory");
     let path = dir.join("nysia.sqlite3");
     (dir, path)
+}
+
+/// A real directory `name` inside `dir`, resolved the way a registration resolves one.
+///
+/// A [`CanonicalPath`] and not a `PathBuf` because that is what [`Registration`] takes, and
+/// it has to exist for the same reason: the type's whole guarantee is that the folder was
+/// there when it was resolved. Not a git repository — deciding that a folder *is* one
+/// belongs to `crate::git`, and the store is handed the answer rather than asking.
+pub(super) fn folder(dir: &std::path::Path, name: &str) -> CanonicalPath {
+    let at = dir.join(name);
+    std::fs::create_dir_all(&at).expect("create the folder");
+    CanonicalPath::of(&at).expect("resolve the folder")
+}
+
+/// A registration of `at`, under the name and group a caller would supply.
+pub(super) fn registration(at: &CanonicalPath, name: &str, group: &str) -> Registration {
+    Registration {
+        path: at.clone(),
+        name: name.to_owned(),
+        group: group.to_owned(),
+    }
 }
 
 /// The pane every fixture row belongs to.
