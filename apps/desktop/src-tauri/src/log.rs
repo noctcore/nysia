@@ -248,9 +248,10 @@ fn parsed(asked: &str) -> EnvFilter {
 /// Its own function so a test can build the writer [`install`] builds without calling
 /// `install`, and so `install` can write into it before `.init()` takes ownership.
 /// `.init()` installs a *global* subscriber and can happen once in a process, so `install`
-/// is reachable from one test and one process only — which is what `what_the_window_logged`
-/// re-execs this test binary for. A composition nothing exercises is exactly where a silent
-/// "the file stayed empty" would live.
+/// is reachable from one test and one process only — which is what
+/// `the_windows_runtime_branch_confines_unless_the_way_out_is_named` re-execs this test
+/// binary for. A composition nothing exercises is exactly where a silent "the file stayed
+/// empty" would live.
 fn sink(file: std::fs::File) -> impl for<'a> tracing_subscriber::fmt::MakeWriter<'a> + 'static {
     Arc::new(file).and(std::io::stderr)
 }
@@ -582,6 +583,48 @@ mod tests {
         let written = std::fs::read_to_string(path).expect("the window's log");
         let _ = std::fs::remove_dir_all(&runtime_dir);
         written
+    }
+
+    #[test]
+    fn the_windows_runtime_branch_confines_unless_the_way_out_is_named() {
+        // The line every other test in this module sits below. All of them call `confined` or
+        // `unconfined` directly, which is to say they have already decided which branch
+        // [`install`] takes — so all of them stayed green when `let lifted = …` was mutated
+        // to `let lifted = true`. This is the one that reddens.
+        //
+        // **Which leg exercises what.** Both legs run the same child, which calls the real
+        // `install` — the real environment, the real branch, the real `.init()`, the real
+        // file — and then raises one line on each confined target. One variable differs
+        // between them.
+        //
+        // The spelling is the second half of it, and it is the measured one. A `NYSIA_LOG`
+        // that names targets rather than a level leaves nothing matching this module's own
+        // path, so it is also the value under which the announcement used to be swallowed by
+        // the filter it was about. Both notes are asserted here for that reason: they are in
+        // the file, under a filter that enables nothing of this crate's.
+        let asked = "nysia_core=debug,vte::ansi=trace";
+
+        let lifted = what_the_window_logged(asked, true, "lifted");
+        assert!(
+            lifted.contains(SENTINEL),
+            "the way out let nothing out of the real window, so the confined leg below would \
+             hold for the wrong reason: {lifted}"
+        );
+        assert!(
+            lifted.contains(&log_file::unconfined_note()),
+            "the window never said its log had stopped being confined: {lifted}"
+        );
+
+        let held = what_the_window_logged(asked, false, "held");
+        assert!(
+            !held.contains(SENTINEL),
+            "the same value was honoured in a window nobody told to lift the confinement: \
+             {held}"
+        );
+        assert!(
+            held.contains(&log_file::refusal_note("vte::ansi=trace")),
+            "the window would not honour a directive and never said so: {held}"
+        );
     }
 
     #[test]
