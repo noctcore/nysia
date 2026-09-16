@@ -288,6 +288,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
     }
 
+    /// The wall-clock bound the silent-endpoint test holds the whole of [`run_at`] to.
+    ///
+    /// **A number rather than a multiple of [`CONFIRM_DEADLINE`], and that is the whole
+    /// point of it.** The guard was `CONFIRM_DEADLINE * 3`, which is derived from the
+    /// constant it was meant to bound: scaling the constant scaled the guard by the same
+    /// factor, so a deadline that had grown out of all proportion went on passing, one
+    /// factor slower each time. #96's merge review measured that — at twelve times the real
+    /// value the test still passed, in 60.01 s — and the commit that introduced the guard
+    /// claimed a mutation it could not have reddened.
+    ///
+    /// Written down, the guard stops moving, and what the test asserts stops being a ratio
+    /// and starts being a fact about the clock: a bind lost to something silent is answered
+    /// in under twenty seconds however [`CONFIRM_DEADLINE`] is set. A dial that genuinely
+    /// needs longer than this is a deliberate change to two numbers, one of them here.
+    const SILENCE_IS_ANSWERED_WITHIN: Duration = Duration::from_secs(20);
+
     /// An endpoint that accepts and never answers is neither of the other two words.
     ///
     /// #96's fourth finding, the half about the deadline. [`Client::connect`] awaits a
@@ -299,18 +315,26 @@ mod tests {
     /// shape on both legs: the connection completes into the backlog (Unix) or onto the idle
     /// pipe instance (Windows), the Hello is written, and no answer ever comes.
     ///
-    /// The whole call is wrapped in a deadline of its own, generously longer than the one
-    /// under test, so that removing the bound fails this test instead of hanging the suite.
+    /// The whole call is wrapped in [`SILENCE_IS_ANSWERED_WITHIN`], which is a literal and
+    /// not a multiple of the constant under test. So the guard fires two ways: deleting the
+    /// `timeout` in `confirm` hangs the call until it trips, and widening
+    /// [`CONFIRM_DEADLINE`] past that literal trips it as well.
     #[tokio::test]
     async fn a_bind_lost_to_something_that_never_answers_is_neither_running_nor_empty() {
         let endpoint = scratch("silent");
         // Holds the endpoint and serves nobody: no `accept`, so no handshake is ever read.
         let _silent = nysia_core::rpc::Listener::bind(&endpoint).expect("the fixture binds");
 
-        let outcome = tokio::time::timeout(CONFIRM_DEADLINE * 3, run_at(endpoint.clone(), true))
-            .await
-            .expect("the confirmation dial is bounded; unbounded, this never returns")
-            .expect("a taken endpoint is reported, not returned as an error");
+        let outcome = tokio::time::timeout(
+            SILENCE_IS_ANSWERED_WITHIN,
+            run_at(endpoint.clone(), true),
+        )
+        .await
+        .expect(
+            "the confirmation dial is bounded, and bounded by less than this: unbounded, or \
+             bounded by more, this does not return in time",
+        )
+        .expect("a taken endpoint is reported, not returned as an error");
         assert!(
             matches!(outcome, Outcome::Unanswered { .. }),
             "silence is not a daemon serving and not an empty endpoint; got {outcome:?}"
