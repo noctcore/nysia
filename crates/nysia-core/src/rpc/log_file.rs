@@ -312,10 +312,13 @@ pub fn screen_directives(asked: &str) -> Screened<'_> {
 ///
 /// One wording, so that the daemon and the window cannot come to explain the same refusal
 /// differently — which is how a reader decides that one of them must have meant something
-/// else. Where each process says it is each process's own business: `filter` in `nysia`'s
-/// `log` module writes it to stderr, which is that process's log; `install` in
-/// `nysia-desktop`'s writes it through `tracing` once there is a subscriber, because a
-/// packaged window has no stderr to write it to.
+/// else. Where each process says it is each process's own business, but **neither says it
+/// through `tracing`**: a line emitted through the filter it is about is a line that filter
+/// can drop, and a `NYSIA_LOG` naming targets rather than a level leaves it matching nothing
+/// in the module doing the announcing. `filter` in `nysia`'s `log` module writes it to
+/// stderr, which is that process's log; `install` in `nysia-desktop`'s writes it into the log
+/// file directly, before `.init()` takes the handle, because a packaged window has no stderr
+/// to write it to.
 ///
 /// It has to carry [`UNCONFINED_ENV`]'s name. A refusal with no way out in it leaves somebody
 /// holding a directive that silently does nothing, which is the state the screen is supposed
@@ -332,7 +335,9 @@ pub fn refusal_note(directive: &str) -> String {
 /// What to tell the reader when [`UNCONFINED_ENV`] is set.
 ///
 /// Said into the log it is about, before anything else is written there, so the file states
-/// what it is rather than leaving that to whoever finds it later.
+/// what it is rather than leaving that to whoever finds it later. Both callers write it from
+/// outside `tracing` to keep that true — see [`refusal_note`], which is said the same way and
+/// for the same reason.
 #[must_use]
 pub fn unconfined_note() -> String {
     format!(
