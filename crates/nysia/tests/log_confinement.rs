@@ -95,11 +95,33 @@ struct Run {
 ///
 /// Tagged and suffixed with the pid the way the unit tests' own scratch directories are, so
 /// two runs at the same time cannot read each other's marker.
-fn a_marked_directory(tag: &str) -> (String, PathBuf) {
+struct Marked {
+    /// The directory's own name, which is what gets planted in a session's values.
+    marker: String,
+    /// The directory itself.
+    dir: PathBuf,
+}
+
+/// Removed here rather than by a line at the foot of the test body, because that line does
+/// not run when an assertion panics — so the run that most wants looking at was also the one
+/// that left `ZZZ-LOGRULE-*` directories behind in the temp directory, and a guard that
+/// litters when it fails is a guard people stop running.
+///
+/// This closes the panic path and promises no more than that. The removal is still best
+/// effort: [`Nysiad::drop`] kills the daemon rather than waiting for it, and a pty's own
+/// child can outlive that kill still holding this directory as its working directory, which
+/// on Windows is enough to make `remove_dir_all` fail.
+impl Drop for Marked {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn a_marked_directory(tag: &str) -> Marked {
     let marker = format!("ZZZ-LOGRULE-{tag}-{}", std::process::id());
     let dir = std::env::temp_dir().join(&marker);
     let _ = std::fs::create_dir_all(&dir);
-    (marker, dir)
+    Marked { marker, dir }
 }
 
 /// The shell profile this machine can actually start.
@@ -327,11 +349,11 @@ fn the_shipped_binarys_log_is_confined_unless_the_way_out_is_named() {
     //
     // One difference between the two daemons: `NYSIA_LOG_UNCONFINED`. Same binary, same
     // `NYSIA_LOG`, same profile, same planted values, same file read the same way.
-    let (marker, dir) = a_marked_directory("lifted");
-    let leaked = what_leaks(&marker);
+    let plant = a_marked_directory("lifted");
+    let leaked = what_leaks(&plant.marker);
 
     let lifted = Nysiad::start("lifted", true);
-    open_a_session(&lifted, &dir);
+    open_a_session(&lifted, &plant.dir);
     let written = lifted.log_until(&leaked);
     assert!(
         written.contains(DAEMON_OWN_LINE),
@@ -344,14 +366,13 @@ fn the_shipped_binarys_log_is_confined_unless_the_way_out_is_named() {
         log_file::UNCONFINED_ENV
     );
     drop(lifted);
-    let _ = std::fs::remove_dir_all(&dir);
 
     // And with the way out removed, the same value in the same binary puts none of it there.
-    let (marker, dir) = a_marked_directory("held");
-    let leaked = what_leaks(&marker);
+    let plant = a_marked_directory("held");
+    let leaked = what_leaks(&plant.marker);
 
     let held = Nysiad::start("held", false);
-    open_a_session(&held, &dir);
+    open_a_session(&held, &plant.dir);
     let written = held.log_until(&leaked);
     assert!(
         written.contains(DAEMON_OWN_LINE),
@@ -363,5 +384,4 @@ fn the_shipped_binarys_log_is_confined_unless_the_way_out_is_named() {
         "NYSIA_LOG={ASKED} reached a confined crate in the shipped binary: {written}"
     );
     drop(held);
-    let _ = std::fs::remove_dir_all(&dir);
 }
