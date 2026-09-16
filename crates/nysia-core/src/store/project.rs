@@ -389,6 +389,22 @@ mod tests {
     use super::*;
     use crate::store::tests_support::{folder, registration, temp_db};
 
+    /// A second connection onto the same database, for the things a test has to assert about
+    /// the table rather than about the API — the same helper `status`'s tests keep.
+    fn raw(store: &Store) -> Connection {
+        Connection::open(store.path()).expect("open raw")
+    }
+
+    /// Every name in `projects`, in the order the store lists them.
+    fn names(store: &Store) -> Vec<String> {
+        store
+            .projects()
+            .expect("list")
+            .into_iter()
+            .map(|project| project.name)
+            .collect()
+    }
+
     #[test]
     fn a_project_reads_back_under_the_id_its_path_derives() {
         let (dir, path) = temp_db("project-roundtrip");
@@ -466,6 +482,370 @@ mod tests {
             1,
             "registering one folder twice must leave one project"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_folder_spelled_two_ways_is_still_one_project() {
+        // §3.2's trap: the same folder arrives spelled differently every time. `CanonicalPath`
+        // owns the resolving and `crate::git::path`'s tests own the spellings; what is under
+        // test here is that the store keys on the resolved answer rather than on the string it
+        // was handed. `.`-components and a trailing separator are the two spellings that mean
+        // the same folder on **both** platforms, so this is one test rather than two `cfg`s.
+        let (dir, path) = temp_db("project-spellings");
+        let store = Store::open(&path).expect("open");
+        let plain = folder(&dir, "nysia");
+        let roundabout =
+            CanonicalPath::of(dir.join("nysia").join(".").join("")).expect("resolve the folder");
+
+        let first = store
+            .register_project(&registration(&plain, "nysia", "Dev"))
+            .expect("register");
+        let again = store
+            .register_project(&registration(&roundabout, "nysia", "Dev"))
+            .expect("register the other spelling");
+
+        assert!(matches!(first, Registered::Created(_)));
+        assert!(
+            again.already_registered(),
+            "two spellings of one folder must be one project: {again:?}"
+        );
+        assert_eq!(store.projects().expect("list").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_daemons_racing_one_registration_create_one_project() {
+        // The question §3.2 leaves open: two daemons — or a daemon and the CLI beside it —
+        // register the same folder in the same millisecond. Two `Store`s on one file is two
+        // connections, which is what WAL is for.
+        //
+        // Exactly one `Created` is the assertion, not "all four succeeded". A check-then-write
+        // under a *deferred* transaction also succeeds four times on a good day and fails with
+        // a constraint violation on a bad one; counting the creations is what tells the write
+        // lock was held across both halves.
+        let (dir, path) = temp_db("project-race");
+        Store::open(&path).expect("create the schema first");
+        let at = folder(&dir, "nysia");
+
+        let created = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let path = &path;
+                    let at = &at;
+                    scope.spawn(move || {
+                        let store = Store::open(path).expect("open");
+                        store
+                            .register_project(&registration(at, "nysia", "Dev"))
+                            .expect("a contended registration must not fail")
+                            .already_registered()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("thread"))
+                .filter(|already_registered| !already_registered)
+                .count()
+        });
+
+        assert_eq!(
+            created, 1,
+            "exactly one of four racing registrations creates the project"
+        );
+        let store = Store::open(&path).expect("reopen");
+        assert_eq!(store.projects().expect("list").len(), 1);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_projects_table_refuses_a_duplicate_id() {
+        // The constraint is in the schema and not only in `register_project`. Asserted
+        // through a raw connection because the API has no way to ask for the second row —
+        // which is the point: this is what stops a later migration, or a repair script,
+        // making two projects of one folder.
+        let (dir, path) = temp_db("project-unique");
+        let store = Store::open(&path).expect("open");
+        let at = folder(&dir, "nysia");
+        let id = store
+            .register_project(&registration(&at, "nysia", "Dev"))
+            .expect("register")
+            .into_project()
+            .id;
+
+        let conn = raw(&store);
+        let error = conn
+            .execute(
+                r#"INSERT INTO projects (id, path, name, "group") VALUES (?1, ?2, ?3, ?4)"#,
+                rusqlite::params![id.as_str(), "/elsewhere", "another", "Dev"],
+            )
+            .expect_err("a second row under one id is refused");
+        assert!(
+            matches!(
+                &error,
+                rusqlite::Error::SqliteFailure(failure, _)
+                    if failure.code == rusqlite::ErrorCode::ConstraintViolation
+            ),
+            "the refusal must be the UNIQUE constraint, not something else: {error}"
+        );
+        assert_eq!(store.projects().expect("list").len(), 1);
+        drop(conn);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_name_or_group_carries_whatever_a_folder_name_can() {
+        // A project's name starts as a folder's name, and a folder's name is whatever the
+        // filesystem allowed. The SQL-shaped one is the load-bearing fixture: it is what
+        // fails if the values are ever formatted into the statement instead of bound, and
+        // the assertion that the table is still there afterwards is what says so out loud.
+        let (dir, path) = temp_db("project-names");
+        let store = Store::open(&path).expect("open");
+        let hostile = [
+            ("'); DROP TABLE projects; --", "Dev"),
+            ("zażółć gęślą jaźń 🦀🎛️", "Grupa · Ω"),
+            ("a", &"very ".repeat(1024)),
+            ("\"quoted\"", "with a ' apostrophe"),
+        ];
+
+        for (index, (name, group)) in hostile.iter().enumerate() {
+            let at = folder(&dir, &format!("repo-{index}"));
+            let stored = store
+                .register_project(&registration(&at, name, group))
+                .expect("register")
+                .into_project();
+            assert_eq!(stored.name, *name);
+            assert_eq!(stored.group, *group);
+            assert_eq!(
+                store.project(&stored.id).expect("get"),
+                Some(stored),
+                "a name survives the round trip whatever is in it"
+            );
+        }
+        assert_eq!(
+            store.projects().expect("list").len(),
+            hostile.len(),
+            "the table is still there, with every row in it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_project_list_is_in_registration_order() {
+        // Registration order, which is not alphabetical and not by id. Names chosen so the
+        // three orders differ: sorting by name would give `alpha, mid, zulu` and this asks
+        // for the order they arrived in.
+        let (dir, path) = temp_db("project-order");
+        let store = Store::open(&path).expect("open");
+        for (index, name) in ["zulu", "alpha", "mid"].iter().enumerate() {
+            let at = folder(&dir, &format!("repo-{index}"));
+            store
+                .register_project(&registration(&at, name, "Dev"))
+                .expect("register");
+        }
+        assert_eq!(names(&store), ["zulu", "alpha", "mid"]);
+
+        // And forgetting one puts it back at the end rather than back where it was, which is
+        // where the dialog just put it.
+        let second = store.projects().expect("list")[1].clone();
+        assert_eq!(
+            store.forget_project(&second.id).expect("forget"),
+            Forgotten::Removed
+        );
+        store
+            .register_project(&registration(
+                &CanonicalPath::of(&second.path).expect("the folder is still there"),
+                "alpha",
+                "Dev",
+            ))
+            .expect("register again");
+        assert_eq!(names(&store), ["zulu", "mid", "alpha"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forgetting_a_project_removes_only_its_registration() {
+        let (dir, path) = temp_db("project-forget");
+        let store = Store::open(&path).expect("open");
+        let kept = store
+            .register_project(&registration(&folder(&dir, "kept"), "kept", "Dev"))
+            .expect("register")
+            .into_project();
+        let going = store
+            .register_project(&registration(&folder(&dir, "going"), "going", "Dev"))
+            .expect("register")
+            .into_project();
+        // A neighbouring table with rows in it, so "only its registration" is a claim about
+        // the database rather than about one table.
+        store
+            .record_status(&crate::store::tests_support::row(
+                crate::store::tests_support::pane(),
+                1_000,
+            ))
+            .expect("record a status");
+
+        assert_eq!(
+            store.forget_project(&going.id).expect("forget"),
+            Forgotten::Removed
+        );
+        assert_eq!(store.projects().expect("list"), vec![kept]);
+        assert_eq!(store.project(&going.id).expect("get"), None);
+        assert_eq!(
+            store
+                .status_history(&crate::store::tests_support::pane(), None)
+                .expect("history")
+                .len(),
+            1,
+            "forgetting a project must not reach another table"
+        );
+        // And the folder itself is untouched: Nysia does not own it (§3.1).
+        assert!(
+            going.path.is_dir(),
+            "forgetting a project must not touch what is on disk"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forgetting_an_unknown_project_says_so() {
+        // `ProjectForget`'s contract is `UnknownProject` rather than a quiet success, and the
+        // daemon has nothing to build that from if the store reports `Removed` for a typo.
+        let (dir, path) = temp_db("project-forget-unknown");
+        let store = Store::open(&path).expect("open");
+        let registered = store
+            .register_project(&registration(&folder(&dir, "nysia"), "nysia", "Dev"))
+            .expect("register")
+            .into_project();
+        let stranger =
+            ProjectId::from_canonical_path(&folder(&dir, "other").as_path().join("nope"))
+                .expect("a temp path is Unicode");
+
+        assert_eq!(
+            store.forget_project(&stranger).expect("forget"),
+            Forgotten::Unknown
+        );
+        assert_eq!(
+            store.projects().expect("list"),
+            vec![registered],
+            "an unknown id must remove nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nothing_cascades_from_forgetting_a_project() {
+        // The forward guard for the decision the module docs make. Today there is no table
+        // that could reference `projects`, so this passes trivially — and that is exactly
+        // when it is worth writing, because the day a sessions or worktrees table lands with
+        // `REFERENCES projects(id) ON DELETE CASCADE` on it, dropping session rows because
+        // somebody tidied their sidebar becomes a decision made in front of this test rather
+        // than one inherited from a schema.
+        //
+        // Every table, not `projects`' own foreign keys: a cascade *from* projects would be
+        // declared on the referencing table, so asking `projects` would be asking the wrong
+        // end.
+        let (dir, path) = temp_db("project-no-cascade");
+        let store = Store::open(&path).expect("open");
+        let conn = raw(&store);
+
+        let tables: Vec<String> = {
+            let mut statement = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+                .expect("prepare");
+            statement
+                .query_map([], |row| row.get(0))
+                .expect("query")
+                .collect::<Result<_, _>>()
+                .expect("names")
+        };
+        assert!(
+            tables.iter().any(|name| name == "projects"),
+            "the scan below proves nothing if it found no tables: {tables:?}"
+        );
+
+        for table in &tables {
+            // `PRAGMA foreign_key_list` takes no bound parameter, and every name here came
+            // out of `sqlite_master` in this same database.
+            let mut statement = conn
+                .prepare(&format!(r#"PRAGMA foreign_key_list("{table}")"#))
+                .expect("prepare");
+            let referenced: Vec<String> = statement
+                .query_map([], |row| row.get(2))
+                .expect("query")
+                .collect::<Result<_, _>>()
+                .expect("references");
+            assert!(
+                !referenced.iter().any(|name| name == "projects"),
+                "{table} references projects, so forgetting one now cascades: {referenced:?}"
+            );
+        }
+        drop(conn);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_table_has_the_three_stored_fields_of_the_contract_and_two_keys() {
+        // A stated total is a fact about the list beneath it. §3.1 names four fields; three
+        // of them are stored, `worktrees` is composed live, and `path` is the one column the
+        // wire does not carry. `seq` orders and `id` identifies.
+        let (dir, path) = temp_db("project-columns");
+        let store = Store::open(&path).expect("open");
+        let conn = raw(&store);
+        let mut statement = conn
+            .prepare("PRAGMA table_info(projects)")
+            .expect("prepare");
+        let columns: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("names");
+
+        let columns: Vec<&str> = columns.iter().map(String::as_str).collect();
+        assert_eq!(
+            columns,
+            ["seq", "id", "path", "name", "group"],
+            "the ordering key, the identity, the path, and §3.1's two labels — spelled as the \
+             wire spells them"
+        );
+        assert_eq!(columns.len(), 5, "five is the total, and this is the list");
+        drop(statement);
+        drop(conn);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_id_this_build_cannot_read_is_an_error() {
+        // A row this code would never write, present anyway — a database from a build that
+        // spelled ids differently, or one somebody edited. Refused rather than returned as
+        // a project with a nonsense id.
+        let (dir, path) = temp_db("project-bad-id");
+        let store = Store::open(&path).expect("open");
+        store
+            .register_project(&registration(&folder(&dir, "nysia"), "nysia", "Dev"))
+            .expect("register");
+        raw(&store)
+            .execute("UPDATE projects SET id = 'proj_nope'", [])
+            .expect("plant the row");
+
+        let error = store.projects().expect_err("an unreadable id is refused");
+        assert!(
+            matches!(&error, StoreError::Project { source, .. }
+                if matches!(source, nysia_proto::ProjectError::ProjectIdShape(value)
+                    if value == "proj_nope")),
+            "unexpected error: {error}"
+        );
+        // And the message names the database rather than the repository, which is the half
+        // trap 14 cares about.
+        let message = error.to_string();
+        assert!(
+            message.contains(&path.display().to_string()),
+            "the error should name the database it failed in: {message}"
+        );
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
