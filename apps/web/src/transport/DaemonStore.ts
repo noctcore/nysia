@@ -481,8 +481,16 @@ export class DaemonStore implements Store {
     if (project === null) {
       throw this.fail('startTask', 'No project is selected, so there is nowhere to start it.');
     }
+    // A refusal rather than a resolve. `store/storeContract.ts` requires this verb to start or
+    // to reject, and resolving here left `taskStart` on `starting` — the one shape it forbids,
+    // because a caller that saw a resolved promise and a spinning row would have no way to
+    // tell the two apart. The UI disables every other `Start →` while one runs, so this is
+    // reachable only by a caller that is not the table, which is precisely who needs telling.
     if (this.#snapshot.taskStart.phase === 'starting') {
-      return;
+      throw this.fail(
+        'startTask',
+        'A task is already starting. Wait for its worktree before starting another.',
+      );
     }
 
     const branch = branchForIssue(issue);
