@@ -55,12 +55,24 @@ async fn main() -> ExitCode {
             Ok(daemon::Outcome::Retired) => ExitCode::SUCCESS,
             Ok(daemon::Outcome::AlreadyRunning { endpoint }) => {
                 // Losing the race is not a failure. What this process was started to
-                // guarantee — that a daemon is listening there — is true.
+                // guarantee — that a daemon is listening there — is true, and `daemon::run`
+                // established it by dialling rather than by reading it off a bind error.
                 let _ = writeln!(
                     std::io::stderr(),
                     "a daemon is already listening on {endpoint}; leaving it alone"
                 );
                 ExitCode::SUCCESS
+            }
+            Ok(daemon::Outcome::NotListening { endpoint }) => {
+                // The endpoint was taken, nothing answers on it, and this process is not
+                // going to serve either. Exiting zero here is the one lie a supervisor cannot
+                // recover from: it would wait for a daemon that nobody is going to start.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "{endpoint} could not be bound and nothing is listening on it; remove \
+                     whatever is at that path, or set NYSIA_RUNTIME_DIR to a directory you own"
+                );
+                ExitCode::from(EXIT_FAILED)
             }
             Err(err) => {
                 let _ = writeln!(std::io::stderr(), "nysiad could not start: {err}");
