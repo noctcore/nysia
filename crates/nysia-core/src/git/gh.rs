@@ -376,8 +376,9 @@ const _: () = SCRUB_IS_CREDENTIAL_FREE;
 ///
 /// **Carries none of gh's own text**, which is the whole of trap 14 here: gh's stderr names
 /// repositories and URLs, and this type is what a refusal is built from. Each variant is a
-/// state the daemon has its own words for; the measured text that produced it goes to the log
-/// and no further.
+/// state the daemon has its own words for, and the text that produced it goes **nowhere** —
+/// not into an envelope and not into a log line either. See the module documentation for why
+/// the stricter of those two is the rule, and what it costs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GhFailure {
     /// `gh` is not installed, or not on this process's `PATH`.
