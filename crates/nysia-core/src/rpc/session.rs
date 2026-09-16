@@ -37,6 +37,7 @@ use nysia_proto::{
     ShellProfile as WireProfile, TerminalReadResult, TerminalSend, WaitFor, WaitOutcome,
 };
 
+use crate::git::CanonicalPath;
 use crate::pty::{DEFAULT_GRACE, Output, PtyOutput, PtySession, SessionSpec, ShellProfile};
 use crate::rpc::errors::{IntoEnvelope, envelope};
 use crate::rpc::stream::{SendOutcome, StreamSink};
@@ -199,6 +200,14 @@ pub struct OwnedSession {
     kind: SessionKind,
     title: String,
     created_at_ms: u64,
+    /// The folder this session is running in, in the spelling the project verbs compare.
+    ///
+    /// `None` for a session that was started with no `cwd`, which inherits the daemon's own
+    /// and therefore belongs to no worktree in particular. Resolved once, here, rather than
+    /// per `project_list`: attribution asks "is this session inside that worktree" for every
+    /// session of every project, and canonicalising on that path would put one blocking
+    /// `stat` per session behind a verb the sidebar waits on.
+    cwd: Option<CanonicalPath>,
     pty: Arc<PtySession>,
     vt: Arc<Mutex<TerminalState>>,
     sinks: Arc<Mutex<Vec<Arc<StreamSink>>>>,
@@ -234,6 +243,17 @@ impl OwnedSession {
     #[must_use]
     pub fn incarnation(&self) -> &Incarnation {
         &self.incarnation
+    }
+
+    /// The folder this session was started in, resolved.
+    ///
+    /// `None` when it was started without one. It is **where the session started**, not where
+    /// the shell is now: a person who types `cd` moves the shell and not this, and following
+    /// them would mean the sidebar lost a session out of its worktree the moment they looked
+    /// somewhere else.
+    #[must_use]
+    pub fn cwd(&self) -> Option<&CanonicalPath> {
+        self.cwd.as_ref()
     }
 
     /// The session leader's pid, which is where §3.2's ancestry walk ends.
@@ -641,9 +661,18 @@ impl SessionRegistry {
         let title = profile.label();
         let size = TerminalSize::new(request.cols, request.rows);
         let mut spec = SessionSpec::new(profile).with_size(size);
-        if let Some(cwd) = confine_cwd(request.cwd.as_ref())? {
+        let confined = confine_cwd(request.cwd.as_ref())?;
+        if let Some(cwd) = confined.clone() {
             spec = spec.with_cwd(cwd);
         }
+        // Resolved a second time rather than reusing `confined`, and the difference is one
+        // Windows prefix. `confine_cwd` hands back what `fs::canonicalize` returned, which is
+        // `\\?\C:\…`; `CanonicalPath` strips that, and it is the spelling `git` prints and
+        // the project verbs compare. Two paths for one folder that never compare equal would
+        // put every session under no worktree at all, on one platform only.
+        let cwd = confined
+            .as_deref()
+            .and_then(|path| CanonicalPath::of(path).ok());
         for (key, value) in &request.env_overrides {
             // `with_env`, never `with_env_overriding_the_scrub`: the scrub runs after this,
             // so a caller cannot reintroduce `ANTHROPIC_API_KEY` or a
@@ -669,6 +698,7 @@ impl SessionRegistry {
             kind: request.kind,
             title,
             created_at_ms: now_ms(),
+            cwd,
             pty: Arc::new(pty),
             vt: Arc::new(Mutex::new(TerminalState::new(size, VtConfig::default()))),
             sinks: Arc::new(Mutex::new(Vec::new())),
@@ -697,6 +727,26 @@ impl SessionRegistry {
     pub fn list(&self) -> Vec<SessionSummary> {
         lock(&self.sessions)
             .values()
+            .map(|session| session.summary())
+            .collect()
+    }
+
+    /// The sessions running inside `folder`, as the sidebar lists them under a worktree.
+    ///
+    /// Containment rather than equality, which is [`CanonicalPath::contains`]'s own rule and
+    /// the same one [`crate::git::Repository`] uses to decide which worktree a registered
+    /// folder is in: a session started in `…/repo/crates/core` belongs to the worktree at
+    /// `…/repo`. A session with no `cwd` belongs to no worktree — it inherited the daemon's,
+    /// which is nobody's project.
+    ///
+    /// **Nested worktrees would double-count**, and this does not guard against it: git
+    /// refuses to place a worktree inside another's working tree, so a session can be inside
+    /// at most one of a repository's worktrees.
+    #[must_use]
+    pub fn summaries_under(&self, folder: &CanonicalPath) -> Vec<SessionSummary> {
+        lock(&self.sessions)
+            .values()
+            .filter(|session| session.cwd().is_some_and(|cwd| folder.contains(cwd)))
             .map(|session| session.summary())
             .collect()
     }
