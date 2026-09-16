@@ -37,14 +37,49 @@
 //! `gh_unauthenticated` and collapsing 1 into `query_failed` puts an expired token under the
 //! wrong heading, which is the lie this module exists to avoid.
 //!
-//! ## So the 401 is matched as a string, deliberately
+//! ## So the 401 is matched as a string, deliberately — on one line, not on the stream
 //!
-//! [`classify`] reads gh's stderr for `HTTP 401`. That is a string match on another program's
-//! output and it is worth being plain about what it costs: **if gh rewords that line, an
-//! expired token silently becomes `query_failed`** — one heading less specific, carrying gh's
-//! own sentence, rather than a wrong one. `an_expired_token_is_told_apart_from_being_offline`
+//! [`classify_stderr`] reads gh's stderr for `HTTP 401`. That is a string match on another
+//! program's output and it is worth being plain about what it costs: **if gh rewords that
+//! line, an expired token silently becomes `query_failed`** — one heading less specific than
+//! the truth, rather than a wrong one. `an_expired_token_is_told_apart_from_being_offline`
 //! pins the measured text so the day it changes is a red test rather than a quiet
 //! regression.
+//!
+//! **Which line is read is the security half of that sentence.** The first draft searched the
+//! whole stream with `contains`, and a repository's own `.git/config` is enough to defeat
+//! that. Measured against gh 2.97.0 in a scratch repository:
+//!
+//! ```text
+//! $ git remote set-url origin https://github.com/Shironex/HTTP%20401.git
+//! $ gh issue list
+//! GraphQL: Could not resolve to a Repository with the name 'Shironex/HTTP 401'. (repository)
+//! ```
+//!
+//! gh percent-decodes the remote, so a repository's *name* lands inside gh's own sentence.
+//! Searching the stream for it tells a **signed-in** user that the CLI has no credentials and
+//! to run `gh auth login` — **non-retryable** — when the real fault is a repository that does
+//! not exist. `.git/config` is writable by an agent Nysia itself launched, which is this
+//! project's own threat model (§7.5), so this is reachable rather than theoretical.
+//!
+//! Anchoring on the start of *a* line does not shut it, and that was measured too:
+//!
+//! ```text
+//! $ git remote set-url origin https://github.com/Shironex/x%0AHTTP%20401:%20Bad%20credentials.git
+//! $ gh issue list
+//! GraphQL: Could not resolve to a Repository with the name 'Shironex/x
+//! HTTP 401: Bad credentials'. (repository)
+//! ```
+//!
+//! `%0A` decodes too, so the name carries its own newline and the injected text *is* the
+//! start of a line. What holds is **gh's first line only**: the name it quotes back can only
+//! appear after `GraphQL: Could not resolve …`, so every byte a repository controls is on the
+//! second line or later.
+//!
+//! The same channel reached all three `no_repository` sentences — a repository genuinely
+//! named `no git remotes found` was given that heading, which is retryable turned off and the
+//! wrong advice printed — so all four matches are anchored the same way and
+//! `a_repository_named_after_ghs_own_errors_does_not_get_their_heading` pins each.
 //!
 //! The alternative was `gh auth status`, one extra spawn on the failure path, and it was
 //! **measured and rejected**. Against an unreachable host it exits non-zero and reports
@@ -517,26 +552,40 @@ fn classify(finished: &Finished) -> Option<GhFailure> {
 /// Which failure gh's stderr describes.
 ///
 /// Split out so the string matching is in one place, visible, and testable without a process.
-/// See the module documentation for why a string match is the right instrument here and what
-/// it costs when gh rewords a line: one heading less specific, never a wrong one.
+/// See the module documentation for why a string match is the right instrument here, why it
+/// reads **only gh's first line**, and what it costs when gh rewords one: one heading less
+/// specific, never a wrong one.
 fn classify_stderr(stderr: &str) -> GhFailure {
-    // **A token that was rejected.** The measured line is
-    // `HTTP 401: Bad credentials (https://api.github.com/graphql)`. An HTTP status can only
-    // come from a response, so this cannot fire when the host was never reached — which is
-    // exactly the confusion `gh auth status` would have introduced.
+    // **gh's own first line, and nothing after it.** Every match below is a prefix of this
+    // one line rather than a search of the whole stream, because the rest of the stream is
+    // not all gh's: a failed lookup quotes the repository's name back, that name comes out of
+    // `.git/config`, and `.git/config` is a file an agent Nysia launched can write. The two
+    // measured spoofs this shuts are in the module documentation, and both of them defeat a
+    // `contains` — one of them defeats a start-of-any-line match as well.
+    let reported = stderr.lines().next().unwrap_or_default().trim_end();
+
+    // **A token that was rejected.** Measured byte for byte:
+    // `HTTP 401: Bad credentials (https://api.github.com/graphql)`, then a second line
+    // suggesting `gh auth login`. gh writes its HTTP status as the opening of its first line,
+    // which is what makes a prefix the right shape here. An HTTP status can only come from a
+    // response, so this cannot fire when the host was never reached — exactly the confusion
+    // `gh auth status` would have introduced.
     //
     // 403 is deliberately absent: it is mostly a rate limit, which is retryable and belongs
     // under a failed query, not under "sign in again".
-    if stderr.contains("HTTP 401") {
+    if reported.starts_with("HTTP 401") {
         return GhFailure::Unauthenticated;
     }
 
     // **Not a repository gh can ask about.** Three different sentences for one state, and
     // each is a thing a person really does: a folder that was never `git init`ed, a
-    // repository that was never pushed, and one whose remote is not GitHub.
-    if stderr.contains("not a git repository")
-        || stderr.contains("no git remotes found")
-        || stderr.contains("point to a known GitHub host")
+    // repository that was never pushed, and one whose remote is not GitHub. Each prefix is
+    // the measured line's own opening, and the first is deliberately longer than it needs to
+    // be to match: `failed to run git:` alone is every way git can fail, and a repository
+    // with a bad `include` in its config fails that way without being this.
+    if reported.starts_with("failed to run git: fatal: not a git repository")
+        || reported.starts_with("no git remotes found")
+        || reported.starts_with("none of the git remotes configured")
     {
         return GhFailure::NoRepository;
     }
@@ -602,6 +651,72 @@ mod tests {
             )),
             Some(GhFailure::QueryFailed),
             "an unreachable host must not read as a credential problem"
+        );
+    }
+
+    #[test]
+    fn a_repository_named_after_ghs_own_errors_does_not_get_their_heading() {
+        // **The negative half of the match**, and the reason it is a prefix of one line
+        // rather than a `contains` over the stream. gh percent-decodes the remote out of
+        // `.git/config` and quotes the repository's name back inside its own sentence, so a
+        // name chosen to look like one of gh's error lines is a name that steers this
+        // classifier — and `.git/config` is writable by an agent Nysia itself launched, which
+        // is this project's threat model rather than a hypothetical one.
+        //
+        // Every fixture is measured against gh 2.97.0, from a scratch repository:
+        //
+        //     git remote set-url origin https://github.com/Shironex/HTTP%20401.git
+        //     gh issue list
+        //
+        // Each must come out a *failed query*, because a repository that does not exist is
+        // exactly that — and must not take the heading its name is impersonating. The first
+        // of these is the worst of them: it tells a signed-in user to run `gh auth login`,
+        // and `gh_unauthenticated` is not retryable, so the screen has no way back.
+        for (name, stderr, impersonated) in [
+            (
+                "HTTP 401",
+                "GraphQL: Could not resolve to a Repository with the name \
+                 'Shironex/HTTP 401'. (repository)",
+                GhFailure::Unauthenticated,
+            ),
+            (
+                "no git remotes found",
+                "GraphQL: Could not resolve to a Repository with the name \
+                 'Shironex/no git remotes found'. (repository)",
+                GhFailure::NoRepository,
+            ),
+            (
+                "not a git repository",
+                "GraphQL: Could not resolve to a Repository with the name \
+                 'Shironex/not a git repository'. (repository)",
+                GhFailure::NoRepository,
+            ),
+        ] {
+            let got = classify(&ended(1, stderr));
+            assert_ne!(
+                got,
+                Some(impersonated),
+                "a repository named `{name}` was given that name's heading"
+            );
+            assert_eq!(
+                got,
+                Some(GhFailure::QueryFailed),
+                "a repository that does not exist is a failed query, whatever it is called"
+            );
+        }
+
+        // **And this is why the anchor is gh's first line and not the start of any line.**
+        // `%0A` decodes too, so a name can carry its own newline and the text it smuggles
+        // begins a line of its own. Measured from
+        // `https://github.com/Shironex/x%0AHTTP%20401:%20Bad%20credentials.git`:
+        assert_eq!(
+            classify(&ended(
+                1,
+                "GraphQL: Could not resolve to a Repository with the name 'Shironex/x\n\
+                 HTTP 401: Bad credentials'. (repository)"
+            )),
+            Some(GhFailure::QueryFailed),
+            "a repository name carrying a newline must not reach the match either"
         );
     }
 
