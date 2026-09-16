@@ -70,10 +70,18 @@ describe('the empty screens', () => {
     expect(tasksNotice(unavailable('query_failed'))?.tone).toBe('failed');
   });
 
-  it('shows no notice while there is a table, or while one is being fetched', () => {
+  it('shows no notice when there is a table to show', () => {
     expect(tasksNotice({ phase: 'loaded', issues: [AN_ISSUE] })).toBeNull();
-    expect(tasksNotice({ phase: 'loading' })).toBeNull();
-    expect(tasksNotice({ phase: 'idle' })).toBeNull();
+  });
+
+  it('says a query is running rather than leaving the screen blank', () => {
+    // Not one of the four, and not a lie either — but returning `null` here left a bare
+    // header over empty space for the length of a round trip, which is the one state on this
+    // screen where a user genuinely cannot tell whether anything is happening.
+    expect(tasksNotice({ phase: 'loading' })?.heading).toBe('Asking GitHub…');
+    expect(tasksNotice({ phase: 'idle' })?.heading).toBe('Asking GitHub…');
+    // Toned `empty`: a query in flight is not an event and not a fault.
+    expect(tasksNotice({ phase: 'loading' })?.tone).toBe('empty');
   });
 });
 

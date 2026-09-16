@@ -21,11 +21,14 @@ export type StoreCommandName =
   | 'openTab'
   | 'addProject'
   | 'dismissAddProject'
-  // `refreshTasks` is absent on purpose, and it is the one omission here worth a line.
-  // Every ending of a task query is an *answer* that belongs on the Tasks screen — including
-  // the three refusals, which are the whole point of that screen — so it has no failure a
-  // notice could name. `startTask` is the opposite: somebody pressed a button, and a worktree
-  // that could not be created has to reach them wherever they are looking.
+  // Both, even though only one of them can fail. Every ending of a task query is an *answer*
+  // that belongs on the Tasks screen — including the three refusals, which are the whole
+  // point of that screen — so `refreshTasks` is documented never to reject, and it was left
+  // off this list for that reason. That was a step too far: `reportUnexpectedFailure` exists
+  // precisely for a provider that breaks such a promise, and with no name of its own the
+  // notice was labelled `startTask` — telling a user the wrong verb about a failure that is
+  // already a surprise. A name costs nothing; a wrong name costs somebody an hour.
+  | 'refreshTasks'
   | 'startTask'
   | 'dismissError'
   | 'window.minimize'

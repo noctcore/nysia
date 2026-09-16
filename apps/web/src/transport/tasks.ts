@@ -59,7 +59,19 @@ export function readIssues(answer: unknown): readonly Issue[] {
   if (!Array.isArray(answer)) {
     throw malformed('tasks_list', 'something that is not a list of issues');
   }
-  return answer.map((row, index) => readIssue(row, index));
+  const issues = answer.map((row, index) => readIssue(row, index));
+
+  // **Two rows with one number is refused, and this is load-bearing rather than tidy.** The
+  // entire argument that a derived branch name is unique is that an issue number is unique
+  // within a repository (`tasks/branchName.ts`); two rows sharing one would be two `Start →`
+  // buttons asking for the same worktree, and the table would key two React rows alike. GitHub
+  // cannot produce it, so meeting it means the answer is not what this module thinks it is —
+  // which is exactly what this function exists to notice.
+  const numbers = new Set(issues.map((issue) => issue.number));
+  if (numbers.size !== issues.length) {
+    throw malformed('tasks_list', 'two issues sharing one number');
+  }
+  return issues;
 }
 
 function readIssue(row: unknown, index: number): Issue {
@@ -104,18 +116,21 @@ function readLabels(labels: unknown): readonly string[] {
   if (!Array.isArray(labels)) {
     return [];
   }
-  const names: string[] = [];
+  // A `Set`, so a repeated name is one pill rather than two React children under one key.
+  // Unlike a repeated issue number this is not worth refusing a list over — a duplicate label
+  // says nothing about whether the rest of the answer is trustworthy.
+  const names = new Set<string>();
   for (const label of labels) {
     if (typeof label === 'string') {
-      names.push(label);
+      names.add(label);
       continue;
     }
     const name = asRecord(label)?.name;
     if (typeof name === 'string') {
-      names.push(name);
+      names.add(name);
     }
   }
-  return names;
+  return [...names];
 }
 
 /**

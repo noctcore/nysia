@@ -102,14 +102,11 @@ export function routeCommands(store: Store): StoreCommands {
     addProject: (onSettled) => runCommand('addProject', store.addProject(), onSettled),
     dismissAddProject: (onSettled) =>
       runCommand('dismissAddProject', store.dismissAddProject(), onSettled),
-    // `refreshTasks` is routed as `startTask` because `StoreCommandName` has no name for it,
-    // and it has none because it cannot fail — see `errors.ts`. The name is only ever used to
-    // label a notice, and the only way one appears here is `reportUnexpectedFailure`, which
-    // means a provider broke its contract and rejected something that was documented never
-    // to. Labelling that `startTask` is the closest true thing: it is the Tasks screen, and
-    // the alternative is a `StoreCommandName` member that exists for a notice nobody should
-    // ever see.
-    refreshTasks: (onSettled) => runCommand('startTask', store.refreshTasks(), onSettled),
+    // Under its own name, though it is documented never to reject. The only notice it can
+    // produce comes from `reportUnexpectedFailure` — a provider that broke that promise — and
+    // naming that one `startTask` would tell the user the wrong verb about a failure that is
+    // already a surprise.
+    refreshTasks: (onSettled) => runCommand('refreshTasks', store.refreshTasks(), onSettled),
     startTask: (issue, onSettled) =>
       runCommand('startTask', store.startTask(issue), onSettled),
     dismissError: (id, onSettled) =>

@@ -139,7 +139,11 @@ export function tasksNotice(state: TasksState): TasksNotice | null {
   switch (state.phase) {
     case 'idle':
     case 'loading':
-      return null;
+      // A panel of its own rather than `null`. Returning nothing left the screen showing a
+      // bare header over empty space for the length of a round trip — not a lie, but not an
+      // answer either, and the one state on this screen where the user genuinely cannot tell
+      // whether anything is happening.
+      return { heading: 'Asking GitHub…', tone: 'empty' };
     case 'loaded':
       return state.issues.length === 0
         ? { heading: 'No open issues', tone: 'empty' }
