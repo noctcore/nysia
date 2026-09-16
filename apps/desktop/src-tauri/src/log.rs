@@ -42,11 +42,19 @@
 //! the webview can reach takes a name from a closed list and two numbers.
 //!
 //! The rule binds the crates this process links as well as the code it writes, so
-//! [`log_file::CONFINED_TARGETS`] is layered over whatever `NYSIA_LOG` asked for. Under D-7
-//! the terminal state lives in the daemon and this process runs no VT, so nothing here is
-//! expected to reach those targets — the list is applied anyway, because "this binary happens
-//! not to call it today" is the kind of premise that stops being true without anybody
-//! noticing, and the whole point of the rule is that it does not depend on remembering.
+//! [`log_file::CONFINED_TARGETS`] is layered over whatever `NYSIA_LOG` asked for. Under D-1
+//! and D-7 the terminal state and the PTYs both live in the daemon, so this process runs no VT
+//! and opens no pty, and nothing here is expected to reach any of those targets — the list is
+//! applied anyway, because "this binary happens not to call it today" is the kind of premise
+//! that stops being true without anybody noticing, and the whole point of the rule is that it
+//! does not depend on remembering.
+//!
+//! `portable_pty` is the entry that makes that argument concrete rather than cautious. It is
+//! already linked here, through `nysia-core`, and the line it writes about a spawn that failed
+//! carries the caller's working directory at `ERROR` — a level the shipped default keeps. A
+//! window that grew one path into a pty would have started leaking on the day it did, with no
+//! `NYSIA_LOG` involved and nothing to prompt anybody to go and add the entry.
+//!
 //! `nysia`'s own `log` module is where the confinement is tested; this applies the same list.
 
 use std::path::PathBuf;
@@ -114,12 +122,15 @@ pub fn install() -> Option<PathBuf> {
     }
 }
 
-/// Hold the terminal crates down, whatever `NYSIA_LOG` asked for.
+/// Hold the linked crates down, whatever `NYSIA_LOG` asked for.
 ///
 /// Applied *after* the user's filter, so raising the level to debug something does not also
-/// switch off the rule that keeps PTY bytes out of the file (CLAUDE.md §6). A directive that
-/// does not parse is skipped rather than panicking a window at startup;
-/// `every_confined_directive_parses` in `nysia`'s `log` module is what stops one shipping.
+/// switch off the rule that keeps PTY bytes and a caller's paths out of the file (CLAUDE.md
+/// §6). A directive that does not parse is skipped rather than panicking a window at startup,
+/// and `every_confined_directive_parses` in `nysia`'s `log` module is what stops one shipping
+/// — though a parse is only half of it, because a directive can also parse and match nothing.
+/// `a_failed_spawns_path_does_not_reach_a_confined_log`, beside it, is the half that plants a
+/// real spawn and reads the log back.
 fn confine(filter: tracing_subscriber::EnvFilter) -> tracing_subscriber::EnvFilter {
     log_file::CONFINED_TARGETS
         .iter()
