@@ -153,16 +153,27 @@ pub const ISSUE_TIMEOUT: Duration = Duration::from_secs(15);
 /// makes the number a decision rather than an accident.
 ///
 /// Five hundred is far more than a person triages in a sitting and far less than the output
-/// cap. **Measured rather than estimated**: a full 500-row answer for `cli/cli`, a repository
-/// with a large open backlog, is 127,639 bytes — around 125 KiB against a cap of 8 MiB, which
-/// is 64 times the headroom. So a complete answer cannot reach the truncation path, and
+/// cap. **Measured rather than estimated**: a 500-row answer for `cli/cli`, asking for exactly
+/// the fields this module asks for, is 314,876 bytes — about 308 KiB against a cap of 8 MiB,
+/// which is 26 times the headroom. So a complete answer cannot reach the truncation path, and
 /// [`Finished::truncated`](super::runner::Finished::truncated) firing here would mean
 /// something other than a long list.
 ///
-/// Beyond this the list is genuinely short, which is the one dishonesty left in the verb. It
-/// is bounded, named here, and `rpc::tasks` logs when an answer comes back at exactly this
-/// many rows — the only signal available, since gh reports a capped list and a complete one
-/// identically.
+/// # Beyond this the list is short, and the screen cannot say so
+///
+/// This is the one dishonesty left in the verb, and it is **not** a ceiling nobody reaches:
+/// `cli/cli` and `microsoft/vscode` both answer this exact query with exactly 500 rows, so an
+/// ordinary public repository meets it today. What a person gets is the 500 most recently
+/// created open issues — gh orders them that way — with nothing saying there are more.
+/// `rpc::tasks` logs an answer that arrives at exactly this many rows, which is the only
+/// signal there is, and it is in a file the window cannot read.
+///
+/// **It ships that way by decision rather than by oversight.** The honest fix is a flag on the
+/// wire beside the rows, and a flag earns its place when something draws it: the Tasks screen
+/// lives in `apps/web` and is not in this change. Putting the field on the wire first would
+/// ship a value nothing reads — which is the argument `nysia-proto`'s own tasks module makes
+/// for leaving a label's colour off it. So the limit is written down here, with the two
+/// repositories that reach it, rather than described as a bound nobody meets.
 pub const ISSUE_LIMIT: u32 = 500;
 
 /// The fields asked for, which is exactly what the Tasks screen draws.

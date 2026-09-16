@@ -125,10 +125,15 @@ impl TasksService {
         let issues = parse(&answer).map_err(|err| {
             // **Not `%err`**, which was the first draft. Measured: `serde_json::Error`'s
             // `Display` does not quote the surrounding input, but it does echo the offending
-            // *scalar* — `invalid type: string "<some issue title>", expected u64` is
-            // reachable from a malformed answer. That is a response body in a log line, which
-            // `rpc::log_file` bans outright, so what is recorded is the classification and
-            // the position: a closed-set name and two numbers.
+            // *scalar* — `invalid type: string "…", expected u64`.
+            //
+            // What it can echo is narrower than "an issue title", and the narrower statement
+            // is the true one: every `GhIssue` field except `number`, `author` and `labels`
+            // is already a string, so nothing a *title* holds can be the offending scalar.
+            // What can is whatever arrived where one of those three was expected. Narrower is
+            // still a response body in a log line, which `rpc::log_file` bans outright, so
+            // what is recorded is the classification and the position — a closed-set name and
+            // two numbers.
             tracing::warn!(
                 project = %stored.id,
                 problem = ?err.classify(),
@@ -141,10 +146,17 @@ impl TasksService {
 
         // A list that comes back at exactly the cap is the one answer this verb cannot
         // promise is complete, and gh reports a capped list and a complete one identically —
-        // so the count is the only signal there is. Logged rather than refused or flagged on
-        // the wire: 500 open issues is a real repository, not a fault, and the screen showing
-        // the first 500 of them is the right behaviour. This is what makes it *diagnosable*
-        // when somebody asks why an issue they can see on github.com is not in the list.
+        // so the count is the only signal there is.
+        //
+        // **Reachable rather than theoretical**: `cli/cli` and `microsoft/vscode` both answer
+        // this query with exactly 500 rows. A person looking at a project like that sees its
+        // 500 most recently created open issues and nothing telling them there are more, and
+        // this line is the only trace — in a file the window cannot read.
+        //
+        // Logged rather than refused, because 500 open issues is a real repository and not a
+        // fault. Logged rather than flagged on the wire, because a flag earns its place when
+        // a screen draws it and that screen is not in this change; `git::gh::ISSUE_LIMIT`
+        // carries the whole decision and what it would take to undo it.
         if issues.len() as u32 >= crate::git::gh::ISSUE_LIMIT {
             tracing::warn!(
                 project = %stored.id,
