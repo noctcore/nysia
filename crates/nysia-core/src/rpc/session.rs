@@ -665,6 +665,41 @@ impl SessionRegistry {
         Self::default()
     }
 
+    /// Answer every refusal a request can earn **before** its caller changes anything.
+    ///
+    /// [`Self::create`] is the last step of `Start →` and the steps before it create a branch
+    /// and a worktree in somebody's repository. A refusal that only arrives once the session
+    /// is being spawned is therefore a refusal that arrives *after* the durable part of the
+    /// verb has already happened, and `ProjectStarted` has no field to mention what was left
+    /// behind.
+    ///
+    /// So this is every check [`Self::create`] makes that needs nothing built first: the
+    /// size, the pane, and — for an agent — whether the CLI resolves at all. It is a
+    /// pre-flight and not a promise: the pane can be taken and the CLI uninstalled between
+    /// this and the spawn, which is why `create` still makes all three itself. Passing here
+    /// means the request is not *already* impossible, which is the only thing a caller about
+    /// to create a worktree needs to know.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same [`SessionError`] the request would have earned from [`Self::create`].
+    pub fn precheck(&self, request: &SessionCreate) -> Result<(), SessionError> {
+        if request.cols == 0 || request.rows == 0 {
+            return Err(SessionError::Invalid(
+                "a session is at least one cell in each direction".to_owned(),
+            ));
+        }
+        if let Some(pane) = &request.pane_key
+            && let Some(handle) = self.pane_holder(pane)
+        {
+            return Err(SessionError::PaneTaken {
+                pane: pane.clone(),
+                handle,
+            });
+        }
+        program_for(request).map(|_| ())
+    }
+
     /// Spawn a session and start its pump.
     ///
     /// Both kinds come through here and take the same path (§3): [`program_for`] decides what
