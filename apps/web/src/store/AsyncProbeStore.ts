@@ -75,6 +75,7 @@ export class AsyncProbeStore implements Store {
       ...current,
       activeProjectId: id,
       tasks: { phase: 'idle' },
+      taskStart: { phase: 'idle' },
     }));
   };
 

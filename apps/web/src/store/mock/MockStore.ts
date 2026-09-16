@@ -80,10 +80,16 @@ export class MockStore implements Store {
     this.#update((current) =>
       current.activeProjectId === id
         ? current
-        : // The issues belong to the project that was showing. Carrying them across would put
-          // one repository's work under another's name, and `Start →` would then derive a
-          // branch for the wrong worktree.
-          { ...current, activeProjectId: id, tasks: { phase: 'idle' } },
+        : // The issues belong to the project that was showing, and so does the line saying
+          // what the last `Start →` did. Carrying either across would put one repository's
+          // work under another's name, and `Start →` would then derive a branch for the
+          // wrong worktree.
+          {
+            ...current,
+            activeProjectId: id,
+            tasks: { phase: 'idle' },
+            taskStart: { phase: 'idle' },
+          },
     );
   };
 
