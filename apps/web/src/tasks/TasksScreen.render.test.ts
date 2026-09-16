@@ -184,6 +184,24 @@ describe('what it says about a Start that happened', () => {
     expect(starting).toContain('Starting…');
     expect(starting.match(/Starting…/g)).toHaveLength(1);
   });
+
+  it('holds every other Start shut while one is in flight', () => {
+    // The store refuses a second start by *resolving*, so a row left pressable would swallow
+    // the click and show nothing for it. One worktree at a time, said on screen.
+    const starting = showing(
+      { phase: 'loaded', issues: ISSUES },
+      { phase: 'starting', issue: 200 },
+    );
+    const starts = [...starting.matchAll(/<button(?=[^>]*aria-label="Start #)[^>]*>/g)].map(
+      (match) => match[0],
+    );
+    expect(starts).toHaveLength(ISSUES.length);
+    expect(starts.every((tag) => tag.includes('disabled=""'))).toBe(true);
+
+    // And live again the moment nothing is starting, or the screen is a dead end.
+    const idle = showing({ phase: 'loaded', issues: ISSUES });
+    expect(idle).not.toMatch(/<button(?=[^>]*aria-label="Start #)[^>]*disabled=""/);
+  });
 });
 
 describe('honesty', () => {

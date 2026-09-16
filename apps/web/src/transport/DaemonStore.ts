@@ -408,11 +408,15 @@ export class DaemonStore implements Store {
     if (project === null || isTasksBusy(this.#snapshot.tasks)) {
       return;
     }
-    // The confirmation from the last start goes with the list it was about.
+    // The confirmation from the last start goes with the list it was about — unless a start
+    // is still in flight, which is reachable by pressing `↻` while one runs. Clearing that
+    // would un-busy the row mid-worktree and then flip it back when the answer landed, so a
+    // start in progress outlives the list it was started from.
     this.#update((current) => ({
       ...current,
       tasks: { phase: 'loading' },
-      taskStart: { phase: 'idle' },
+      taskStart:
+        current.taskStart.phase === 'starting' ? current.taskStart : { phase: 'idle' },
     }));
 
     let issues: readonly Issue[];
