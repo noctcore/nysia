@@ -7,8 +7,7 @@
 //! between "the child exited" and "the pipe reached EOF".
 //!
 //! [`command`](super::command) holds the other half: git's argv, git's environment, and
-//! git's reading of an exit code. A `gh` module beside it will hold gh's. Both are callers
-//! of this.
+//! git's reading of an exit code. [`super::gh`] holds gh's. Both are callers of this.
 //!
 //! # Why this is a split and not a second chokepoint
 //!
@@ -30,8 +29,8 @@
 //! parameter for that reason, and this module defines no list of its own: there is nothing
 //! here for a later edit to grow "toward anything that names a credential", because there is
 //! no shared list to grow. git's lists live with git and gh's live with gh, where the
-//! consequence of a change is visible next to the reason for it — and where a per-program
-//! compile-time check can see the whole of that program's effective set.
+//! consequence of a change is visible next to the reason for it — and where
+//! [`super::gh::GH_CREDENTIAL_VARS`] can see the whole of gh's effective set.
 
 use std::ffi::OsString;
 use std::process::{Command, Stdio};
@@ -47,8 +46,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 ///
 /// A bound rather than a guess at what is enough: this reads into memory in a daemon that
 /// lives for days, and the program is one on `PATH` that a user can replace. `git worktree
-/// list` on a repository with a thousand worktrees is around 100 KiB, and a capped
-/// `gh issue list` is far smaller than that.
+/// list` on a repository with a thousand worktrees is around 100 KiB, and a `gh issue list`
+/// capped at [`super::gh::ISSUE_LIMIT`] rows is far smaller than that.
 ///
 /// Reaching it is reported rather than absorbed — see [`Finished::truncated`].
 pub(crate) const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
@@ -74,8 +73,8 @@ const DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// credential" would not harden gh — it would make every machine running Nysia permanently
 /// unauthenticated, and the symptom would be the *Tasks* screen saying nobody is signed in on
 /// a machine where somebody plainly is. Keeping the lists with their programs is what makes
-/// that edit impossible to make by accident, and a program whose credentials are at stake
-/// can add a compile-time check that makes it impossible to make on purpose.
+/// that edit impossible to make by accident, and [`super::gh::GH_CREDENTIAL_VARS`] makes it
+/// impossible to make on purpose.
 ///
 /// # Removal is by name, never `env_clear`
 ///
@@ -288,7 +287,7 @@ pub(crate) fn apply_environment(command: &mut Command, env: &EnvPolicy) {
 /// Closing it needs a process group Nysia allocates and holds rather than one it signals by
 /// number, which is the same gap [`crate::pty`]'s teardown documents for a grandchild that
 /// double-forked away. Nothing v0.3 runs reaches it: the only git helper that detaches is the
-/// fsmonitor daemon, and git's neutralisers turn that off.
+/// fsmonitor daemon, and git's neutralisers turn that off, while `gh` starts no helper at all.
 fn run_to_completion(mut spawn: Command, timeout: Duration) -> std::io::Result<Finished> {
     #[cfg(unix)]
     let spawn = unix_kill::in_its_own_session(&mut spawn);

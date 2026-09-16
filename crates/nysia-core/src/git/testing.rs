@@ -34,6 +34,18 @@ pub(crate) fn git_or_skip() -> Option<Git> {
     Git::locate().ok()
 }
 
+/// A resolved gh, or `None` on a machine that has none.
+///
+/// [`git_or_skip`]'s reasoning, with one difference worth stating: **gh is not assumed to be
+/// on either CI leg**, so a test using this may legitimately never run there. That makes it a
+/// weaker gate than the git ones, and it is why the reading of every ending gh can produce is
+/// covered by `gh::tests` as pure functions over measured fixtures — those run everywhere.
+/// What this adds on top is the one thing a fixture cannot prove: that the argument vector
+/// and the environment policy really do produce that ending from a real gh.
+pub(crate) fn gh_or_skip() -> Option<super::gh::Gh> {
+    super::gh::Gh::locate().ok()
+}
+
 /// A temporary directory that cleans itself up, and the fixtures built inside it.
 pub(crate) struct Scratch {
     /// The directory everything is built in.
