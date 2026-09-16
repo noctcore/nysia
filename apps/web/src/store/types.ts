@@ -43,14 +43,18 @@ export type { Worktree } from '../generated/Worktree';
 export type { AddProjectState } from './addProject';
 /**
  * The task shapes, re-exported beside the wire's for the same reason: one place to import
- * from. They are **not** generated, and the line above is the whole of why that is worth
- * saying — this export is the point at which a hand-written shape stops being a transport
- * detail and becomes part of the store's public surface, which is a thing to know about it
- * rather than a thing to hide.
+ * from.
  *
- * It stays hand-written after wave C1 too. The generated type is the answer `gh` gives,
- * uppercase and carrying a colour per label; `tasks/issue.ts` is the shape the table draws,
- * and that file says what the difference costs and who converts between them.
+ * `Issue` **is** generated now, and it was hand-written here for exactly one wave. The
+ * argument for writing it out was that the daemon would pass `gh`'s answer through — an
+ * uppercase state, a hex colour on every label — so the shape the table drew and the shape
+ * the wire carried were three decisions apart. v0.3 wave C1 made those decisions in the
+ * daemon instead, which is where one conversion can happen once rather than in every client,
+ * so the two shapes are one shape and `tasks/issue.ts` re-exports it (D-13).
+ *
+ * `TaskStartState` and `TasksState` stay local, and they are a different kind of thing: not a
+ * wire shape at all, but where a screen's query has got to. Nothing in `nysia-proto` has an
+ * opinion about `loading`.
  */
 export type { Issue } from '../tasks/issue';
 export type { TaskStartState, TasksState } from '../tasks/tasks';

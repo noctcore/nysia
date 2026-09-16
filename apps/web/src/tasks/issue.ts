@@ -1,86 +1,64 @@
 /**
- * One GitHub issue, as the Tasks screen draws it.
+ * One GitHub issue, as the Tasks screen draws it — which is now also how the wire spells it.
  *
- * **Shaped from what `gh issue list --json` actually returns, not from what the design mock
- * draws.** The two differ in three places and each difference is a decision rather than an
- * omission — §4 of the design spec is the drawing, this is the data, and where they
- * disagree the data wins:
+ * **The shape is generated and this file re-exports it** (D-13). Rust is the sole authority
+ * on a wire shape the moment it spells one, and as of v0.3 wave C1 it does: `nysia-proto`'s
+ * `Issue` and `IssueState` land in `apps/web/src/generated` and are what everything from the
+ * table to the branch derivation takes. The re-export is here rather than each caller
+ * reaching into `generated/` so that `tasks/issue.ts` stays the one import for a row and its
+ * two derivations, and so a reader arrives at this comment.
  *
- * 1. **There is no `repository` field.** `gh issue list --json` refuses the name outright
- *    (`Unknown JSON field: "repository"`), so the mock's `owner · repo` sub-line has nothing
- *    behind it. {@link repositoryOf} recovers it from the issue's own URL, which is the only
- *    place either half appears.
- * 2. **`state` arrives uppercase** — `OPEN`, `CLOSED` — and the pill is drawn `● Open`.
- * 3. **Labels carry a colour and it is deliberately dropped.** `gh` gives each label a hex,
- *    and the design draws label pills in `--bg3` with a `--line` border. Keeping GitHub's
- *    colour would put a hardcoded hex on screen that the theme switcher cannot reach, which
- *    is a bug by this repository's own rule — so only the name survives, and the pill is a
- *    token like every other pixel.
+ * # What used to be here, and why it is gone
  *
- * # What is deliberately absent
+ * This declared its own `Issue` for a wave, and the argument was that the screen's shape and
+ * `gh`'s answer were three decisions apart: `state` arrives from `gh` as `OPEN`, each label
+ * carries a **hex colour** the theme switcher cannot reach, and `author` is an object rather
+ * than a login. A generated type carrying those would have pushed all three into the table.
+ *
+ * **C1 made those three decisions in the daemon instead**, which is the better place for
+ * them: `crates/nysia-core/src/rpc/tasks.rs` lowers the state into an enum, keeps only each
+ * label's name, and reduces gh's author object to its login — so one conversion happens once
+ * rather than in every client. What reaches the window is already the shape the screen
+ * draws, the two halves cannot drift, and there is nothing left for a hand-written mirror to
+ * be a mirror *of*.
+ *
+ * What survives the move is the *runtime* check, in `transport/tasks.ts`. A generated type is
+ * a compile-time claim about a wire the daemon controls, not a runtime guarantee — a daemon
+ * one version behind still answers — so a row that is not the promised shape stays a refusal
+ * with a sentence rather than `undefined` in a table cell.
+ *
+ * # What this file still owns
+ *
+ * The two things the *screen* needs and the wire deliberately does not carry:
+ *
+ * - {@link repositoryOf}, because `gh issue list --json` refuses the field name `repository`
+ *   outright, so the design's `owner · repo` sub-line has nothing behind it but the URL.
+ * - {@link updatedPhrase}, because `7 days ago` is a rendering of a timestamp and the daemon
+ *   sends ISO 8601 exactly as `gh` does.
+ *
+ * # What is deliberately absent from the wire
  *
  * **The body.** An issue body is someone else's text (traps register #13/#14) and nothing on
  * this screen renders it, so it is not requested, not carried and not available to be logged
  * by accident later. A field that is not on the wire cannot leak.
  *
  * **Anything derived and stored.** D-5: tasks are GitHub Issues queried live, with no local
- * task domain model — no table, no cache, no schema. This interface is a *row in flight*;
- * nothing persists it and nothing is keyed by it. In particular nothing anywhere keys a
- * worktree by an issue number (D-6) — see `./branchName`, which is the one module that
- * touches a number at all and turns it into text inside a branch.
+ * task domain model — no table, no cache, no schema. A row is a row *in flight*; nothing
+ * persists it and nothing is keyed by it. In particular nothing anywhere keys a worktree by
+ * an issue number (D-6) — see `./branchName`, which is the one module that touches a number
+ * at all and turns it into text inside a branch.
  *
- * # Why this is hand-written, and what happens when C1 lands
+ * # One rule for anyone writing a comment in this directory
  *
- * D-13 makes Rust the sole authority on a wire shape and forbids hand-writing a type Rust
- * already exports. Rust does not export a task answer yet: wave C1 serves `tasks_list` and
- * its `nysia-proto` type lands with it. Until then `transport/tasks.ts` holds the runtime
- * check that the answer really has this shape, so a disagreement surfaces as a refusal
- * rather than as `undefined` in a table cell.
- *
- * **This file does not then become a re-export of the generated type**, and the three
- * differences at the top of this comment are the reason. C1 serves what `gh` gives it, so
- * the generated `Issue` will carry `OPEN` and label objects with a hex on each — re-exporting
- * it would push both into the table, which is the one outcome every decision here is for
- * avoiding. What the generated type replaces is the *wire* half: `transport/tasks.ts` starts
- * from it rather than from `unknown`, `tsc` takes over the work of noticing a missing field,
- * and the conversion those functions already do is what stays. This stays too, and keeps
- * saying what it says now — the shape the screen draws, which is nobody's wire format.
+ * **No comment in `apps/web/src` writes an issue number out with its hash.**
+ * `theme/colourGuard.ts` rule 1 reads whole files as text, and a hash followed by exactly 3,
+ * 4, 6 or 8 hex digits is a colour literal to it — so an issue numbered 200, or 4021, fails
+ * the colour gate when it appears in prose. It never appears in *code*, because the hash is a
+ * template literal and the number comes off the wire.
  */
 
-/** Whether an issue is open, as the `● Open` pill reads it. `gh` sends these uppercase. */
-export type IssueState = 'open' | 'closed';
-
-/** One row of the table. */
-export interface Issue {
-  /**
-   * The issue number, which the ID column prints after a hash.
-   *
-   * Unique within a repository, which is the whole of the argument that a derived branch
-   * name is unique too — see `./branchName`.
-   *
-   * **No comment in `apps/web/src` writes one out with its hash**, and that is not a style
-   * preference. `theme/colourGuard.ts` rule 1 reads whole files as text, and a hash followed
-   * by exactly 3, 4, 6 or 8 hex digits is a colour literal to it — so an issue numbered 200,
-   * or 4021, fails the colour gate when it appears in prose. It never appears in *code*,
-   * because the hash is a template literal and the number comes off the wire.
-   */
-  readonly number: number;
-  readonly title: string;
-  readonly state: IssueState;
-  /** ISO 8601, exactly as `gh` sends it. Formatted at the edge by {@link updatedPhrase}. */
-  readonly updatedAt: string;
-  /** The issue on github.com, and the only place the owner and repository appear. */
-  readonly url: string;
-  /** The login that opened it, or `null` where `gh` reported no author. */
-  readonly author: string | null;
-  /**
-   * Label names, without their colours.
-   *
-   * See the module documentation: `gh` sends a hex per label and rendering it would put a
-   * colour on screen that the accent picker cannot reach.
-   */
-  readonly labels: readonly string[];
-}
+export type { Issue } from '../generated/Issue';
+export type { IssueState } from '../generated/IssueState';
 
 /** An owner and repository, as the source chip row and each row's sub-line print them. */
 export interface Repository {

@@ -1,6 +1,8 @@
 import type { PaneKey } from '../generated/PaneKey';
 import type { Project } from '../generated/Project';
 import type { ProjectRegistered } from '../generated/ProjectRegistered';
+import type { ProjectStart } from '../generated/ProjectStart';
+import type { ProjectStarted } from '../generated/ProjectStarted';
 import type { SessionHandle } from '../generated/SessionHandle';
 import type { SessionKind } from '../generated/SessionKind';
 import type { SessionSummary as WireSession } from '../generated/SessionSummary';
@@ -33,7 +35,7 @@ import {
 } from './bridge';
 import type { StreamId } from './frames';
 import { SILENT_TRANSPORT_LOG, type TransportLog } from './log';
-import { readIssues, readStarted, type TaskStarted } from './tasks';
+import { readIssues, readStarted } from './tasks';
 import { REPLAY_BOUNDARY_DEADLINE_MS } from './surface/TerminalSurface';
 import type { TerminalRouter } from './terminals';
 
@@ -54,13 +56,13 @@ import type { TerminalRouter } from './terminals';
  * client-side, marked as such in a comment nobody reading the sidebar could see. The verbs
  * are on the wire (v0.3 wave A), so `project_list` is the authority and the seed is gone.
  *
- * What it is replaced by is sometimes *nothing*, and that is the point: until wave C1 serves
- * the verbs the daemon answers `unsupported`, so the sidebar is empty and says why, in the
- * daemon's own words. An empty sidebar that explains itself is worth more than ten names
- * that cannot be told from real ones — and the sessions grafted onto the seeded project went
- * with it for the same reason. Which worktree a session belongs to is something only the
- * daemon knows; deriving it from a `cwd` invents a domain object out of an unrelated signal,
- * which is precisely what D-5 deleted the local task model to stop.
+ * What it is replaced by is sometimes *nothing*, and that is the point: a daemon on a fresh
+ * machine has no projects, and one too old to serve the verb refuses it — so the sidebar is
+ * empty and says why, in the daemon's own words. An empty sidebar that explains itself is
+ * worth more than ten names that cannot be told from real ones — and the sessions grafted
+ * onto the seeded project went with it for the same reason. Which worktree a session belongs
+ * to is something only the daemon knows; deriving it from a `cwd` invents a domain object out
+ * of an unrelated signal, which is precisely what D-5 deleted the local task model to stop.
  *
  * **A failed `project_list` never fails the connection.** It is fetched on every connect
  * without anyone asking for it, so a refusal goes into `snapshot.projectsUnavailable` for
@@ -386,11 +388,13 @@ export class DaemonStore implements Store {
    * steps verbatim, rather than in the notice list over a table that looks like a repository
    * with no work in it.
    *
-   * That includes the answer every daemon gives *today*: `tasks_list` is served by wave C1,
-   * so until it lands this is refused as `unsupported` and the screen says so in the daemon's
-   * words. Which is the same arrangement `#refreshProjects` was built with one wave ago, for
-   * the same reason — a window that treated "not served yet" as a transport failure would
-   * reconnect forever against something no amount of waiting fixes.
+   * That includes the answer a daemon older than this window gives: `tasks_list` landed in
+   * v0.3 wave C1 and one that predates it refuses the verb as `unsupported`, which is a real
+   * answer the screen shows in the daemon's own words. The runtime outlives the window (D-1),
+   * so that pairing is ordinary rather than exotic — and it is the same arrangement
+   * `#refreshProjects` was built with one wave ago, for the same reason: a window that treated
+   * "not served here" as a transport failure would reconnect forever against something no
+   * amount of waiting fixes.
    *
    * With no active project it does nothing at all. There is nothing to ask GitHub about, and
    * the screen says that for itself rather than being handed a refusal nobody sent.
@@ -501,20 +505,29 @@ export class DaemonStore implements Store {
     const pending: TaskStartState = { phase: 'starting', issue: issue.number };
     this.#update((current) => ({ ...current, taskStart: pending }));
 
-    let started: TaskStarted;
+    // Typed as the wire's own request rather than as an object literal, so a field the daemon
+    // renames fails the typecheck here instead of being refused at run time by a daemon that
+    // cannot see what was meant. There is deliberately no field an issue number could travel
+    // in — D-6 made unrepresentable, and `ProjectStart`'s own comment is where that is argued.
+    const request: ProjectStart = {
+      project,
+      branch,
+      // One agent in v1 and no provider trait (D-3, D-4), and the design is explicit that
+      // `Start →` hands the issue to an agent. This is sent even where the daemon refuses it
+      // — an agent session is `unsupported` until the verb that serves one lands — because a
+      // window that quietly asked for a shell instead would open the wrong thing and say it
+      // had done what was asked. The refusal is rendered like any other, and the screen starts
+      // working the moment the daemon serves it, with nothing to change here.
+      kind: 'agent',
+      // `profile` is for a shell, so it is null here rather than absent: the field is on the
+      // wire either way, and `ShellProfile | null` is what the generated type spells.
+      profile: null,
+    };
+
+    let started: ProjectStarted;
     try {
       started = readStarted(
-        await this.#bridge.invoke<unknown>('task_start', {
-          request: {
-            project,
-            branch,
-            // One agent in v1 and no provider trait (D-3, D-4), and the design is explicit
-            // that `Start →` hands the issue to an agent. `profile` is for a shell, so it is
-            // null here rather than absent: the field exists on the wire either way.
-            kind: 'agent',
-            profile: null,
-          },
-        }),
+        await this.#bridge.invoke<unknown>('project_start', { request }),
       );
       // Inside the try, like `openTab`: this is a round trip, and a failure here has to reach
       // the user as a `StoreCommandError` or it reaches nobody.
@@ -541,7 +554,7 @@ export class DaemonStore implements Store {
   /**
    * Write a `Start →` answer, unless the screen has moved on since the button was pressed.
    *
-   * {@link #settle}'s hazard, reached by the other road and one notch worse. `task_start`
+   * {@link #settle}'s hazard, reached by the other road and one notch worse. `project_start`
    * creates a worktree and can take seconds, and `withActiveProject` clears `taskStart` the
    * moment the project moves — so a late answer would repaint *"#7 started in a new worktree
    * on issue/7-…"* under whichever repository is showing by then, a confirmation naming an

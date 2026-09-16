@@ -249,7 +249,11 @@ export function createSeedIssues(now: number = Date.now()): readonly Issue[] {
     updatedAt: new Date(now - days * DAY).toISOString(),
     url: `https://github.com/Shironex/Settly/issues/${number}`,
     author: 'Shironex',
-    labels,
+    // Copied rather than shared. `Issue.labels` is generated as `Array<string>` — ts-rs emits
+    // a `Vec` that way and nothing on this side may edit the output (D-13) — so the row's own
+    // list has to be a mutable one, and handing out the frozen literal below would make every
+    // caller's row alias the same array.
+    labels: [...labels],
   }));
 }
 

@@ -65,24 +65,34 @@ class FakeDaemon implements DaemonBridge {
   /** What the folder picker answers with. `null` is a cancelled dialog. */
   picks: string | null = 'D:/dev/valve';
   /**
-   * What `tasks_list` answers with, in the shape `gh issue list --json` produces.
+   * What `tasks_list` answers with, in the shape the **daemon** sends it.
    *
-   * Uppercase `state` and label *objects* with a colour, because that is what `gh` really
-   * sends — a fake that pre-lowered the state and flattened the labels would let a client
-   * through that could not read the real answer.
+   * Lowercase `state` and flat label names, which is what changed when v0.3 wave C1 landed:
+   * these rows used to carry `gh`'s own `OPEN` and label objects, because the window was
+   * doing the conversion. The daemon does it now
+   * (`crates/nysia-core/src/rpc/tasks.rs`), and a fake still sending gh's spellings would be
+   * pinning a tolerance the window has deliberately dropped — it would keep passing while the
+   * reader accepted a shape no daemon produces, which is the opposite of what a fake is for.
+   *
+   * Typed `unknown[]` rather than `Issue[]` on purpose: a test that hands this an answer no
+   * daemon should send is testing the reader, and a fixture the compiler polices could not
+   * carry one.
    */
   issues: unknown[] = [
     {
       number: 200,
       title: 'Add the Tasks screen',
-      state: 'OPEN',
+      state: 'open',
       updatedAt: '2026-09-09T12:00:00Z',
       url: 'https://github.com/noctcore/nysia/issues/200',
       author: 'Shironex',
-      labels: [{ name: 'area:web', color: 'bfd4f2' }],
+      labels: ['area:web'],
     },
   ];
-  /** Branches this daemon already has a worktree for, so `task_start` adopts rather than creates. */
+  /**
+   * Branches this daemon already has a worktree for, so `project_start` adopts rather than
+   * creates.
+   */
   readonly adoptedBranches = new Set<string>();
   /** Ids handed out on this connection. Spent, never reissued — as proto requires. */
   #nextStream = 1;
@@ -161,8 +171,8 @@ class FakeDaemon implements DaemonBridge {
         return this.projects.map((project) => ({ ...project })) as T;
       case 'tasks_list':
         return [...this.issues] as T;
-      case 'task_start': {
-        // Wave C1's verb, modelled the way the contract spells it: the request carries a
+      case 'project_start': {
+        // The daemon's own verb — `project_start`, not `task_start`: the request carries a
         // branch and **no issue number**, and the answer says whether a worktree was adopted
         // or made. A session is created too, because the window re-reads `session_list`
         // afterwards and a fake that answered without one would let a client through that
@@ -1006,7 +1016,7 @@ describe('the task list, which is the screen’s whole subject', () => {
     return { kind, message, nextSteps: [step], retryable: false };
   }
 
-  it('reads what gh sends rather than what the design mock draws', async () => {
+  it('reads the daemon’s answer rather than what the design mock draws', async () => {
     const { store, daemon } = build();
     await ready(store);
     await store.refreshTasks();
@@ -1017,8 +1027,8 @@ describe('the task list, which is the screen’s whole subject', () => {
       {
         number: 200,
         title: 'Add the Tasks screen',
-        // Lowered from `gh`'s `OPEN`, and the label's colour dropped — a wire hex on screen
-        // is a pixel the accent picker cannot reach.
+        // Lowercase and colourless because the *daemon* made it so — v0.3 wave C1 moved both
+        // conversions there, so the window reads what it is given and refuses anything else.
         state: 'open',
         updatedAt: '2026-09-09T12:00:00Z',
         url: 'https://github.com/noctcore/nysia/issues/200',
@@ -1049,10 +1059,11 @@ describe('the task list, which is the screen’s whole subject', () => {
       ['gh_unauthenticated', 'gh_unauthenticated'],
       ['query_failed', 'query_failed'],
       // A code this build does not know degrades to the widest of the three, carrying the
-      // daemon's own sentence — never to a blank table. That is what makes proposing the
-      // three spellings ahead of wave C1 safe rather than a gamble.
+      // daemon's own sentence — never to a blank table. `ErrorCode` is an open union for
+      // exactly this reason, and the three above are now members of it rather than spellings
+      // this window proposed.
       ['something_a_newer_daemon_added', 'query_failed'],
-      // What every daemon answers today, until C1 serves the verb.
+      // What a daemon older than wave C1 answers, because it does not serve the verb at all.
       ['unsupported', 'query_failed'],
     ] as const;
 
@@ -1178,7 +1189,7 @@ describe('starting an issue', () => {
     const issue = store.getSnapshot().tasks;
     await store.startTask(issue.phase === 'loaded' ? issue.issues[0] ?? A_ROW : A_ROW);
 
-    const request = daemon.calls.find((call) => call.command === 'task_start')?.args?.request;
+    const request = daemon.calls.find((call) => call.command === 'project_start')?.args?.request;
     expect(request).toEqual({
       project: store.getSnapshot().activeProjectId,
       branch: 'issue/200-add-the-tasks-screen',
@@ -1186,6 +1197,27 @@ describe('starting an issue', () => {
       profile: null,
     });
     expect(JSON.stringify(request)).not.toContain('"issue"');
+  });
+
+  it('asks for an agent even where the daemon refuses one', async () => {
+    // Deliberately not special-cased. An agent session is `unsupported` on a daemon that does
+    // not serve one yet, and the tempting fix — quietly asking for a shell instead — opens the
+    // wrong thing and reports it as the thing that was asked for. Sending what the design says
+    // and rendering the refusal means this screen starts working the moment the daemon serves
+    // it, with nothing to change here.
+    const { store, daemon } = build();
+    await ready(store);
+    daemon.failures.set('project_start', {
+      kind: 'unsupported',
+      message: 'this daemon cannot start an agent session yet',
+      nextSteps: ['Update the daemon, then start the issue again.'],
+      retryable: false,
+    });
+
+    await expect(store.startTask(A_ROW)).rejects.toBeInstanceOf(StoreCommandError);
+    const request = daemon.calls.find((call) => call.command === 'project_start')?.args?.request;
+    expect((request as { kind?: string } | undefined)?.kind).toBe('agent');
+    expect(store.getSnapshot().errors.at(-1)?.message).toContain('cannot start an agent');
   });
 
   it('says whether a worktree was adopted or created', async () => {
@@ -1222,8 +1254,8 @@ describe('starting an issue', () => {
     // somebody pressed this, so its failure is a notice with the daemon's own next steps.
     const { store, daemon } = build();
     await ready(store);
-    daemon.failures.set('task_start', {
-      kind: 'not_a_repository',
+    daemon.failures.set('project_start', {
+      kind: 'invalid_request',
       message: 'that branch is checked out in another worktree',
       nextSteps: ['Close the other worktree, or start on a different branch.'],
       retryable: false,
@@ -1246,7 +1278,7 @@ describe('starting an issue', () => {
     // exactly the caller with no other way to find out.
     const { store, daemon } = build();
     await ready(store);
-    const held = hold(daemon, 'task_start');
+    const held = hold(daemon, 'project_start');
 
     const first = store.startTask(A_ROW);
     await until(() => store.getSnapshot().taskStart.phase === 'starting');
@@ -1266,7 +1298,7 @@ describe('starting an issue', () => {
     // somebody else's, with a correct table above it and nothing to contradict it.
     const { store, daemon } = build();
     await ready(store);
-    const held = hold(daemon, 'task_start');
+    const held = hold(daemon, 'project_start');
 
     const starting = store.startTask(A_ROW);
     await until(() => store.getSnapshot().taskStart.phase === 'starting');
@@ -1292,7 +1324,7 @@ describe('starting an issue', () => {
     // wrong one of the two requests.
     const { store, daemon } = build();
     await ready(store);
-    const held = hold(daemon, 'task_start');
+    const held = hold(daemon, 'project_start');
 
     const abandoned = store.startTask(A_ROW);
     await until(() => store.getSnapshot().taskStart.phase === 'starting');

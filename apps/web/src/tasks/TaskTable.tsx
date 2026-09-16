@@ -120,7 +120,7 @@ function TaskRow({
           {repository === null ? null : <span className="truncate">{repository.name}</span>}
           {issue.labels.map((label) => (
             // The design's pill: `--bg3`, a `--line` border, radius 99. `gh` sends a hex per
-            // label and it is deliberately not here — see `./issue.ts`.
+            // label and the daemon drops it before the window sees one — see `./issue.ts`.
             <span
               key={label}
               className="border-line bg-bg3 rounded-pill truncate border px-2 py-px"
