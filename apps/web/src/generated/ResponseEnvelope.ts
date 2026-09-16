@@ -5,6 +5,7 @@ import type { ErrorEnvelope } from "./ErrorEnvelope";
 import type { MutationReceipt } from "./MutationReceipt";
 import type { Project } from "./Project";
 import type { ProjectRegistered } from "./ProjectRegistered";
+import type { ProjectStarted } from "./ProjectStarted";
 import type { RequestId } from "./RequestId";
 import type { SessionCreated } from "./SessionCreated";
 import type { SessionSummary } from "./SessionSummary";
@@ -42,4 +43,4 @@ statuses: Array<AgentStatus>, } | { "type": "agent_status_subscribe" } & AgentSt
 /**
  * The rows.
  */
-projects: Array<Project>, } | { "type": "project_forget" } | { "type": "error" } & ErrorEnvelope);
+projects: Array<Project>, } | { "type": "project_forget" } | { "type": "project_start" } & ProjectStarted | { "type": "error" } & ErrorEnvelope);
