@@ -70,6 +70,12 @@ export function TaskTable({
             issue={issue}
             now={now}
             busy={isStarting(taskStart, issue.number)}
+            // **Every** row is held shut while any start is in flight, not just the one that
+            // is spinning. The store refuses a second start outright — one worktree at a
+            // time — and it refuses it by *resolving*, so a row left pressable would swallow
+            // a click and show nothing at all for it. Disabling is what makes that refusal
+            // visible instead of silent.
+            blocked={taskStart.phase === 'starting'}
             onStart={() => onStart(issue)}
           />
         ))}
@@ -82,11 +88,15 @@ function TaskRow({
   issue,
   now,
   busy,
+  blocked,
   onStart,
 }: {
   readonly issue: Issue;
   readonly now: number;
+  /** This issue is the one being started, so its button says so. */
   readonly busy: boolean;
+  /** Some *other* issue is being started, so this button is shut but says nothing. */
+  readonly blocked: boolean;
   readonly onStart: () => void;
 }) {
   const repository = repositoryOf(issue.url);
@@ -133,7 +143,7 @@ function TaskRow({
         <button
           type="button"
           onClick={onStart}
-          disabled={busy}
+          disabled={busy || blocked}
           // The accessible name carries the issue, because the visible label is the same five
           // characters on every row — a screen reader reading "Start" eleven times says
           // nothing about which one is focused.
