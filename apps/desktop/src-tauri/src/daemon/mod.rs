@@ -216,9 +216,26 @@ impl DaemonError {
 ///
 /// `next_steps` is never empty. A notice that says only what broke is the notice users
 /// learn to dismiss unread.
+///
+/// # Why there is a `kind` beside the sentence
+///
+/// `message` and `next_steps` are for a person; `kind` is for the code that has to *do*
+/// something different depending on which failure this is. Registering a folder has four
+/// answers a user must be able to tell apart — it is not a repository, it holds several,
+/// it could not be read, and it worked (v0.3 plan §3.2) — and a window that could only read
+/// the sentence would have to match on English to distinguish them. That is the kind of
+/// coupling a wire `ErrorCode` exists to remove, and it was being thrown away here.
+///
+/// It is [`DaemonError::kind`] verbatim rather than a second vocabulary, so it is the same
+/// closed set the log already writes and carries the same guarantee: an
+/// [`ErrorCode::Other`](nysia_proto::ErrorCode::Other) from a daemon newer than this build
+/// is rendered `other` rather than passed through, and a caller that does not recognise a
+/// kind still has the sentence and the next steps, which are the parts that help.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandFailure {
+    /// What went wrong, as one word from a closed set. See the type docs.
+    pub kind: String,
     /// A sentence, shown verbatim.
     pub message: String,
     /// What to do about it. Never empty.
@@ -230,6 +247,7 @@ pub struct CommandFailure {
 impl From<DaemonError> for CommandFailure {
     fn from(error: DaemonError) -> Self {
         Self {
+            kind: error.kind().to_owned(),
             message: error.to_string(),
             next_steps: error.next_steps(),
             retryable: error.retryable(),
@@ -240,6 +258,7 @@ impl From<DaemonError> for CommandFailure {
 #[cfg(test)]
 mod tests {
     use nysia_proto::error::{ErrorCode, NextSteps};
+    use nysia_proto::project::RegisterRefusal;
 
     use super::*;
 
@@ -402,5 +421,52 @@ mod tests {
             vec!["Pick a directory inside the repository.".to_owned()]
         );
         assert_eq!(surfaced.message, "that path is outside the project");
+    }
+
+    #[test]
+    fn the_three_registration_refusals_reach_the_webview_as_three_kinds() {
+        // §3.2's whole point: "could not register" is not an answer a user can act on. The
+        // window paints a different panel for each of these, and this is the field it
+        // branches on — so a `kind` that collapsed them would be invisible in Rust and
+        // visible to every user as one generic failure.
+        let kinds: Vec<String> = [
+            RegisterRefusal::NotARepository,
+            RegisterRefusal::ManyRepositories {
+                found: vec!["nysia".to_owned(), "orca".to_owned()],
+            },
+            RegisterRefusal::Unreadable,
+        ]
+        .into_iter()
+        .map(|refusal| {
+            CommandFailure::from(DaemonError::Daemon(Box::new(refusal.into_envelope()))).kind
+        })
+        .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                "not_a_repository".to_owned(),
+                "many_repositories".to_owned(),
+                "path_unreadable".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_code_this_build_does_not_know_is_not_passed_through() {
+        // The one open end of proto's taxonomy, and the reason `kind` is `DaemonError::kind`
+        // rather than the code's own string: a newer daemon's code is arbitrary text of
+        // unbounded length, and a field that writes back whatever the far end sent is not a
+        // closed set however unlikely the far end is to abuse it.
+        let surfaced = CommandFailure::from(DaemonError::Daemon(Box::new(ErrorEnvelope::new(
+            ErrorCode::Other("a_verb_from_2027".to_owned()),
+            "this daemon knows something newer",
+            NextSteps::new("Update Nysia.").expect("a non-empty step"),
+        ))));
+        assert_eq!(surfaced.kind, "other");
+        // The parts that still help are untouched, which is what makes an unknown kind
+        // survivable rather than fatal.
+        assert_eq!(surfaced.message, "this daemon knows something newer");
+        assert_eq!(surfaced.next_steps, vec!["Update Nysia.".to_owned()]);
     }
 }
