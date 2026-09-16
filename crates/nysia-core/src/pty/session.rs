@@ -64,11 +64,59 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// `yes` flood.
 pub const DEFAULT_OUTPUT_QUEUE: usize = 64;
 
+/// What a session runs.
+///
+/// Two arms because there are two ways a program gets chosen, not because there are two
+/// kinds of session: a shell is named and this module resolves it, and an agent's CLI is
+/// resolved by [`crate::agent`] and handed down already validated.
+///
+/// [`Self::Resolved`] is **deliberately neutral**. It carries an argv and a label and
+/// nothing that says which program it is — D-4 puts every Claude specific in one module
+/// above this one, and a `SessionProgram::Claude` here would be that module's contents
+/// leaking downwards under a different name.
+#[derive(Debug, Clone)]
+pub enum SessionProgram {
+    /// One of the shells (D-3), resolved by [`ShellProfile::command`] at spawn time.
+    Shell(ShellProfile),
+    /// A program its caller resolved and pre-validated, spawned exactly as handed over.
+    ///
+    /// Built only through [`SessionSpec::for_program`], which is what guarantees the argv is
+    /// non-empty — a zero-length argv reaches `CommandBuilder` as a spawn with no program
+    /// and fails with nothing naming what was missing.
+    Resolved {
+        /// argv\[0\] first, which is the real executable: `cmd.exe` when the caller resolved
+        /// past an npm batch shim (traps register #8).
+        argv: Vec<OsString>,
+        /// What to call this session, which is what a tab is labelled with.
+        label: String,
+    },
+}
+
+impl SessionProgram {
+    /// The shell this runs, or `None` for an already-resolved program.
+    #[must_use]
+    pub fn shell(&self) -> Option<&ShellProfile> {
+        match self {
+            Self::Shell(profile) => Some(profile),
+            Self::Resolved { .. } => None,
+        }
+    }
+
+    /// A human-facing label, which is what a tab is called.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Shell(profile) => profile.label(),
+            Self::Resolved { label, .. } => label.clone(),
+        }
+    }
+}
+
 /// What to spawn, and how.
 #[derive(Debug, Clone)]
 pub struct SessionSpec {
-    /// Which shell to run.
-    pub profile: ShellProfile,
+    /// What the session runs.
+    pub program: SessionProgram,
     /// The working directory, or the caller's own when `None`.
     pub cwd: Option<PathBuf>,
     /// The initial grid size.
@@ -87,8 +135,8 @@ pub struct SessionSpec {
     /// would have made [`SessionSpec::with_env_overriding_the_scrub`] a convention instead
     /// of the only door — and a security default an ordinary caller can undo is a
     /// suggestion, not a default. Privacy closes both routes, and it takes struct literals
-    /// of `SessionSpec` with it: outside this module [`SessionSpec::new`] is now the only
-    /// way to build one.
+    /// of `SessionSpec` with it: outside this module the constructors are the only way to
+    /// build one.
     ///
     /// [`SessionSpec::env`] stays public because reaching it directly changes nothing —
     /// the scrub still runs over whatever is there.
@@ -101,8 +149,41 @@ impl SessionSpec {
     /// A spec for `profile` with every other field at its default.
     #[must_use]
     pub fn new(profile: ShellProfile) -> Self {
+        Self::running(SessionProgram::Shell(profile))
+    }
+
+    /// A spec for a program a caller has already resolved, labelled `label`.
+    ///
+    /// The second door, and the one an agent session comes through: resolving the agent CLI
+    /// is [`crate::agent`]'s job (D-4), so what reaches this module is an argv that is known
+    /// to be launchable rather than a name to look up. `argv` is `argv[0]`-first, exactly as
+    /// [`crate::agent::AgentLaunch::argv`] hands it over, and an empty one is refused here
+    /// rather than at the spawn — where the failure would name no program at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::Spawn`] when `argv` is empty.
+    pub fn for_program(
+        argv: impl IntoIterator<Item = OsString>,
+        label: impl Into<String>,
+    ) -> Result<Self, SpawnError> {
+        let argv: Vec<OsString> = argv.into_iter().collect();
+        if argv.is_empty() {
+            return Err(SpawnError::Spawn {
+                program: String::new(),
+                reason: "a session was asked for with no program to run".to_owned(),
+            });
+        }
+        Ok(Self::running(SessionProgram::Resolved {
+            argv,
+            label: label.into(),
+        }))
+    }
+
+    /// A spec for `program` with every other field at its default.
+    fn running(program: SessionProgram) -> Self {
         Self {
-            profile,
+            program,
             cwd: None,
             size: TerminalSize::default(),
             env: Vec::new(),
@@ -172,7 +253,15 @@ impl SessionSpec {
     /// a process: the ordering *is* the guarantee, and a guarantee that can only be checked
     /// by spawning a shell and reading its screen is one nobody checks.
     fn build_command(&self) -> Result<portable_pty::CommandBuilder, SpawnError> {
-        let mut command = self.profile.command()?;
+        let mut command = match &self.program {
+            SessionProgram::Shell(profile) => profile.command()?,
+            // Already resolved and already validated, so there is nothing to look up — but
+            // the scrub below still runs over it, because §7.1's seven variables are not a
+            // shell's problem, they are every child's.
+            SessionProgram::Resolved { argv, .. } => {
+                portable_pty::CommandBuilder::from_argv(argv.clone())
+            }
+        };
         if let Some(cwd) = &self.cwd {
             command.cwd(cwd);
         }
@@ -794,7 +883,11 @@ mod tests {
     /// `pwsh` — so a PowerShell probe was typed at `cmd`, which echoed it back verbatim and
     /// the wait timed out. Taking both from one `spec` makes that mismatch unrepresentable.
     fn spawn_ready(spec: SessionSpec) -> (PtySession, PtyOutput, TerminalState) {
-        let profile = spec.profile.clone();
+        let profile = spec
+            .program
+            .shell()
+            .cloned()
+            .expect("these helpers drive shells; a resolved program has no probe language");
         let size = spec.size;
         let (session, output) = PtySession::spawn(spec).expect("the session must spawn");
         let mut state = TerminalState::new(size, VtConfig::default());
@@ -973,6 +1066,55 @@ mod tests {
         let unavailable = ShellProfile::Posix;
         let err = PtySession::spawn(SessionSpec::new(unavailable)).unwrap_err();
         assert!(matches!(err, SpawnError::Profile(_)));
+    }
+
+    #[test]
+    fn a_resolved_program_is_scrubbed_exactly_as_a_shell_is() {
+        // The arm an agent session comes through skips `ShellProfile::command`, which is
+        // where the *other* copy of the scrub lives — so this pins that the copy in
+        // `build_command` covers it, rather than leaving an agent as the one session type
+        // that inherits `ANTHROPIC_API_KEY` and a child-session marker.
+        let spec = SessionSpec::for_program(
+            [OsString::from("does-not-matter"), OsString::from("--flag")],
+            "Labelled",
+        )
+        .expect("a one-entry argv is not empty")
+        .with_env("ANTHROPIC_API_KEY", "leaked")
+        .with_env("CLAUDE_CODE_CHILD_SESSION", "leaked")
+        .with_env("TERM", "dumb");
+        let command = spec
+            .build_command()
+            .expect("a resolved program needs no lookup");
+
+        for name in env::SCRUBBED_VARS {
+            assert!(command.get_env(name).is_none(), "{name} leaked");
+        }
+        assert_eq!(command.get_env("TERM"), Some(env::FORCED_TERM.as_ref()));
+        assert_eq!(
+            command.get_argv().as_slice(),
+            [OsString::from("does-not-matter"), OsString::from("--flag")],
+            "the argv is spawned exactly as it was handed over"
+        );
+    }
+
+    #[test]
+    fn a_program_with_no_argv_is_refused_rather_than_spawned() {
+        // `CommandBuilder::from_argv` on an empty vector is a spawn with no program, and
+        // whatever it fails with names nothing a caller can act on.
+        let err = SessionSpec::for_program(Vec::new(), "Nothing").unwrap_err();
+        assert!(matches!(err, SpawnError::Spawn { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_resolved_program_is_labelled_by_its_caller_and_not_by_its_path() {
+        // Traps register #13: a tab shows a name, never somebody's disk.
+        let spec = SessionSpec::for_program(
+            [OsString::from(r"C:\Users\somebody\.local\bin\thing.exe")],
+            "Thing",
+        )
+        .expect("one argv entry");
+        assert_eq!(spec.program.label(), "Thing");
+        assert!(spec.program.shell().is_none());
     }
 
     #[test]

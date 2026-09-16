@@ -33,7 +33,9 @@ mod teardown;
 pub use env::{FORCED_COLORTERM, FORCED_TERM, SCRUBBED_VARS, sanitize};
 pub use profile::{ProfileError, ShellProfile};
 pub use resolve::{ResolveError, ResolvedProgram, resolve};
-pub use session::{DEFAULT_OUTPUT_QUEUE, Output, PtyOutput, PtySession, SessionSpec, SpawnError};
+pub use session::{
+    DEFAULT_OUTPUT_QUEUE, Output, PtyOutput, PtySession, SessionProgram, SessionSpec, SpawnError,
+};
 pub use teardown::DEFAULT_GRACE;
 
 // `crate::git` needs the same Job Object to enforce its timeouts: a `git` killed for
