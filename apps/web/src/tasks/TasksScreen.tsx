@@ -194,7 +194,10 @@ function FilterRow({
        * is:open` is what `gh issue list` asks by default — and a text box that accepted
        * typing and ignored it would be worse than one that does not accept it.
        */}
-      <div className="border-line bg-bg0 text-term flex min-w-0 flex-1 items-center gap-2 rounded-control border px-3 py-1.5 font-mono">
+      <div
+        title="The query Nysia sends. Editing it arrives with a later version."
+        className="border-line bg-bg0 text-term flex min-w-0 flex-1 items-center gap-2 rounded-control border px-3 py-1.5 font-mono"
+      >
         <span aria-hidden="true" className="text-fg3">
           {GLYPH.search}
         </span>
