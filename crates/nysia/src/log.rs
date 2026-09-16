@@ -337,17 +337,32 @@ mod tests {
     /// assertion's message is the thing a person pastes into an issue, so printing that text
     /// there is traps register #13 committed by the tests that exist to hold the rule.
     ///
-    /// So: how many lines carry `needle`, out of how many, and the first of those lines **cut
-    /// at the end of the match**. Which line, at what level, from which target is everything
-    /// these assertions decide; what follows the match is one environment variable's value.
+    /// So: how many lines carry `needle`, out of how many, and where the first of those lines
+    /// came from — which is everything these assertions decide. Nothing is **cut** out of the
+    /// line. An excerpt taken by cutting keeps whatever sits to its left, and on Windows the
+    /// line that carries a planted marker is `portable_pty::win::pseudocon`'s ERROR, whose
+    /// message *is* the caller-offered cwd: cutting at the end of the match printed
+    /// `C:\Users\<user>\AppData\Local\Temp\…` to say that a path had leaked. That is the same
+    /// protected class the rule names — `log_file::refusal_note` says "terminal bytes and a
+    /// caller's paths" — leaked by the message announcing the leak.
+    ///
+    /// [`provenance`] assembles the answer instead, out of three things that cannot carry a
+    /// path: a level out of a fixed vocabulary, a target, and `needle`, which every caller
+    /// takes from a const or from a marker this module composed. There is no prefix left to
+    /// grow, so a needle that matches late in a long line is no longer a long message; the one
+    /// piece that is not a fixed vocabulary is the target, and [`TARGET_CAP`] bounds it.
     ///
     /// The tests whose text is only what the test itself logged — a sentinel through
     /// [`through`] — still print it, because that is a synthetic buffer of a few lines with
     /// nothing in it the machine put there.
     ///
-    /// `crates/nysia/tests/log_confinement.rs` holds the same helper for the same reason. The
-    /// two cannot share one: that is a separate test binary, and this module is `#[cfg(test)]`
-    /// and unnameable from outside this crate.
+    /// `crates/nysia/tests/log_confinement.rs` holds a helper of the same name that still cuts
+    /// at the match, and is not this one. What it reports is `what_leaks`, which is
+    /// `adding SYS env:` on Windows — a fixed string `portable_pty::cmdbuilder` writes at the
+    /// front of its message, so the cut lands before the environment block rather than after a
+    /// path — and on Unix a marker under a `temp_dir()` that carries no user name. The two
+    /// cannot share one helper in any case: that is a separate test binary, and this module is
+    /// `#[cfg(test)]` and unnameable from outside this crate.
     fn where_it_is(written: &str, needle: &str) -> String {
         let lines = written.lines().count();
         let carrying: Vec<&str> = written
@@ -357,14 +372,89 @@ mod tests {
         let Some(first) = carrying.first() else {
             return format!("`{needle}` is in none of the {lines} lines written");
         };
-        let upto = first
-            .find(needle)
-            .map_or(*first, |at| &first[..at + needle.len()]);
         format!(
-            "`{needle}` is in {} of the {lines} lines written, the first of them reading \
-             `{upto}` up to the match",
-            carrying.len()
+            "`{needle}` is in {} of the {lines} lines written, the first of them {}",
+            carrying.len(),
+            provenance(first)
         )
+    }
+
+    /// The level tokens `tracing_subscriber::fmt` writes, which is the whole vocabulary
+    /// [`provenance`] will name a line by.
+    ///
+    /// None of the five is a substring of another, so the earliest one in a line is the level
+    /// rather than a word that happened to appear in a message ahead of it.
+    const LEVELS: [&str; 5] = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"];
+
+    /// How much of a target [`provenance`] will print.
+    ///
+    /// A target is a module path and the only part of an excerpt this module does not choose,
+    /// so it is the only part with a length to bound. 64 is past the longest this repo or its
+    /// terminal crates produce — `portable_pty::win::pseudocon` is 28 — which is what makes it
+    /// a guard against a line that is not shaped the way this expects rather than a trim.
+    const TARGET_CAP: usize = 64;
+
+    /// Where a line came from, in words that cannot carry what the line was carrying.
+    ///
+    /// Assembled, never sliced out of the line: the level is one of [`LEVELS`] and the target
+    /// is a run of module-path characters, which stops at the `\` of a Windows path, at the
+    /// `/` of a POSIX one, and at the first space of a message. See [`where_it_is`] for why
+    /// that matters.
+    ///
+    /// ANSI is stripped first because the two writers this module reads do not agree about it:
+    /// [`through`] sets `.with_ansi(false)`, and the child [`drive_child`] runs installs
+    /// `main`'s subscriber, which colours stderr whether or not it is a terminal — measured,
+    /// not assumed, and the shape it writes is
+    /// `\u{1b}[2m<time>\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m \u{1b}[2m<target>\u{1b}[0m…`. Left in,
+    /// the escape between the level and the target is the first thing the run below meets, and
+    /// it is not a module-path character and not whitespace for `trim_start` to drop — so the
+    /// run would come back empty and every coloured line would be "from no target".
+    fn provenance(line: &str) -> String {
+        let line = without_ansi(line);
+        let Some((at, level)) = LEVELS
+            .iter()
+            .filter_map(|level| line.find(level).map(|at| (at, *level)))
+            .min_by_key(|(at, _)| *at)
+        else {
+            return "a line `tracing` did not write".to_owned();
+        };
+        let run: String = line[at + level.len()..]
+            .trim_start()
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':'))
+            .collect();
+        // The `:` that ends `target: message` is in the run too, `::` having ruled out
+        // stopping at the first colon. A module path cannot end in one, so it is the
+        // separator wherever it is.
+        let target = run.trim_end_matches(':');
+        match target.len() {
+            0 => format!("at {level}, from no target"),
+            // `target` is ASCII by the predicate above, so this cuts on a character boundary.
+            len if len > TARGET_CAP => format!("at {level} from `{}…`", &target[..TARGET_CAP]),
+            _ => format!("at {level} from `{target}`"),
+        }
+    }
+
+    /// `line` with every CSI escape sequence removed.
+    ///
+    /// Enough for [`provenance`] and no more: `tracing_subscriber::fmt` colours with SGR, which
+    /// is `\u{1b}[`, parameters, then a final byte in `0x40..=0x7e`. An `\u{1b}` that begins
+    /// anything else is left where it is — it cannot put a path back into an excerpt built out
+    /// of [`LEVELS`] and a module path, which is the only property this has to hold.
+    fn without_ansi(line: &str) -> String {
+        let mut out = String::with_capacity(line.len());
+        let mut rest = line;
+        while let Some(at) = rest.find("\u{1b}[") {
+            out.push_str(&rest[..at]);
+            let parameters = &rest[at + "\u{1b}[".len()..];
+            // The final byte is ASCII by the predicate, so one byte past it is a boundary.
+            let Some(end) = parameters.find(|ch: char| ('\u{40}'..='\u{7e}').contains(&ch)) else {
+                return out;
+            };
+            rest = &parameters[end + 1..];
+        }
+        out.push_str(rest);
+        out
     }
 
     /// Why a child failed, without everything it logged on the way there.
