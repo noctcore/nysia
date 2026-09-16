@@ -55,8 +55,21 @@ const SETTLE: Duration = Duration::from_secs(10);
 /// spelling the screen exists for. Refused on the confined leg, honoured on the control.
 const ASKED: &str = "info,portable_pty::cmdbuilder=trace";
 
-/// A line the daemon writes about itself, so an empty file cannot pass for a confined one.
-const DAEMON_OWN_LINE: &str = "nysiad listening";
+/// A target only the daemon's **subscriber** writes, so an empty file cannot pass for a
+/// confined one.
+///
+/// `nysiad listening` was this control and proved less than it looked.
+/// `crates/nysia/src/daemon.rs` prints those words on **stdout**, and [`Nysiad::start`] points
+/// stdout at this same file — so a daemon whose subscriber wrote nothing at all satisfied it,
+/// and only the lifted leg, where the leak is itself a subscriber line, was showing that the
+/// pipeline under test had run at all. `nysia_core::rpc::server` raises the same words through
+/// `tracing::info!` a line later, and a **target** is something only the formatter puts in a
+/// line: no `println!` in this binary writes one.
+///
+/// The target on its own rather than the target and the message it introduces, because
+/// `tracing_subscriber::fmt` colours its output whether or not the handle is a terminal, and
+/// what sits between the two in the file is an ANSI escape rather than `: `.
+const A_TARGET_ONLY_THE_SUBSCRIBER_WRITES: &str = "nysia_core::rpc::server";
 
 /// What this leg's daemon writes out of a confined crate once the confinement is off.
 ///
@@ -398,9 +411,9 @@ fn the_shipped_binarys_log_is_confined_unless_the_way_out_is_named() {
     open_a_session(&lifted, &plant.dir);
     let written = lifted.log_until(&leaked);
     assert!(
-        written.contains(DAEMON_OWN_LINE),
-        "the control daemon wrote nothing about itself, so this file is not its log: {}",
-        where_it_is(&written, DAEMON_OWN_LINE)
+        written.contains(A_TARGET_ONLY_THE_SUBSCRIBER_WRITES),
+        "the control daemon's subscriber wrote nothing, so this file is not its log: {}",
+        where_it_is(&written, A_TARGET_ONLY_THE_SUBSCRIBER_WRITES)
     );
     assert!(
         written.contains(&leaked),
@@ -419,10 +432,10 @@ fn the_shipped_binarys_log_is_confined_unless_the_way_out_is_named() {
     open_a_session(&held, &plant.dir);
     let written = held.log_until(&leaked);
     assert!(
-        written.contains(DAEMON_OWN_LINE),
-        "the confined daemon wrote nothing about itself, so the assertion below would hold \
-         against an empty file: {}",
-        where_it_is(&written, DAEMON_OWN_LINE)
+        written.contains(A_TARGET_ONLY_THE_SUBSCRIBER_WRITES),
+        "the confined daemon's subscriber wrote nothing, so the assertion below would hold \
+         against a file only stdout had touched: {}",
+        where_it_is(&written, A_TARGET_ONLY_THE_SUBSCRIBER_WRITES)
     );
     assert!(
         !written.contains(&leaked),
