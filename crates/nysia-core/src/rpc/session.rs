@@ -169,11 +169,11 @@ impl IntoEnvelope for SessionError {
             )
             .with_next_command_args(["nysia", "session", "list"]),
             Self::Spawn(err) => {
-                // `%err` to the daemon's own log and a phrase in the envelope. The log is
-                // the daemon's own file, where the command line and the working directory
-                // are what make the line worth keeping; the envelope is read by a person,
-                // rendered in a window and pasted into issues.
-                tracing::warn!(%err, "a session could not be spawned");
+                // [`spawn_log_line`] to the daemon's own log and a phrase in the envelope.
+                // The log is the daemon's own file, where the command line and the working
+                // directory are what make the line worth keeping; the envelope is read by a
+                // person, rendered in a window and pasted into issues.
+                tracing::warn!(err = %spawn_log_line(&err), "a session could not be spawned");
                 envelope(
                     ErrorCode::SpawnFailed,
                     message,
@@ -189,8 +189,10 @@ impl IntoEnvelope for SessionError {
                 // `reason` and **not** the path, which is the split `rpc::project`'s `refuse`
                 // makes for the same kind of value: a folder that arrived over a socket is
                 // not this daemon's to write down, and the log is a file that outlives the
-                // request. `Spawn` and `Launch` above log their whole error because what
-                // those name is this machine's own PATH resolution.
+                // request. The line the split falls on is **refused or used**, not whose the
+                // value was: a path this arm names is one `confine_cwd` just threw out, and
+                // writing it down turns a rejection into a record of it. [`spawn_log_line`]
+                // says what the arm above keeps for the other half of that, and why.
                 tracing::debug!(reason, "a working directory was refused");
                 envelope(
                     ErrorCode::PathRefused,
@@ -271,7 +273,8 @@ fn launch_kind(err: &LaunchError) -> String {
 ///
 /// The rest are reduced too, rather than only the two that leak today. The rule a caller
 /// can rely on is then the whole rule: nothing an envelope from this module says was taken
-/// from an error's own text. Everything dropped here is on the daemon's log, at `warn`.
+/// from an error's own text. What dropping this leaves on the daemon's log, at `warn`, is
+/// [`spawn_log_line`] — which is not quite everything, and says which part and why.
 fn spawn_kind(err: &SpawnError) -> String {
     match err {
         SpawnError::Profile(err) => profile_kind(err),
@@ -284,6 +287,63 @@ fn spawn_kind(err: &SpawnError) -> String {
                 .to_owned()
         }
         SpawnError::Thread(_) => "one of the session's two threads could not be started".to_owned(),
+    }
+}
+
+/// What the daemon's own log says about a failed spawn.
+///
+/// [`SpawnError`]'s own `Display`, with one value taken out of it — the near-mirror of
+/// [`spawn_kind`], which takes nearly everything out because an envelope is read by a person
+/// and screenshotted. A daemon's log is allowed to keep more than an envelope is. It is not
+/// allowed to keep *everything*, and the difference used to be stated wrongly.
+///
+/// # What this line carries, said plainly, because the file used to say otherwise
+///
+/// #96's merge review found the comment beside [`SessionError::PathRefused`] justifying the
+/// `Spawn` arm's whole-error log on the grounds that "what those name is this machine's own
+/// PATH resolution". That holds for [`SessionError::Launch`] — a `&'static str` this crate
+/// chose, beside a [`ResolveError`] naming what this machine's own `PATH` search turned up.
+/// It did not hold here. Two caller-offered values reach this function, counted by hand with
+/// the match below as the tripwire that makes somebody recount, and the honest rule is not
+/// *whose the value was* but **whether the daemon used it or threw it out**.
+///
+/// - **The working directory, inside [`SpawnError::Spawn`]'s `reason`.** On Windows
+///   `portable-pty` builds that text as ``CreateProcessW `<command line>` in cwd
+///   `<directory>` failed``, so the `--cwd` a request asked for is in it verbatim. **It
+///   stays.** A spawn can only fail after `confine_cwd` accepted that directory and this
+///   daemon tried to start a process in it, so the line records what the daemon did rather
+///   than what it refused — and a spawn that failed is diagnosed from the command line and
+///   the directory it failed in or it is not diagnosed at all.
+/// - **The WSL distribution name, inside [`ProfileError::BadDistro`].** **That one goes.**
+///   `check_distro` threw it out for carrying a character that would be read as another
+///   `wsl.exe` argument, so nothing was ever done with it: it is the shape
+///   [`SessionError::PathRefused`] keeps out of the log, with none of the reason above for
+///   keeping it, and the caller who sent it already knows what they sent.
+///
+/// Keeping the first is payable because of a layer outside this file: the log is confined to
+/// the account the daemon runs as. On Unix that is *set* — `0700` on the runtime directory by
+/// `rpc::endpoint` and `0600` on the file by `rpc::log_file`, which
+/// `a_log_and_its_rotations_are_owner_only` holds it to. On Windows it is *inherited*, from
+/// the ACL `%LOCALAPPDATA%` already carries, and both of those functions say so and do
+/// nothing there; no test on that leg checks it. It is a trade and not a freedom, and
+/// `a_log_line_about_a_spawn_does_not_repeat_a_refused_distribution_name` guards the half
+/// that is not traded away.
+fn spawn_log_line(err: &SpawnError) -> String {
+    match err {
+        SpawnError::Profile(ProfileError::BadDistro(_)) => {
+            "could not start the session: the WSL distribution name was refused".to_owned()
+        }
+        // Spelled out rather than left to `_`, so a variant added to either enum has no arm
+        // here and this file stops compiling until somebody decides which of the two
+        // paragraphs above it falls under. The same tripwire `variant_of` is.
+        SpawnError::Profile(
+            ProfileError::Unavailable { .. } | ProfileError::WrongPlatform { .. },
+        )
+        | SpawnError::OpenPty(_)
+        | SpawnError::Spawn { .. }
+        | SpawnError::Writer(_)
+        | SpawnError::Confinement(_)
+        | SpawnError::Thread(_) => err.to_string(),
     }
 }
 
@@ -1924,6 +1984,57 @@ mod tests {
             covered.len(),
             EVERY_VARIANT.len(),
             "the roster is missing a variant: it covers {covered:?}"
+        );
+    }
+
+    /// The daemon's own log does not repeat a value the daemon refused either.
+    ///
+    /// The other half of #96's review finding, and a **narrower** rule than the one above:
+    /// an envelope names no file at all, while the log deliberately keeps the command line
+    /// and the working directory of a spawn that failed. [`spawn_log_line`] is where that
+    /// line is drawn and why it falls where it does; this holds the one value it drops.
+    ///
+    /// # What is checked, and the one thing that is not
+    ///
+    /// Both halves of that function, so neither can drift into the other: a refused WSL
+    /// distribution name is gone, and a failed spawn's own text is still there. Answering
+    /// the `BadDistro` arm with `err.to_string()` — the narrowing removed, leaving the
+    /// whole-error log this replaced — reds the first assertion; answering the rest with
+    /// [`spawn_kind`] reds the second. Both were run. Deleting the `BadDistro` arm outright
+    /// does not red anything, because it does not compile: that is the tripwire, and it is
+    /// the compiler's and not this test's.
+    ///
+    /// Not checked: the `tracing` call site, which is one line from the function and read by
+    /// eye, so putting `%err` back *there* is a change this would go on passing through.
+    /// [`no_refusal_this_module_answers_with_carries_a_path`] is the same — it calls
+    /// `into_envelope`, not the wire.
+    #[test]
+    fn a_log_line_about_a_spawn_does_not_repeat_a_refused_distribution_name() {
+        // Constructed rather than provoked, for the reason the test above gives: `Wsl` is
+        // `WrongPlatform` before it is anything else off Windows, so provoking this would
+        // run on one leg. The *name* is still one `check_distro` would genuinely refuse —
+        // it carries whitespace — rather than one only this test calls refused. A distro
+        // arrives as an arbitrary string in `ShellProfile::Wsl`, so a path-shaped one is a
+        // thing a caller can send.
+        let refused = format!("{SECRET} --and-another-argument");
+        let line = spawn_log_line(&SpawnError::Profile(ProfileError::BadDistro(refused)));
+        for secret in [SECRET, SECRET_COMPONENT, &whoami()] {
+            assert!(
+                !line.contains(secret),
+                "`check_distro` threw this name out and the log wrote it down anyway: {line}"
+            );
+        }
+
+        // The half that is deliberately kept, so that "drop the refused one" cannot quietly
+        // become "drop everything" and take the daemon's only account of the failure with it.
+        let kept = spawn_log_line(&SpawnError::Spawn {
+            program: SECRET.to_owned(),
+            reason: format!("CreateProcessW `{SECRET}` in cwd `{SECRET}` failed: …"),
+        });
+        assert!(
+            kept.contains(SECRET),
+            "a failed spawn is diagnosed from the command line and the directory it failed \
+             in, and this is the only place either is written down: {kept}"
         );
     }
 
