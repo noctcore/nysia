@@ -250,3 +250,27 @@ describe('a sidebar with no projects', () => {
     }
   });
 });
+
+describe('a project list the window could not re-read', () => {
+  it('says so above the rows it is still drawing', () => {
+    // The rows were true when the daemon said them and this says nothing about now, so
+    // silence here would be the stalest thing the sidebar does.
+    const markup = render(
+      new MockStore(snapshotWith({ projectsUnavailable: 'the connection to the daemon failed' })),
+    );
+    expect(markup).toContain('last heard about');
+    expect(markup).toContain('the connection to the daemon failed');
+  });
+
+  it('says nothing when the list is current', () => {
+    expect(render(new MockStore())).not.toContain('last heard about');
+  });
+
+  it('does not say it twice when there are no rows at all', () => {
+    // The empty state already carries the sentence, and a sidebar showing it above an
+    // explanation of itself reads as two different things having gone wrong.
+    const markup = render(new MockStore(empty('this daemon does not serve the project verbs yet')));
+    expect(markup).not.toContain('last heard about');
+    expect(markup).toContain('this daemon does not serve the project verbs yet');
+  });
+});

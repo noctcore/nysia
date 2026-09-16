@@ -150,6 +150,25 @@ export function AddProjectResult({ state }: { readonly state: AddProjectState })
  * a name on screen that cannot be told from a real one is the one thing a person cannot
  * check.
  */
+/**
+ * A list the window could not re-read, above the one it is still drawing.
+ *
+ * `projectsUnavailable` is the sidebar's empty state when there is nothing to show, but a
+ * refresh can fail with projects already on screen — and those were true when the daemon
+ * said them, not now. Silence there would be the stalest thing the sidebar does: rows that
+ * look live, against a daemon that has not confirmed them since.
+ */
+export function StaleProjects({ message }: { readonly message: string }) {
+  return (
+    <p
+      role="status"
+      className="text-fg3 border-line mx-2.5 mb-1 border-b pb-2 text-xs leading-normal wrap-anywhere"
+    >
+      These are the projects Nysia last heard about. {message}
+    </p>
+  );
+}
+
 export function NoProjects({
   connecting,
   unavailable,

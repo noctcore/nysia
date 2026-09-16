@@ -345,7 +345,15 @@ export class DaemonStore implements Store {
     // Selected either way. A folder that was already registered is still the one the user
     // just went looking for, and leaving the sidebar where it was would answer a deliberate
     // act with nothing moving.
-    this.#update((current) => ({ ...current, activeProjectId: registered.project.id }));
+    //
+    // Only if the re-read found it, though. When `project_list` failed the sidebar is still
+    // drawing the list it had, and pointing `activeProjectId` at something absent from it
+    // would leave a selection nothing renders and a `selectProject` that rejects.
+    this.#update((current) =>
+      current.projects.some((project) => project.id === registered.project.id)
+        ? { ...current, activeProjectId: registered.project.id }
+        : current,
+    );
   };
 
   dismissAddProject = async (): Promise<void> => {

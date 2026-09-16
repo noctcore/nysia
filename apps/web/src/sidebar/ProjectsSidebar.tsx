@@ -7,7 +7,12 @@ import type { Project, SessionSummary, Worktree } from '../store/types';
 import { GLYPH } from '../ui/glyphs';
 import { SectionLabel } from '../ui/SectionLabel';
 import { useNow } from '../ui/useNow';
-import { AddProjectButton, AddProjectResult, NoProjects } from './AddProject';
+import {
+  AddProjectButton,
+  AddProjectResult,
+  NoProjects,
+  StaleProjects,
+} from './AddProject';
 
 /**
  * The 222px projects sidebar (design-spec.md §3).
@@ -56,7 +61,9 @@ export function ProjectsSidebar() {
             unavailable={projectsUnavailable}
             state={addProject}
           />
-        ) : null}
+        ) : projectsUnavailable === null ? null : (
+          <StaleProjects message={projectsUnavailable} />
+        )}
         {groups.map(([group, members]) => (
           <div key={group}>
             <SectionLabel
