@@ -213,7 +213,9 @@ mod tests {
         );
         assert!(
             written.contains(LEAKING_TARGET),
-            "this leg's leak was expected from {LEAKING_TARGET} and came from elsewhere.              `portable_pty` may have moved the call site; `log_file`'s docs cite it by file              and line and would need the same correction: {written}"
+            "this leg's leak was expected from {LEAKING_TARGET} and came from elsewhere; \
+             `portable_pty` may have moved the call site, which `log_file`'s docs cite by \
+             file and line: {written}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -314,7 +316,7 @@ mod tests {
         );
         assert!(
             !written.contains("a spawn in some cwd"),
-            "portable_pty is held off; at warn this ERROR would have gone straight through:              {written}"
+            "portable_pty is held off; at warn this ERROR would have gone through: {written}"
         );
     }
 
