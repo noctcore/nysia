@@ -81,6 +81,50 @@ enum Command {
         #[command(subcommand)]
         action: AgentAction,
     },
+    /// Register folders as projects, list them, and forget them (v0.3 §3).
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+}
+
+/// `nysia project …`
+#[derive(Debug, Subcommand)]
+enum ProjectAction {
+    /// Register a folder as a project.
+    ///
+    /// The folder must be a git repository. Nysia does not own it, does not move it, and
+    /// does not write into it beyond ordinary git operations.
+    Register(RegisterArgs),
+    /// List the projects this daemon has registered.
+    List {
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget a project's registration. Nothing on disk is touched.
+    Forget {
+        /// The project id, `proj_<32 hex digits>`.
+        id: String,
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `nysia project register …`
+#[derive(Debug, Args)]
+pub struct RegisterArgs {
+    /// The folder to register. Relative and unresolved spellings are fine.
+    ///
+    /// The **daemon** canonicalises it, because the id is derived from the canonical path
+    /// and a client that resolved it first would be one more spelling to disagree about.
+    /// That is also why registering the same folder twice is one project however it is
+    /// spelled.
+    pub path: PathBuf,
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// `nysia hook …`
@@ -373,6 +417,20 @@ pub enum Verb {
     TerminalWait(WaitArgs),
     /// `nysia agent status`
     AgentStatus(StatusArgs),
+    /// `nysia project register`
+    ProjectRegister(RegisterArgs),
+    /// `nysia project list`
+    ProjectList {
+        /// Print the result as JSON.
+        json: bool,
+    },
+    /// `nysia project forget`
+    ProjectForget {
+        /// The project id, as typed.
+        id: String,
+        /// Print the result as JSON.
+        json: bool,
+    },
 }
 
 impl Verb {
@@ -387,6 +445,8 @@ impl Verb {
             Self::TerminalResize(args) => args.json,
             Self::TerminalWait(args) => args.json,
             Self::AgentStatus(args) => args.json,
+            Self::ProjectRegister(args) => args.json,
+            Self::ProjectList { json } | Self::ProjectForget { json, .. } => *json,
         }
     }
 }
@@ -442,6 +502,11 @@ impl Cli {
             })),
             Some(Command::Agent { action }) => Mode::Client(Box::new(match action {
                 AgentAction::Status(args) => Verb::AgentStatus(args),
+            })),
+            Some(Command::Project { action }) => Mode::Client(Box::new(match action {
+                ProjectAction::Register(args) => Verb::ProjectRegister(args),
+                ProjectAction::List { json } => Verb::ProjectList { json },
+                ProjectAction::Forget { id, json } => Verb::ProjectForget { id, json },
             })),
             Some(Command::Hook(args)) => Mode::Hook(args),
             // `arg_required_else_help` means clap has already exited when there is no
@@ -501,7 +566,7 @@ mod tests {
     fn every_verb_takes_json() {
         // §6.2's contract only holds if it holds everywhere. A verb without --json is one an
         // agent has to scrape.
-        let cases: [&[&str]; 8] = [
+        let cases: [&[&str]; 11] = [
             &["nysia", "session", "create", "--json"],
             &["nysia", "session", "list", "--json"],
             &["nysia", "session", "close", "sess_x", "--json"],
@@ -514,6 +579,9 @@ mod tests {
             ],
             &["nysia", "terminal", "wait", "sess_x", "--json"],
             &["nysia", "agent", "status", "--json"],
+            &["nysia", "project", "register", ".", "--json"],
+            &["nysia", "project", "list", "--json"],
+            &["nysia", "project", "forget", "proj_x", "--json"],
         ];
         for argv in cases {
             match parse(argv).into_mode() {
@@ -605,6 +673,44 @@ mod tests {
             panic!("a status read parses as one");
         };
         assert_eq!(args.pane.as_deref(), Some("tab_1:leaf_1"));
+    }
+
+    #[test]
+    fn the_project_verbs_route_to_the_spelling_the_acceptance_test_drives() {
+        // `crates/nysia/tests/projects.rs` drives `nysia project list --json` and expects a
+        // bare array on stdout. That spelling is fixed by a test this crate may not edit, so
+        // it is pinned here too rather than left to be rediscovered from a red acceptance run.
+        let Mode::Client(verb) = parse(&["nysia", "project", "list", "--json"]).into_mode() else {
+            panic!("a project list is a client verb");
+        };
+        assert!(matches!(*verb, Verb::ProjectList { json: true }));
+
+        let Mode::Client(verb) =
+            parse(&["nysia", "project", "register", "some/folder"]).into_mode()
+        else {
+            panic!("a registration is a client verb");
+        };
+        let Verb::ProjectRegister(args) = *verb else {
+            panic!("a registration parses as one");
+        };
+        assert_eq!(args.path, PathBuf::from("some/folder"));
+
+        let Mode::Client(verb) = parse(&["nysia", "project", "forget", "proj_x"]).into_mode()
+        else {
+            panic!("forgetting is a client verb");
+        };
+        let Verb::ProjectForget { id, .. } = *verb else {
+            panic!("forgetting parses as itself");
+        };
+        assert_eq!(id, "proj_x");
+    }
+
+    #[test]
+    fn registering_needs_a_folder_to_register() {
+        // Not an optional argument defaulting to the current directory: the daemon's working
+        // directory is not the caller's, so a bare `nysia project register` that "worked"
+        // would register whichever folder the daemon happened to be started in.
+        assert!(Cli::parse_from_argv(["nysia", "project", "register"]).is_err());
     }
 
     #[test]

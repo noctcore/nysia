@@ -22,12 +22,14 @@ use nysia_core::rpc::{
 };
 use nysia_proto::{
     AgentStatus, AgentStatusRow, ClientId, ClientRole, ErrorEnvelope, ExitStatus, LineCursor,
-    PaneKey, SessionCreate, SessionCreated, SessionHandle, SessionKind, SessionSummary,
-    TerminalRead, TerminalReadResult, TerminalResize, TerminalSend, TerminalWait,
-    TerminalWaitResult, UnixMillis, WaitOutcome,
+    PaneKey, Project, ProjectId, ProjectRegistered, SessionCreate, SessionCreated, SessionHandle,
+    SessionKind, SessionSummary, TerminalRead, TerminalReadResult, TerminalResize, TerminalSend,
+    TerminalWait, TerminalWaitResult, UnixMillis, WaitOutcome,
 };
 
-use crate::cli::{CreateArgs, ReadArgs, ResizeArgs, SendArgs, StatusArgs, Verb, WaitArgs};
+use crate::cli::{
+    CreateArgs, ReadArgs, RegisterArgs, ResizeArgs, SendArgs, StatusArgs, Verb, WaitArgs,
+};
 
 /// Why a verb could not be run.
 ///
@@ -202,6 +204,18 @@ pub async fn run(verb: Verb, no_spawn: bool) -> Result<(), VerbError> {
             };
             print_statuses(&statuses, json);
         }
+        Prepared::ProjectRegister(path) => {
+            let registered = client.project_register(path).await?;
+            print_registered(&registered, json);
+        }
+        Prepared::ProjectList => {
+            let projects = client.project_list().await?;
+            print_projects(&projects, json);
+        }
+        Prepared::ProjectForget(id) => {
+            client.project_forget(id).await?;
+            print_done("forgotten", json);
+        }
     }
     Ok(())
 }
@@ -220,6 +234,9 @@ enum Prepared {
     TerminalResize(TerminalResize),
     TerminalWait(TerminalWait),
     AgentStatus(Option<PaneKey>),
+    ProjectRegister(std::path::PathBuf),
+    ProjectList,
+    ProjectForget(ProjectId),
 }
 
 /// Check a verb's arguments, without touching the socket.
@@ -233,6 +250,35 @@ fn prepare(verb: Verb) -> Result<Prepared, VerbError> {
         Verb::TerminalResize(args) => Prepared::TerminalResize(resize_request(&args)?),
         Verb::TerminalWait(args) => Prepared::TerminalWait(wait_request(&args)?),
         Verb::AgentStatus(args) => Prepared::AgentStatus(status_pane(&args)?),
+        Verb::ProjectRegister(args) => Prepared::ProjectRegister(register_path(&args)?),
+        Verb::ProjectList { .. } => Prepared::ProjectList,
+        Verb::ProjectForget { id, .. } => Prepared::ProjectForget(parse_project_id(&id)?),
+    })
+}
+
+/// The folder `project register` was pointed at.
+///
+/// Checked for emptiness and **not resolved**: the daemon canonicalises, because the id is
+/// derived from the canonical path and two clients resolving it two ways would be two
+/// projects for one folder. A blank argument is caught here rather than travelling to the
+/// daemon to come back as "that path does not exist", which is true and unhelpful.
+fn register_path(args: &RegisterArgs) -> Result<std::path::PathBuf, VerbError> {
+    if args.path.as_os_str().is_empty() {
+        return Err(VerbError::argument(
+            "a folder to register cannot be blank",
+            "pass the folder to register, as in `nysia project register .`",
+        ));
+    }
+    Ok(args.path.clone())
+}
+
+/// Parse a project id, saying what a good one looks like.
+fn parse_project_id(raw: &str) -> Result<ProjectId, VerbError> {
+    raw.parse().map_err(|err| {
+        VerbError::argument(
+            format!("{err}"),
+            "run `nysia project list` to see the ids this daemon holds",
+        )
     })
 }
 
@@ -449,6 +495,81 @@ fn print_wait(result: &TerminalWaitResult, json: bool) {
         WaitOutcome::Idle => println!("idle"),
         WaitOutcome::TimedOut => println!("timed out"),
     }
+}
+
+/// Print what `project register` did.
+///
+/// Without `--json`, the id alone on stdout — so `nysia project forget $(nysia project
+/// register .)` is the obvious thing and works, which is the same reason `session create`
+/// prints its handle alone. Whether the folder was **already** a project goes to stderr: it
+/// is the thing a person needs to be told and the thing a pipe must not be given.
+fn print_registered(registered: &ProjectRegistered, json: bool) {
+    if json {
+        emit_json(registered);
+        return;
+    }
+    println!("{}", registered.project.id);
+    let _ = writeln!(
+        std::io::stderr(),
+        "{} {}",
+        if registered.already_registered {
+            "already registered:"
+        } else {
+            "registered"
+        },
+        registered.project.name
+    );
+}
+
+/// Print `project list`.
+///
+/// The JSON shape is the one `crates/nysia/tests/projects.rs` pins: a bare array on stdout,
+/// one object per project, each with a string `id` — the same shape `session list --json`
+/// uses. That test was written before this code and may not be bent to fit it.
+fn print_projects(projects: &[Project], json: bool) {
+    if json {
+        emit_json(&projects);
+        return;
+    }
+    if projects.is_empty() {
+        let _ = writeln!(std::io::stderr(), "no projects");
+        return;
+    }
+    for project in projects {
+        println!(
+            "{}  {:<20}  {:<8}  {}",
+            project.id,
+            project.name,
+            project.group,
+            branches(project)
+        );
+    }
+}
+
+/// A project's worktrees, as one line names them.
+///
+/// The primary first and marked, because that is the checkout the project was registered
+/// from and the one a person is usually looking for. An empty list is said in words rather
+/// than left blank: it means git did not describe the repository — it was not reached in
+/// time, or the folder is no longer one — and a blank column reads as "no information" when
+/// the information is that there is a problem.
+fn branches(project: &Project) -> String {
+    if project.worktrees.is_empty() {
+        return "(git did not describe it)".to_owned();
+    }
+    let mut named: Vec<String> = project
+        .worktrees
+        .iter()
+        .map(|worktree| {
+            if worktree.is_primary {
+                format!("{}*", worktree.branch)
+            } else {
+                worktree.branch.clone()
+            }
+        })
+        .collect();
+    named.sort_by_key(|branch| !branch.ends_with('*'));
+    named.join(", ")
 }
 
 /// Print `agent status`.
