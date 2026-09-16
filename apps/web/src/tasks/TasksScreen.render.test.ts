@@ -152,6 +152,16 @@ describe('the four ways to show nothing', () => {
       expect(markup, name).toContain('Ask again');
     }
   });
+
+  it('says a query is running rather than showing nothing at all', () => {
+    // Not one of the four, and the one state where a blank region would be indistinguishable
+    // from a screen that had quietly given up. There is nothing to ask again while one is in
+    // flight, so the button is not offered.
+    const loading = showing({ phase: 'loading' });
+    expect(loading).toContain('Asking GitHub…');
+    expect(loading).not.toContain('Ask again');
+    expect(loading).not.toContain('role="columnheader"');
+  });
 });
 
 describe('what it says about a Start that happened', () => {
