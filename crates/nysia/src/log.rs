@@ -329,6 +329,61 @@ mod tests {
         Marked { marker, dir }
     }
 
+    /// What an assertion may say about a log it must not print.
+    ///
+    /// The tests that drive [`plant_a_failed_spawn`] read whatever `portable_pty` wrote, and
+    /// on Windows the leg with the confinement off is `get_base_env`'s whole HKLM and HKCU
+    /// environment block — `Path`, `JAVA_HOME`, every `NVM_*`, the machine's user name. An
+    /// assertion's message is the thing a person pastes into an issue, so printing that text
+    /// there is traps register #13 committed by the tests that exist to hold the rule.
+    ///
+    /// So: how many lines carry `needle`, out of how many, and the first of those lines **cut
+    /// at the end of the match**. Which line, at what level, from which target is everything
+    /// these assertions decide; what follows the match is one environment variable's value.
+    ///
+    /// The tests whose text is only what the test itself logged — a sentinel through
+    /// [`through`] — still print it, because that is a synthetic buffer of a few lines with
+    /// nothing in it the machine put there.
+    ///
+    /// `crates/nysia/tests/log_confinement.rs` holds the same helper for the same reason. The
+    /// two cannot share one: that is a separate test binary, and this module is `#[cfg(test)]`
+    /// and unnameable from outside this crate.
+    fn where_it_is(written: &str, needle: &str) -> String {
+        let lines = written.lines().count();
+        let carrying: Vec<&str> = written
+            .lines()
+            .filter(|line| line.contains(needle))
+            .collect();
+        let Some(first) = carrying.first() else {
+            return format!("`{needle}` is in none of the {lines} lines written");
+        };
+        let upto = first
+            .find(needle)
+            .map_or(*first, |at| &first[..at + needle.len()]);
+        format!(
+            "`{needle}` is in {} of the {lines} lines written, the first of them reading \
+             `{upto}` up to the match",
+            carrying.len()
+        )
+    }
+
+    /// Why a child failed, without everything it logged on the way there.
+    ///
+    /// [`drive_child`] hands back the child's whole stdout and stderr, and on the leg with the
+    /// way out named that is this machine's environment block — so "the child failed" cannot
+    /// print it either, for [`where_it_is`]'s reason. What is wanted of a failed child is its
+    /// panic, which libtest writes as `panicked at <source location>` and then the message,
+    /// both of them this repo's own words.
+    fn why_it_failed(text: &str) -> String {
+        let Some(at) = text.find("panicked at") else {
+            return format!(
+                "nothing in the {} lines it wrote says it panicked",
+                text.lines().count()
+            );
+        };
+        text[at..].lines().take(2).collect::<Vec<_>>().join(" — ")
+    }
+
     /// Fail a spawn in the two ways that hand `portable_pty` a caller-offered path.
     ///
     /// A real [`PtySession::spawn`], never a `tracing::error!` raised on the crate's target:
@@ -560,13 +615,15 @@ mod tests {
 
         assert!(
             written.contains(&plant.marker),
-            "nothing wrote this path, so the confined case proves nothing: {written}"
+            "nothing wrote this path, so the confined case proves nothing: {}",
+            where_it_is(&written, &plant.marker)
         );
         assert!(
             written.contains(LEAKING_TARGET),
             "this leg's leak was expected from {LEAKING_TARGET} and came from elsewhere; \
              `portable_pty` may have moved the call site, which `log_file`'s docs cite by \
-             file and line: {written}"
+             file and line: {}",
+            where_it_is(&written, LEAKING_TARGET)
         );
     }
 
@@ -602,7 +659,8 @@ mod tests {
 
             assert!(
                 !written.contains(&plant.marker),
-                "NYSIA_LOG={asked}: a path the caller offered reached the log: {written}"
+                "NYSIA_LOG={asked}: a path the caller offered reached the log: {}",
+                where_it_is(&written, &plant.marker)
             );
             // Not only the marker. On Windows `portable_pty::cmdbuilder` prints the whole
             // inherited environment at `trace`, name and value, and carries no marker at all —
@@ -610,7 +668,8 @@ mod tests {
             // so that is what is asserted.
             assert!(
                 !written.contains("portable_pty"),
-                "NYSIA_LOG={asked}: `portable_pty` is held off and wrote anyway: {written}"
+                "NYSIA_LOG={asked}: `portable_pty` is held off and wrote anyway: {}",
+                where_it_is(&written, "portable_pty")
             );
         }
     }
@@ -688,6 +747,10 @@ mod tests {
         // the module that actually wrote the line, which is the spelling the screen exists
         // for — and the one that also has this process print a refusal, so the confined leg
         // is not silent about what it would not honour.
+        //
+        // Neither leg's text is printed on a failure. See [`where_it_is`]: with the way out
+        // named and `trace` asked for, what the control child wrote is this machine's own
+        // environment block.
         let leaf = "a_child_that_logs_through_the_real_filter";
         let module_qualified = format!("{LEAKING_TARGET}=trace");
 
@@ -700,39 +763,46 @@ mod tests {
             let (ok, lifted) = drive_child(leaf, &plant.dir, asked, true);
             assert!(
                 ok,
-                "NYSIA_LOG={asked:?}: the control child failed:\n{lifted}"
+                "NYSIA_LOG={asked:?}: the control child failed: {}",
+                why_it_failed(&lifted)
             );
             assert!(
                 lifted.contains(CHILD_OK),
                 "NYSIA_LOG={asked:?}: the control child was filtered out rather than run, so \
-                 nothing below it means anything:\n{lifted}"
+                 nothing below it means anything: {}",
+                where_it_is(&lifted, CHILD_OK)
             );
             assert!(
                 lifted.contains(&plant.marker),
                 "NYSIA_LOG={asked:?}: nothing leaked even with the way out named, so the \
-                 confined leg would hold for the wrong reason:\n{lifted}"
+                 confined leg would hold for the wrong reason: {}",
+                where_it_is(&lifted, &plant.marker)
             );
             assert!(
                 lifted.contains(LEAKING_TARGET),
                 "NYSIA_LOG={asked:?}: this leg's leak was expected from {LEAKING_TARGET} and \
                  came from elsewhere; `portable_pty` may have moved the call site, which \
-                 `log_file`'s docs cite by file and line:\n{lifted}"
+                 `log_file`'s docs cite by file and line: {}",
+                where_it_is(&lifted, LEAKING_TARGET)
             );
 
             let (ok, held) = drive_child(leaf, &plant.dir, asked, false);
             assert!(
                 ok,
-                "NYSIA_LOG={asked:?}: the confined child failed:\n{held}"
+                "NYSIA_LOG={asked:?}: the confined child failed: {}",
+                why_it_failed(&held)
             );
             assert!(
                 held.contains(CHILD_OK),
                 "NYSIA_LOG={asked:?}: the confined child was filtered out rather than run, so \
-                 the assertion below would hold for the wrong reason:\n{held}"
+                 the assertion below would hold for the wrong reason: {}",
+                where_it_is(&held, CHILD_OK)
             );
             assert!(
                 !held.contains(&plant.marker),
                 "NYSIA_LOG={asked:?}: a path the caller offered reached the log of a process \
-                 nobody told to lift the confinement:\n{held}"
+                 nobody told to lift the confinement: {}",
+                where_it_is(&held, &plant.marker)
             );
         }
     }

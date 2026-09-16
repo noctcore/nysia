@@ -124,6 +124,44 @@ fn a_marked_directory(tag: &str) -> Marked {
     Marked { marker, dir }
 }
 
+/// What an assertion may say about a log it must not print.
+///
+/// Every assertion below reads a file this test told a daemon to fill, and on Windows the
+/// control leg has deliberately put `get_base_env`'s whole HKLM and HKCU environment block in
+/// it — `Path`, `JAVA_HOME`, every `NVM_*`, the machine's user name — because that block *is*
+/// the evidence that leg exists to find. The file itself is owner-only
+/// (`log_file::open_for_append`), but a failing assertion's message is the thing a person
+/// pastes into an issue, and pasting it would carry the environment straight past those
+/// permissions. That is traps register #13 in the test whose subject is keeping such content
+/// out of a file.
+///
+/// So: how many of the log's lines carry `needle`, out of how many, and the first of those
+/// lines **cut at the end of the match**. Which line, at what level, from which target is
+/// everything these assertions decide; what follows the match is, on Windows, one environment
+/// variable's value, and none of it is diagnosis.
+///
+/// `crates/nysia/src/log.rs` holds the same helper for the same reason. The two cannot share
+/// one: this is a separate test binary, and the other lives in a `#[cfg(test)]` module that
+/// nothing outside its crate can name.
+fn where_it_is(written: &str, needle: &str) -> String {
+    let lines = written.lines().count();
+    let carrying: Vec<&str> = written
+        .lines()
+        .filter(|line| line.contains(needle))
+        .collect();
+    let Some(first) = carrying.first() else {
+        return format!("`{needle}` is in none of the log's {lines} lines");
+    };
+    let upto = first
+        .find(needle)
+        .map_or(*first, |at| &first[..at + needle.len()]);
+    format!(
+        "`{needle}` is in {} of the log's {lines} lines, the first of them reading `{upto}` up \
+         to the match",
+        carrying.len()
+    )
+}
+
 /// The shell profile this machine can actually start.
 ///
 /// `pwsh` where §9 says it is — both CI runners have it — `cmd` on a Windows box without it,
@@ -349,6 +387,10 @@ fn the_shipped_binarys_log_is_confined_unless_the_way_out_is_named() {
     //
     // One difference between the two daemons: `NYSIA_LOG_UNCONFINED`. Same binary, same
     // `NYSIA_LOG`, same profile, same planted values, same file read the same way.
+    //
+    // No assertion here prints the log. See [`where_it_is`] for why not, and note that the
+    // reason is this test's own subject: the control leg's file carries, on Windows, exactly
+    // the environment block the confined leg exists to keep out of one.
     let plant = a_marked_directory("lifted");
     let leaked = what_leaks(&plant.marker);
 
@@ -357,13 +399,15 @@ fn the_shipped_binarys_log_is_confined_unless_the_way_out_is_named() {
     let written = lifted.log_until(&leaked);
     assert!(
         written.contains(DAEMON_OWN_LINE),
-        "the control daemon wrote nothing about itself, so this file is not its log: {written}"
+        "the control daemon wrote nothing about itself, so this file is not its log: {}",
+        where_it_is(&written, DAEMON_OWN_LINE)
     );
     assert!(
         written.contains(&leaked),
         "nothing reached the log even with {} named, so the confined leg below would hold for \
-         the wrong reason — see `what_leaks` for what this leg was expecting and why: {written}",
-        log_file::UNCONFINED_ENV
+         the wrong reason — see `what_leaks` for what this leg was expecting and why: {}",
+        log_file::UNCONFINED_ENV,
+        where_it_is(&written, &leaked)
     );
     drop(lifted);
 
@@ -377,11 +421,13 @@ fn the_shipped_binarys_log_is_confined_unless_the_way_out_is_named() {
     assert!(
         written.contains(DAEMON_OWN_LINE),
         "the confined daemon wrote nothing about itself, so the assertion below would hold \
-         against an empty file: {written}"
+         against an empty file: {}",
+        where_it_is(&written, DAEMON_OWN_LINE)
     );
     assert!(
         !written.contains(&leaked),
-        "NYSIA_LOG={ASKED} reached a confined crate in the shipped binary: {written}"
+        "NYSIA_LOG={ASKED} reached a confined crate in the shipped binary: {}",
+        where_it_is(&written, &leaked)
     );
     drop(held);
 }
