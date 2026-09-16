@@ -449,12 +449,24 @@ impl GitCommand {
     /// `--upload-pack=calc` creates — see
     /// `a_dash_leading_operand_is_a_path_only_because_of_the_separator` for git's two answers
     /// to the same path with and without it.
-    #[allow(
-        dead_code,
-        reason = "the worktree verbs that need a positional path are wave C; the fixtures in `testing` use it today"
-    )]
     pub(crate) fn operand_path(mut self, path: &Path) -> Self {
         self.operands.push(path.as_os_str().to_owned());
+        self
+    }
+
+    /// Add a branch name as a command **operand**, for `git worktree add <path> <commit-ish>`.
+    ///
+    /// Named for what it carries, like [`GitCommand::operand_path`] and for the same reason:
+    /// this is a caller's string reaching git's own argument list, and the call site should
+    /// say so in review. It exists because `worktree add` takes the branch to check out
+    /// *positionally*, after the path — there is no option form of it to hide behind.
+    ///
+    /// The `--` this places in front is the protection, and it is the whole of it: everything
+    /// after the separator is an operand however it is spelled. `crate::worktree::ensure`
+    /// refuses a leading dash before it ever gets here anyway, because the `-b` form of the
+    /// same name is a bare argument where no separator can help.
+    pub(crate) fn operand_branch(mut self, branch: &str) -> Self {
+        self.operands.push(OsString::from(branch));
         self
     }
 

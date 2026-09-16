@@ -73,4 +73,12 @@ pub const REQUIRED_OPTIONS: &[&str] = &[
     // contain a newline, and because without it git escapes and quotes a lock reason per
     // `core.quotePath` rather than giving it plainly.
     "worktree list --porcelain -z",
+    // `Start ->`'s three. `check-ref-format` decides whether a branch name is one git
+    // accepts, so that this crate does not restate a subset of git's rules and refuse names
+    // git would take. `for-each-ref --format` answers whether a branch already exists without
+    // an exit code to interpret. `worktree add` takes `--`, which is what makes a branch or a
+    // directory beginning with a dash an operand rather than an option.
+    "check-ref-format refs/heads/<branch>",
+    "for-each-ref --format=%(refname) <pattern>",
+    "worktree add [-b <branch>] -- <path> [<commit-ish>]",
 ];
