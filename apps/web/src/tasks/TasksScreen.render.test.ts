@@ -234,6 +234,20 @@ describe('honesty', () => {
     }
   });
 
+  it('says the same of the query box, which is not a button to be swept up', () => {
+    // The sweep above matches `<button disabled="…">`, and the query box is neither: it is a
+    // `div` drawn as a search field, down to the border and the glyph, so nothing in this
+    // file saw it and the claim that every dead control explains itself was one control
+    // short of true. Asserted on the element rather than on the count, because what makes it
+    // look live is its styling and no rule can count that.
+    //
+    // Not `tagContaining`, which walks back to the nearest `<` and would return the `<span>`
+    // holding the text rather than the box drawn around it.
+    const at = loaded.indexOf('is:issue is:open');
+    expect(at, 'the query box is not on screen at all').toBeGreaterThan(-1);
+    expect(loaded.slice(loaded.lastIndexOf('<div', at), at)).toMatch(/title="[^"]+"/);
+  });
+
   it('leaves the refresh live, because it is the one the failure panel points at', () => {
     const refresh = tagContaining(loaded, 'aria-label="Refresh the issue list"');
     expect(refresh).not.toContain('disabled="');
