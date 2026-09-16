@@ -57,6 +57,19 @@ pub enum TransportError {
         /// Which endpoint.
         endpoint: String,
     },
+    /// Every instance of the endpoint is taken, and still was after waiting.
+    ///
+    /// **Its own variant because it is neither of the two answers beside it.** A busy pipe
+    /// is a daemon that is listening and has no free instance this instant, so calling it
+    /// [`Self::NotListening`] tells a spawner to start a second daemon next to a perfectly
+    /// healthy one — and calling it [`Self::Bind`] loses the one thing about it a caller can
+    /// act on, which is that waiting is the whole of the remedy. Windows only: a Unix socket
+    /// has a backlog and no equivalent state.
+    #[error("every instance of {endpoint} is busy")]
+    Busy {
+        /// Which endpoint.
+        endpoint: String,
+    },
     /// The endpoint could not be bound for some other reason.
     #[error("could not bind {endpoint}: {source}")]
     Bind {
@@ -324,6 +337,76 @@ impl Drop for Listener {
     }
 }
 
+/// `ERROR_PIPE_BUSY`: every instance of the pipe is connected to somebody.
+///
+/// Matched by number rather than by [`io::ErrorKind`], because which kind the standard
+/// library maps this to has changed between releases and the number has not.
+#[cfg(windows)]
+const ERROR_PIPE_BUSY: i32 = 231;
+
+/// How many times a dial re-opens a pipe whose every instance is taken, and how long it
+/// waits between tries.
+///
+/// **This is a race, not a queue, and the difference decides the numbers.**
+/// [`Listener::accept`] creates the replacement instance *after* `pending.connect()`
+/// returns, so a client dialling in that window meets `ERROR_PIPE_BUSY` from a daemon that
+/// is listening perfectly well. The window is one `CreateNamedPipeW` long.
+///
+/// So this waits a few hundred milliseconds at the outside and then stops. It is deliberately
+/// far too short to be a queue: a daemon genuinely saturated with clients has instances
+/// coming free continuously, and a dial that waited for one would turn a person's verb into
+/// a hang. What stays busy past this is reported as [`TransportError::Busy`], which is not
+/// "nobody is home" and not "not found" — see that variant.
+#[cfg(windows)]
+const PIPE_BUSY_ATTEMPTS: u32 = 10;
+
+/// How long a dial waits between re-opens. See [`PIPE_BUSY_ATTEMPTS`].
+#[cfg(windows)]
+const PIPE_BUSY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Open a client end of `name`, waiting out the window in which every instance is taken.
+#[cfg(windows)]
+async fn open_pipe(
+    name: &str,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, TransportError> {
+    for attempt in 1..=PIPE_BUSY_ATTEMPTS {
+        let opened = tokio::net::windows::named_pipe::ClientOptions::new().open(name);
+        return match opened {
+            Ok(client) => Ok(client),
+            // The one case worth trying again, and only until the accept loop has had time
+            // to create the next instance.
+            Err(source) if source.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                if attempt == PIPE_BUSY_ATTEMPTS {
+                    Err(TransportError::Busy {
+                        endpoint: name.to_owned(),
+                    })
+                } else {
+                    tokio::time::sleep(PIPE_BUSY_BACKOFF).await;
+                    continue;
+                }
+            }
+            // A pipe name that does not exist is the only thing that means nobody is home.
+            // A busy one must never reach here: the answer a spawner acts on is "start a
+            // daemon", and it would be starting a second one.
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                Err(TransportError::NotListening {
+                    endpoint: name.to_owned(),
+                })
+            }
+            Err(source) => Err(TransportError::Bind {
+                endpoint: name.to_owned(),
+                source,
+            }),
+        };
+    }
+    // Unreachable: the loop returns on every path but the busy one, and the busy one returns
+    // on its last attempt. Spelled out rather than restructured around an `Option`, so that
+    // the bound above is the only place the count is written.
+    Err(TransportError::Busy {
+        endpoint: name.to_owned(),
+    })
+}
+
 /// Create the next pipe instance, which is what lets a second client connect.
 #[cfg(windows)]
 fn next_instance(
@@ -367,20 +450,7 @@ pub async fn connect(endpoint: &Endpoint) -> Result<Connection, TransportError> 
             Ok(Connection::new(Box::new(stream), None))
         }
         #[cfg(windows)]
-        Listening::NamedPipe(name) => {
-            let client = tokio::net::windows::named_pipe::ClientOptions::new()
-                .open(name)
-                .map_err(|source| match source.kind() {
-                    io::ErrorKind::NotFound => TransportError::NotListening {
-                        endpoint: name.clone(),
-                    },
-                    _ => TransportError::Bind {
-                        endpoint: name.clone(),
-                        source,
-                    },
-                })?;
-            Ok(Connection::new(Box::new(client), None))
-        }
+        Listening::NamedPipe(name) => Ok(Connection::new(Box::new(open_pipe(name).await?), None)),
         #[cfg(unix)]
         Listening::NamedPipe(name) => Err(TransportError::Bind {
             endpoint: name.clone(),
@@ -746,6 +816,90 @@ mod tests {
         writer.write_all(b"down").await.expect("writes");
         writer.flush().await.expect("flushes");
         assert_eq!(&dialling.await.expect("joins"), b"down");
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// A dial that lands in the accept loop's window waits for the next instance.
+    ///
+    /// #96's fourth finding, the half that reads a busy pipe as an empty one. [`Listener::
+    /// accept`] replaces the instance only **after** `pending.connect()` returns, so a client
+    /// dialling inside that window meets `ERROR_PIPE_BUSY` from a daemon that is listening
+    /// perfectly well — and the mapping this used to have sent it to `Bind`, which
+    /// `nysia --daemon` read as "nobody is home" and exited non-zero over.
+    ///
+    /// The window is entered for real rather than simulated: the one instance that exists is
+    /// taken by a first dial, nothing has accepted yet, and the raw `open` underneath is
+    /// asserted to be busy before the retrying one is asked to get through it.
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn a_dial_that_meets_a_busy_pipe_waits_for_the_next_instance() {
+        let endpoint = crate::rpc::endpoint::scratch("busy-window");
+        let mut listener = Listener::bind(&endpoint).expect("binds");
+        let Listening::NamedPipe(name) = endpoint.listening() else {
+            panic!("a windows endpoint is a named pipe");
+        };
+        let name = name.clone();
+
+        // The first client takes the only instance there is. Nothing has accepted, so no
+        // replacement has been created: this is the window, entered.
+        let _taken = connect(&endpoint).await.expect("the first dial connects");
+
+        // What a single `open` sees in it — which is what the daemon's confirmation dial saw.
+        let Err(busy) = tokio::net::windows::named_pipe::ClientOptions::new().open(&name) else {
+            panic!("the instance must be taken, or this test is about nothing");
+        };
+        assert_eq!(
+            busy.raw_os_error(),
+            Some(ERROR_PIPE_BUSY),
+            "the window is ERROR_PIPE_BUSY, got {busy:?}"
+        );
+        assert_ne!(
+            busy.kind(),
+            io::ErrorKind::NotFound,
+            "and it is not NotFound, which is the one answer that makes a spawner start a \
+             second daemon"
+        );
+
+        // The accept loop gets to it a moment later, which is the whole duration of the race.
+        //
+        // Joined rather than spawned, so that `listener` stays alive in this scope. Moving it
+        // into a task drops it the moment the accept returns, and the last handle closing
+        // takes the pipe *name* with it — so the retrying dial would meet `NotFound`, which
+        // is a real answer for a real reason and not the one this test is about.
+        let (accepted, dialled) = tokio::join!(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                listener.accept().await
+            },
+            connect(&endpoint)
+        );
+        accepted.expect("the accept that creates the next instance");
+        dialled.expect("a dial inside the window waits for the next instance rather than failing");
+
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// A pipe that stays busy is neither "nobody is home" nor "not found".
+    ///
+    /// The bound on the retry, and the classification that goes with it. Nothing ever
+    /// accepts here, so every attempt meets the same taken instance and the dial gives up —
+    /// in a few hundred milliseconds, because a caller is a person's verb and a queue is not
+    /// what this is.
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn a_pipe_that_stays_busy_is_reported_as_busy_and_not_as_empty() {
+        let endpoint = crate::rpc::endpoint::scratch("busy-forever");
+        let _listener = Listener::bind(&endpoint).expect("binds");
+        let _taken = connect(&endpoint).await.expect("the first dial connects");
+
+        let Err(err) = connect(&endpoint).await else {
+            panic!("a second dial cannot connect while the only instance is taken");
+        };
+        assert!(
+            matches!(err, TransportError::Busy { .. }),
+            "a daemon with every instance taken is listening; got {err:?}"
+        );
+
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
     }
 }
