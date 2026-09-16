@@ -557,11 +557,43 @@ mod tests {
         );
     }
 
+    /// The words in `text` shaped like a path or a repository name.
+    ///
+    /// Three shapes, and the first version of this guard held only one of them. A Windows
+    /// path is a `\` or the colon after a drive letter; a POSIX path and an `owner/repo` slug
+    /// are the same shape as each other — a `/` inside a word — which is why one filter
+    /// catches both.
+    ///
+    /// `https://cli.github.com` is the one word in these messages that legitimately carries a
+    /// colon and a slash, and it is exempted **by its exact spelling rather than by its
+    /// scheme**. Exempting `https://` would wave through a future
+    /// `https://github.com/owner/repo`, which is the thing being guarded against wearing a
+    /// URL.
+    ///
+    /// It returns the words instead of asserting on them so the guard can be pointed at a
+    /// string that *should* trip it, which is what
+    /// `the_path_guard_trips_on_each_shape_it_names` does. Traps register #12: a check that
+    /// passes without exercising anything is worse than none, because it stops the next
+    /// person looking — and this one had been doing exactly that.
+    fn path_shaped(text: &str) -> Vec<&str> {
+        // Trailing sentence punctuation is trimmed for the comparison only, so the exemption
+        // still holds if somebody ends a step with the URL and a full stop.
+        const ALLOWED: &[&str] = &["https://cli.github.com"];
+
+        text.split_whitespace()
+            .filter(|word| !ALLOWED.contains(&word.trim_end_matches(['.', ','])))
+            .filter(|word| word.contains(['\\', '/', ':']))
+            .collect()
+    }
+
     #[test]
     fn no_refusal_names_a_path_or_a_repository() {
         // Trap 14, asserted rather than trusted. `GhFailure` has no field to carry gh's text,
-        // so the only way a path could reach a message is somebody writing one into this
-        // module — which is what this test is here to catch.
+        // so the only way a path or a repository name could reach a message is somebody
+        // writing one into this module — which is what this test is here to catch.
+        //
+        // The command args are read too: a next command is a sentence the user is invited to
+        // run, and a path would reach them the same way through one.
         for failure in [
             GhFailure::NotInstalled,
             GhFailure::CouldNotRun,
@@ -571,21 +603,53 @@ mod tests {
             GhFailure::Unreadable,
         ] {
             let envelope = refusal(failure);
-            let text = format!("{} {}", envelope.message(), envelope.next_steps().join(" "));
-            for shape in ['\\', ':'] {
-                // `https://cli.github.com` is the one legitimate colon, and it is in the
-                // `gh_missing` steps rather than in any message built from a folder.
-                let suspicious = text
-                    .split_whitespace()
-                    .filter(|word| word.contains(shape))
-                    .filter(|word| !word.starts_with("https://"))
-                    .collect::<Vec<_>>();
-                assert!(
-                    suspicious.is_empty(),
-                    "a refusal looks like it carries a path: {suspicious:?}"
-                );
-            }
+            let text = format!(
+                "{} {} {}",
+                envelope.message(),
+                envelope.next_steps().join(" "),
+                envelope.next_command_args().unwrap_or_default().join(" ")
+            );
+            let suspicious = path_shaped(&text);
+            assert!(
+                suspicious.is_empty(),
+                "a refusal looks like it carries a path or a repository: {suspicious:?}"
+            );
         }
+    }
+
+    #[test]
+    fn the_path_guard_trips_on_each_shape_it_names() {
+        // **The proof that the guard above guards.** It used to flag only words containing a
+        // `\` or a `:`, so it held on Windows and nowhere else, and the sentence below — a
+        // refusal naming both a repository and a POSIX path — passed it untouched. That is
+        // worse than having no check, because the roster above reads as though it had been
+        // verified.
+        assert_eq!(
+            path_shaped(
+                "this project has no GitHub repository to list issues from noctcore/nysia in \
+                 /home/kacper/projects/nysia"
+            ),
+            vec!["noctcore/nysia", "/home/kacper/projects/nysia"],
+            "a repository slug and a POSIX path are both shapes this must catch"
+        );
+
+        // The Windows spelling, which is the one it always caught.
+        assert_eq!(
+            path_shaped("could not open C:\\Users\\kacper\\projects\\nysia"),
+            vec!["C:\\Users\\kacper\\projects\\nysia"]
+        );
+
+        // The one legitimate word stays clean, with and without a full stop after it —
+        // without this the roster above could not pass at all.
+        assert!(path_shaped("install the GitHub CLI from https://cli.github.com").is_empty());
+        assert!(path_shaped("see https://cli.github.com.").is_empty());
+
+        // And the exemption is that exact spelling, not the scheme: a repository wearing a
+        // URL is still a repository.
+        assert_eq!(
+            path_shaped("the issues live at https://github.com/Shironex/nysia"),
+            vec!["https://github.com/Shironex/nysia"]
+        );
     }
 
     #[test]
