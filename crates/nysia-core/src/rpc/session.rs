@@ -777,7 +777,7 @@ impl SessionRegistry {
             .collect()
     }
 
-    /// The sessions running inside `folder`, as the sidebar lists them under a worktree.
+    /// The sessions running inside `folder` and in no deeper one of `folders`.
     ///
     /// Containment rather than equality, which is [`CanonicalPath::contains`]'s own rule and
     /// the same one [`crate::git::Repository`] uses to decide which worktree a registered
@@ -785,14 +785,41 @@ impl SessionRegistry {
     /// `…/repo`. A session with no `cwd` belongs to no worktree — it inherited the daemon's,
     /// which is nobody's project.
     ///
-    /// **Nested worktrees would double-count**, and this does not guard against it: git
-    /// refuses to place a worktree inside another's working tree, so a session can be inside
-    /// at most one of a repository's worktrees.
+    /// # Why the whole set has to be passed in
+    ///
+    /// **Worktrees nest, and this is the code that made them.** Nysia puts the ones it
+    /// creates at `<project>/.nysia/worktrees/<slug>` (D-6, `crate::worktree::WORKTREE_BASE`),
+    /// so every one of them is inside the main worktree, and `contains` is true of both. A
+    /// session in `…/repo/.nysia/worktrees/feat-x` was listed under `feat/x` *and* under
+    /// `main` — one session in the sidebar twice, once under a worktree it is not in.
+    ///
+    /// The doc comment this replaces justified that with "git refuses to place a worktree
+    /// inside another's working tree". Git does not, `git worktree list` prints both, and the
+    /// shape it was describing is the one this repository ships.
+    ///
+    /// The rule is the one [`crate::worktree::mark_primary`] already uses for the same
+    /// question: **longest match**. A session belongs to the deepest worktree containing it,
+    /// which is one answer per session however many worktrees nest around it.
+    ///
+    /// `folders` is every worktree of the repository that has a directory — including the
+    /// detached and branchless ones the wire cannot spell and `project` leaves out of its
+    /// answer. It has to be: a session whose deepest worktree is one of those belongs to it,
+    /// and passing only the listable ones would float it up to the main worktree instead. Such
+    /// a session is listed under nothing, which is the honest answer — its worktree is not on
+    /// the wire either.
     #[must_use]
-    pub fn summaries_under(&self, folder: &CanonicalPath) -> Vec<SessionSummary> {
+    pub fn summaries_under(
+        &self,
+        folder: &CanonicalPath,
+        folders: &[CanonicalPath],
+    ) -> Vec<SessionSummary> {
         lock(&self.sessions)
             .values()
-            .filter(|session| session.cwd().is_some_and(|cwd| folder.contains(cwd)))
+            .filter(|session| {
+                session
+                    .cwd()
+                    .is_some_and(|cwd| deepest_containing(folders, cwd) == Some(folder))
+            })
             .map(|session| session.summary())
             .collect()
     }
@@ -880,6 +907,26 @@ impl SessionRegistry {
         *generation = generation.saturating_add(1);
         incarnation
     }
+}
+
+/// The deepest of `folders` containing `path`, or `None` when none of them does.
+///
+/// Depth is the component count, which is the same measure
+/// [`crate::worktree::mark_primary`] takes for the same reason — and it is measured rather
+/// than taken from string length, because one folder name is not one component and a longer
+/// string can be a shallower path.
+///
+/// Ties cannot arise: two entries containing `path` at equal depth would have to be the same
+/// directory, and `git worktree list` does not print one twice. If one ever did, the first is
+/// taken and the answer is still exactly one worktree.
+fn deepest_containing<'a>(
+    folders: &'a [CanonicalPath],
+    path: &CanonicalPath,
+) -> Option<&'a CanonicalPath> {
+    folders
+        .iter()
+        .filter(|folder| folder.contains(path))
+        .max_by_key(|folder| folder.as_path().components().count())
 }
 
 /// A pane key for a caller that owns no pane.
