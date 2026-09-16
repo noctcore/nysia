@@ -37,8 +37,12 @@ use nysia_proto::{
     ShellProfile as WireProfile, TerminalReadResult, TerminalSend, WaitFor, WaitOutcome,
 };
 
+use crate::agent::LaunchError;
 use crate::git::CanonicalPath;
-use crate::pty::{DEFAULT_GRACE, Output, PtyOutput, PtySession, SessionSpec, ShellProfile};
+use crate::pty::{
+    DEFAULT_GRACE, Output, ProfileError, PtyOutput, PtySession, ResolveError, SessionSpec,
+    ShellProfile, SpawnError,
+};
 use crate::rpc::errors::{IntoEnvelope, envelope};
 use crate::rpc::stream::{SendOutcome, StreamSink};
 use crate::vt::{ReadMode as VtReadMode, TerminalSize, TerminalState, VtConfig};
@@ -117,7 +121,35 @@ pub enum SessionError {
 
 impl IntoEnvelope for SessionError {
     fn into_envelope(self) -> ErrorEnvelope {
-        let message = self.to_string();
+        // **Built per variant, never from `self.to_string()`.** Three of these wrap an error
+        // whose `Display` spells a file on this machine. [`Self::Launch`] and the profile
+        // half of [`Self::Spawn`] both carry a [`ResolveError`], and every path-carrying
+        // variant of that names the candidate it rejected — which needs no attacker to
+        // reach: a `claude` directory on `PATH`, an npm script that lost its exec bit, a
+        // `.ps1`-only install with no PowerShell behind it. [`crate::pty::SpawnError::Spawn`]
+        // carries argv\[0\], which for an agent is the person's own `claude.exe`, and a
+        // `reason` that `portable-pty` formats the whole command line *and the working
+        // directory* into. [`Self::PathRefused`] repeats the path it was handed.
+        //
+        // An envelope is the thing a daemon is most likely to log verbatim and a window is
+        // the thing a person screenshots (traps register #13), and none of it is needed to
+        // act on: **which** check refused is, and that is what these phrases say. The detail
+        // goes to the daemon's own log below — the same split `rpc::project`'s
+        // `store_refusal` makes, for the same reason.
+        let message = match &self {
+            Self::Launch(err) => format!("could not start the agent: {}", launch_kind(err)),
+            Self::Spawn(err) => format!("could not start the session: {}", spawn_kind(err)),
+            // Dropped for #94's reason rather than a new one: the guard `rpc/project.rs`
+            // carries is `a_refusal_does_not_repeat_the_path_it_was_given`, and a path that
+            // arrived over a socket is exactly a path this daemon was given. `reason` names
+            // which of the three checks refused it, which is the actionable half.
+            Self::PathRefused { reason, .. } => {
+                format!("that working directory was refused: {reason}")
+            }
+            // A handle, a pane key, a sentence this module wrote, and an `io::Error` from a
+            // write to a pty that is closing. None of the four has a path to lose.
+            other => other.to_string(),
+        };
         match self {
             Self::Unknown { .. } => envelope(
                 ErrorCode::UnknownSession,
@@ -136,36 +168,73 @@ impl IntoEnvelope for SessionError {
                 &["`nysia session list` shows which pane holds what"],
             )
             .with_next_command_args(["nysia", "session", "list"]),
-            Self::Spawn(_) => envelope(
-                ErrorCode::SpawnFailed,
-                message,
-                "check the shell is installed and on PATH",
-                &[
-                    "on Windows an npm-installed shim is a `.cmd`, not an executable; name the \
-                     real program",
-                    "`nysia session create --profile pwsh` names a profile explicitly",
-                ],
-            ),
-            Self::PathRefused { .. } => envelope(
-                ErrorCode::PathRefused,
-                message,
-                "pass an absolute path to a directory that exists",
-                &["omit --cwd to start the session where the daemon is running"],
-            ),
-            // The agent's own name is in `message`, put there by `LaunchError`'s `Display`.
-            // Naming it here instead would be the D-4 seam in the wrong place, and it would
-            // be wrong twice over on the day a second agent lands.
-            Self::Launch(_) => envelope(
-                ErrorCode::SpawnFailed,
-                message,
-                "install the agent's CLI and make sure a terminal can run it by name",
-                &[
-                    "the daemon resolves the CLI on `PATH` at the moment a session is asked \
-                     for, so an install does not need a daemon restart",
-                    "a session started in a worktree searches the daemon's `PATH`, not the \
-                     project's",
-                ],
-            ),
+            Self::Spawn(err) => {
+                // `%err` to the daemon's own log and a phrase in the envelope. The log is
+                // the daemon's own file, where the command line and the working directory
+                // are what make the line worth keeping; the envelope is read by a person,
+                // rendered in a window and pasted into issues.
+                tracing::warn!(%err, "a session could not be spawned");
+                envelope(
+                    ErrorCode::SpawnFailed,
+                    message,
+                    "check the shell is installed and on PATH",
+                    &[
+                        "on Windows an npm-installed shim is a `.cmd`, not an executable; name \
+                         the real program",
+                        "`nysia session create --profile pwsh` names a profile explicitly",
+                    ],
+                )
+            }
+            Self::PathRefused { reason, .. } => {
+                // `reason` and **not** the path, which is the split `rpc::project`'s `refuse`
+                // makes for the same kind of value: a folder that arrived over a socket is
+                // not this daemon's to write down, and the log is a file that outlives the
+                // request. `Spawn` and `Launch` above log their whole error because what
+                // those name is this machine's own PATH resolution.
+                tracing::debug!(reason, "a working directory was refused");
+                envelope(
+                    ErrorCode::PathRefused,
+                    message,
+                    "pass an absolute path to a directory that exists",
+                    &[
+                        "the directory this refused is the one the request named; it is not \
+                         repeated here because an envelope is logged and screenshotted",
+                        "omit --cwd to start the session where the daemon is running",
+                    ],
+                )
+            }
+            // The agent's own name is in `message`, taken from `LaunchError` by
+            // [`launch_kind`]. Naming it here instead would be the D-4 seam in the wrong
+            // place, and it would be wrong twice over on the day a second agent lands.
+            Self::Launch(err) => {
+                tracing::warn!(%err, "an agent CLI could not be resolved");
+                let LaunchError::Unavailable { agent, .. } = &err;
+                // **The person can still see the file this refuses to print** — by asking
+                // the same question the daemon asked, in their own terminal, where the
+                // answer is already theirs. `where.exe` rather than `where`, which
+                // PowerShell has taken for `Where-Object`.
+                //
+                // "Runs the same search" and not "prints the file", because `which` finds
+                // executables only: against the case this is most often reached for on a Mac
+                // — an npm script that lost its exec bit — it prints nothing at all, and a
+                // next step that promises output there is one more thing to be puzzled by.
+                let locate = format!(
+                    "`{} {agent}` in a terminal runs the same PATH search the daemon ran",
+                    if cfg!(windows) { "where.exe" } else { "which" }
+                );
+                envelope(
+                    ErrorCode::SpawnFailed,
+                    message,
+                    "install the agent's CLI and make sure a terminal can run it by name",
+                    &[
+                        &locate,
+                        "the daemon resolves the CLI on `PATH` at the moment a session is \
+                         asked for, so an install does not need a daemon restart",
+                        "a session started in a worktree searches the daemon's `PATH`, not \
+                         the project's",
+                    ],
+                )
+            }
             Self::Invalid(_) => envelope(
                 ErrorCode::InvalidRequest,
                 message,
@@ -181,6 +250,103 @@ impl IntoEnvelope for SessionError {
             .retryable(false),
         }
     }
+}
+
+/// Why an agent could not be launched, as a phrase that names no file.
+///
+/// The agent's own name comes from the error rather than from here, which is the D-4 seam:
+/// this module does not know what agents exist and must not learn.
+fn launch_kind(err: &LaunchError) -> String {
+    let LaunchError::Unavailable { agent, source } = err;
+    format!("the {agent} CLI is unavailable: {}", resolve_kind(source))
+}
+
+/// Why a spawn failed, as a phrase that names no file.
+///
+/// **The variant and never the message**, which is the split `rpc::project`'s `store_kind`
+/// makes. Two of these would otherwise spell a path: the profile half wraps a
+/// [`ResolveError`], and [`SpawnError::Spawn`] carries argv\[0\] together with a `reason`
+/// that `portable-pty` builds as ``CreateProcessW `<command line>` in cwd `<directory>`
+/// failed`` — a worktree under somebody's project, in an envelope (traps register #13).
+///
+/// The rest are reduced too, rather than only the two that leak today. The rule a caller
+/// can rely on is then the whole rule: nothing an envelope from this module says was taken
+/// from an error's own text. Everything dropped here is on the daemon's log, at `warn`.
+fn spawn_kind(err: &SpawnError) -> String {
+    match err {
+        SpawnError::Profile(err) => profile_kind(err),
+        SpawnError::OpenPty(_) => "a pty could not be opened".to_owned(),
+        SpawnError::Spawn { .. } => "the program could not be started".to_owned(),
+        SpawnError::Writer(_) => "the pty's writer half could not be taken".to_owned(),
+        SpawnError::Confinement(_) => {
+            "the process tree could not be confined, so closing the session could not promise \
+             to take it with it"
+                .to_owned()
+        }
+        SpawnError::Thread(_) => "one of the session's two threads could not be started".to_owned(),
+    }
+}
+
+/// Why a shell profile could not be turned into a command, as a phrase that names no file.
+fn profile_kind(err: &ProfileError) -> String {
+    match err {
+        ProfileError::Unavailable { profile, source } => {
+            format!(
+                "the {profile} profile is unavailable: {}",
+                resolve_kind(source)
+            )
+        }
+        // A `&'static str` this crate chose, not something a caller handed it.
+        ProfileError::WrongPlatform { profile } => {
+            format!("the {profile} profile does not exist on this platform")
+        }
+        // The name is not repeated, for [`SessionError::PathRefused`]'s reason: it arrived
+        // over a socket, and a caller that passed one distribution knows which one it passed.
+        ProfileError::BadDistro(_) => {
+            "the WSL distribution name carries a character that would be read as another \
+             argument"
+                .to_owned()
+        }
+    }
+}
+
+/// What resolution said, as a phrase that names no file.
+///
+/// Every variant of [`ResolveError`] except `NotFound` carries the candidate path it
+/// rejected, and `NotFound` carries the program as the caller spelled it — which is a bare
+/// name for an agent and can be an absolute path for a profile. So both are reduced: the
+/// path-carrying ones to what was wrong with the file, and the name to its final component.
+fn resolve_kind(err: &ResolveError) -> String {
+    match err {
+        ResolveError::NotFound { program } => {
+            format!("{} was not found on PATH", program_name(program))
+        }
+        ResolveError::NotAFile { .. } => {
+            "what that name resolves to is a directory, not a file".to_owned()
+        }
+        ResolveError::NotExecutable { .. } => {
+            "the file it resolves to has no execute permission for anyone".to_owned()
+        }
+        ResolveError::UnknownExtension { .. } => {
+            "the file it resolves to is not something this platform can launch".to_owned()
+        }
+        ResolveError::MissingInterpreter { interpreter, .. } => format!(
+            "it is a shim needing {}, which is not installed",
+            program_name(interpreter)
+        ),
+        ResolveError::UnsafeArgument { .. } => {
+            "an argument to it carries a character `cmd.exe` would act on".to_owned()
+        }
+    }
+}
+
+/// The final component of a program name, cut at **both** platforms' separators.
+///
+/// `Path::file_name` splits on the host's separators only, so a name spelled with the other
+/// platform's would come back whole — which is a path that leaks on one leg and not the
+/// other, and therefore a path that leaks in production and not in the test that looked.
+fn program_name(program: &str) -> &str {
+    program.rsplit(['/', '\\']).next().unwrap_or(program)
 }
 
 /// Unix milliseconds, now.
@@ -1631,6 +1797,185 @@ mod tests {
             !envelope.next_steps().is_empty(),
             "§6.2 makes a next step non-optional"
         );
+    }
+
+    /// No refusal this module answers with carries a path into the envelope.
+    ///
+    /// #96's finding, and the rule `rpc/project.rs` has carried since #94 as
+    /// `a_refusal_does_not_repeat_the_path_it_was_given`. Two envelopes here did it with no
+    /// attacker anywhere: a `claude` on `PATH` with no launchable extension answered
+    ///
+    /// ```text
+    /// could not start the agent: the claude CLI is unavailable:
+    /// C:\Users\<name>\AppData\Local\Temp\…\badbin\claude has no launchable extension
+    /// ```
+    ///
+    /// and the spawn half was worse, because `portable-pty` formats the whole command line
+    /// *and the working directory* into the error it answers a failed `CreateProcessW` with.
+    ///
+    /// # What is checked, and the two things that are not
+    ///
+    /// Every value reaching an envelope from here is a phrase chosen in this file or an
+    /// identifier the daemon minted, with two exceptions, both named rather than left to be
+    /// discovered:
+    ///
+    /// - [`SessionError::Invalid`] carries a sentence written at its call sites, all three
+    ///   of which are in this file and none of which has a path to write.
+    /// - [`SessionError::PathRefused`] carries `reason`, which is one of two sentences
+    ///   written in `confine_cwd` or an `io::Error` from `fs::canonicalize` — which the OS
+    ///   reports without the path it was given.
+    ///
+    /// The roster puts [`SECRET`] into every **other** position: every field of every error
+    /// this module wraps, and the path `PathRefused` was handed. The roster itself is by
+    /// hand. What is not by hand is noticing when it goes stale — [`variant_of`] matches
+    /// exhaustively, so a variant added to [`SessionError`] stops this file compiling until
+    /// somebody stands where the roster is. That is a tripwire and not a proof, and it is
+    /// worth exactly what it says: the compiler makes them look.
+    #[test]
+    fn no_refusal_this_module_answers_with_carries_a_path() {
+        let resolve_failures = [
+            ResolveError::NotFound {
+                program: SECRET.to_owned(),
+            },
+            ResolveError::NotAFile {
+                path: SECRET.to_owned(),
+            },
+            ResolveError::NotExecutable {
+                path: SECRET.to_owned(),
+            },
+            ResolveError::UnknownExtension {
+                path: SECRET.to_owned(),
+            },
+            ResolveError::MissingInterpreter {
+                path: SECRET.to_owned(),
+                interpreter: SECRET.to_owned(),
+            },
+            ResolveError::UnsafeArgument {
+                argument: SECRET.to_owned(),
+            },
+        ];
+
+        let mut roster = vec![
+            SessionError::Unknown {
+                handle: SessionHandle::generate(),
+            },
+            SessionError::PaneTaken {
+                pane: synthetic_pane(),
+                handle: SessionHandle::generate(),
+            },
+            SessionError::Spawn(SpawnError::Spawn {
+                program: SECRET.to_owned(),
+                // Shaped like the real one, which is the point: this is what the envelope
+                // used to repeat.
+                reason: format!("CreateProcessW `{SECRET}` in cwd `{SECRET}` failed: …"),
+            }),
+            SessionError::Spawn(SpawnError::OpenPty(SECRET.to_owned())),
+            SessionError::Spawn(SpawnError::Writer(SECRET.to_owned())),
+            SessionError::Spawn(SpawnError::Confinement(std::io::Error::other(SECRET))),
+            SessionError::Spawn(SpawnError::Thread(std::io::Error::other(SECRET))),
+            SessionError::Spawn(SpawnError::Profile(ProfileError::WrongPlatform {
+                profile: "pwsh",
+            })),
+            SessionError::Spawn(SpawnError::Profile(ProfileError::BadDistro(
+                SECRET.to_owned(),
+            ))),
+            SessionError::PathRefused {
+                path: PathBuf::from(SECRET),
+                reason: "it is not a directory".to_owned(),
+            },
+            SessionError::Invalid("a session is at least one cell in each direction".to_owned()),
+            SessionError::Closing(std::io::Error::other(SECRET)),
+        ];
+        // Both doors on to `ResolveError`, each through every variant of it: the agent's, and
+        // the shell profile's — which is the third one the finding did not name.
+        for source in resolve_failures {
+            roster.push(SessionError::Launch(LaunchError::Unavailable {
+                agent: "claude",
+                source: source.clone(),
+            }));
+            roster.push(SessionError::Spawn(SpawnError::Profile(
+                ProfileError::Unavailable {
+                    profile: "pwsh",
+                    source,
+                },
+            )));
+        }
+
+        let mut covered = std::collections::BTreeSet::new();
+        for error in roster {
+            covered.insert(variant_of(&error));
+            let envelope = error.into_envelope();
+            let said = format!("{} {:?}", envelope.message(), envelope.next_steps());
+            for secret in [SECRET, SECRET_COMPONENT, &whoami()] {
+                assert!(
+                    !said.contains(secret),
+                    "the refusal carried {secret:?}, which names somebody's disk and the \
+                     account they run as: {said}"
+                );
+            }
+            assert!(
+                !envelope.next_steps().is_empty(),
+                "and still says what to do about it: {said}"
+            );
+        }
+        assert_eq!(
+            covered.len(),
+            EVERY_VARIANT.len(),
+            "the roster is missing a variant: it covers {covered:?}"
+        );
+    }
+
+    /// A path with a component nothing else in this file could produce by accident.
+    ///
+    /// Absolute and profile-shaped, so a message that repeats only part of it — the account
+    /// name, say — still fails on [`SECRET_COMPONENT`] or on [`whoami`].
+    const SECRET: &str = r"C:\Users\nysia-test\an-agents-private-toolchain\claude";
+
+    /// The distinctive component of [`SECRET`], so a message that shortens the path is still
+    /// caught shortening it.
+    const SECRET_COMPONENT: &str = "an-agents-private-toolchain";
+
+    /// Every [`SessionError`] variant, by the name [`variant_of`] answers with.
+    const EVERY_VARIANT: &[&str] = &[
+        "Unknown",
+        "PaneTaken",
+        "Spawn",
+        "Launch",
+        "PathRefused",
+        "Invalid",
+        "Closing",
+    ];
+
+    /// Which variant a refusal is, matched exhaustively.
+    ///
+    /// The tripwire the roster leans on: a variant added to [`SessionError`] has no arm here
+    /// and this file stops compiling until it does.
+    fn variant_of(error: &SessionError) -> &'static str {
+        match error {
+            SessionError::Unknown { .. } => "Unknown",
+            SessionError::PaneTaken { .. } => "PaneTaken",
+            SessionError::Spawn(_) => "Spawn",
+            SessionError::Launch(_) => "Launch",
+            SessionError::PathRefused { .. } => "PathRefused",
+            SessionError::Invalid(_) => "Invalid",
+            SessionError::Closing(_) => "Closing",
+        }
+    }
+
+    /// The account this process runs as, as it appears inside a profile path.
+    ///
+    /// Asserted on as well as the path itself, because a message could name the account
+    /// without naming the whole file — and that is the part that identifies a person.
+    fn whoami() -> String {
+        for var in ["USERNAME", "USER", "LOGNAME"] {
+            if let Some(name) = std::env::var_os(var)
+                && !name.is_empty()
+            {
+                return name.to_string_lossy().into_owned();
+            }
+        }
+        // Nothing to compare against rather than something that matches everything.
+        "\u{0}".to_owned()
     }
 
     #[test]
