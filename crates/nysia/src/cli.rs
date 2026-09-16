@@ -147,10 +147,11 @@ pub struct StartArgs {
     /// The branch the worktree is keyed by. Created if it is not there yet.
     #[arg(long)]
     pub branch: String,
-    /// Which session to start. A shell unless this says otherwise.
-    ///
-    /// Parsed as [`SessionKind`] itself — clap uses that type's `FromStr`, so the two
-    /// spellings live in `nysia-proto` (D-13) and a third one never becomes a request.
+    /// Which session to start: `shell` or `agent`. A shell unless this says otherwise.
+    // Parsed as SessionKind itself — clap uses that type's FromStr, so the two spellings
+    // live in nysia-proto (D-13) and a third one never becomes a request. ValueEnum would
+    // restore clap's "Possible values" block but would duplicate the spellings here; the
+    // FromStr match is the compile error that keeps a new variant off the wire.
     #[arg(long, default_value_t = SessionKind::Shell)]
     pub kind: SessionKind,
     /// Which shell to run, with `--kind shell`. Omit for the platform's default.
@@ -221,7 +222,7 @@ pub struct StatusArgs {
 /// `nysia session …`
 #[derive(Debug, Subcommand)]
 enum SessionAction {
-    /// Start a shell session and print its handle.
+    /// Start a session and print its handle.
     Create(CreateArgs),
     /// List the sessions the daemon is holding open.
     List {
@@ -242,7 +243,14 @@ enum SessionAction {
 /// `nysia session create …`
 #[derive(Debug, Args)]
 pub struct CreateArgs {
-    /// Which shell to run. Omit for the platform's default.
+    /// Which session to start: `shell` or `agent`. A shell unless this says otherwise.
+    // Same FromStr as `project start --kind`: the spellings live in nysia-proto (D-13).
+    #[arg(long, default_value_t = SessionKind::Shell)]
+    pub kind: SessionKind,
+    /// Which shell to run, with `--kind shell`. Omit for the platform's default.
+    ///
+    /// Combined with `--kind agent` is refused rather than ignored: a profile names a
+    /// shell, and an agent is not one.
     #[arg(long, value_enum)]
     pub profile: Option<ProfileArg>,
     /// Which WSL distribution, with `--profile wsl`. Omit for the default one.
@@ -861,6 +869,81 @@ mod tests {
         ])
         .expect_err("a third kind is a clap error, not a daemon round trip");
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn creating_takes_a_kind_and_a_typo_never_leaves_the_parser() {
+        let Mode::Client(verb) = parse(&["nysia", "session", "create"]).into_mode() else {
+            panic!("a create is a client verb");
+        };
+        let Verb::SessionCreate(args) = *verb else {
+            panic!("a create parses as one");
+        };
+        assert_eq!(
+            args.kind,
+            SessionKind::Shell,
+            "a create is a shell unless --kind says otherwise"
+        );
+
+        let Mode::Client(verb) =
+            parse(&["nysia", "session", "create", "--kind", "agent"]).into_mode()
+        else {
+            panic!("a create is a client verb");
+        };
+        let Verb::SessionCreate(args) = *verb else {
+            panic!("a create parses as one");
+        };
+        assert_eq!(args.kind, SessionKind::Agent);
+
+        let err = Cli::parse_from_argv(["nysia", "session", "create", "--kind", "nonsense"])
+            .expect_err("a third kind is a clap error, not a daemon round trip");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn kind_help_names_both_spellings_and_keeps_the_rationale_out() {
+        // clap has no "Possible values" for a FromStr argument, so the help text itself
+        // has to name both spellings. The original comment named neither and rendered a
+        // rustdoc link plus the D-13 rationale to the user.
+        for argv in [
+            ["nysia", "project", "start", "--help"].as_slice(),
+            ["nysia", "session", "create", "--help"].as_slice(),
+        ] {
+            let err = Cli::parse_from_argv(argv).expect_err("--help is a clap error");
+            let help = err.to_string();
+            let kind = flag_help(&help, "--kind");
+            assert!(
+                kind.contains("shell") && kind.contains("agent"),
+                "{argv:?} --kind help must name both spellings, got:\n{kind}"
+            );
+            assert!(
+                !kind.contains("SessionKind")
+                    && !kind.contains("FromStr")
+                    && !kind.contains("D-13"),
+                "{argv:?} --kind help must not leak internal notes, got:\n{kind}"
+            );
+        }
+    }
+
+    /// The help block for one long flag: its usage line and the indented description
+    /// that follows, stopping at the next flag or the defaults footer.
+    fn flag_help(help: &str, flag: &str) -> String {
+        let mut lines = help.lines().peekable();
+        while let Some(line) = lines.next() {
+            if !line.trim_start().starts_with(flag) {
+                continue;
+            }
+            let mut block = vec![line];
+            while let Some(next) = lines.peek() {
+                let trimmed = next.trim_start();
+                if trimmed.starts_with("--") || trimmed.starts_with('[') {
+                    break;
+                }
+                block.push(lines.next().expect("peeked"));
+            }
+            return block.join("\n");
+        }
+        panic!("{flag} was not in the help:\n{help}");
     }
 
     #[test]
