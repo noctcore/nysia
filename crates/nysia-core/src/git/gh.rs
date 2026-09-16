@@ -108,6 +108,12 @@
 //! of bytes gh wrote. Enough to tell which ending happened and that gh had something to say,
 //! without reproducing any of it.
 //!
+//! The same holds on the way *in*, where the text is not gh's but this machine's: a gh that
+//! could not be resolved, or that resolved and would not start, records a closed-set reason
+//! and not [`ResolveError`]'s rendering, which names the path it rejected. A `PATH` entry sits
+//! under a user's profile as often as not, and `debug!` is not an exemption — see
+//! [`resolution_failure`].
+//!
 //! The cost is real and worth stating: a classification this module gets *wrong* cannot be
 //! diagnosed from the log alone, because the text that would settle it is the text being
 //! withheld. That is the trade the rule makes everywhere else in the daemon, and the
@@ -374,6 +380,15 @@ pub enum GhFailure {
     /// by two different roads: exit 4 for the first, and a `HTTP 401` on stderr for the
     /// second. Telling them apart further would be a heading nobody needs.
     Unauthenticated,
+    /// `gh` is installed, and this build could not start it.
+    ///
+    /// Apart from [`GhFailure::NotInstalled`] because the two send a person to opposite
+    /// places: *install the GitHub CLI* is useless advice to somebody who can see it on their
+    /// `PATH`. This is the resolved program failing at the spawn — a binary replaced between
+    /// resolution and launch, a permission that is not there, a machine out of handles — and
+    /// a shim whose argument vector the chokepoint refused, which is a broken installation
+    /// rather than an absent one.
+    CouldNotRun,
     /// The folder is not a repository gh can ask GitHub about.
     ///
     /// Its own state because *"this project has no issues"* is a different sentence from
@@ -424,7 +439,10 @@ impl Gh {
         Runner::locate(program, GH_ENV, ISSUE_TIMEOUT)
             .map(|runner| Self { runner })
             .map_err(|err: ResolveError| {
-                tracing::debug!(%err, "gh could not be resolved");
+                tracing::debug!(
+                    reason = resolution_failure(&err),
+                    "gh could not be resolved"
+                );
                 GhFailure::NotInstalled
             })
     }
@@ -443,14 +461,23 @@ impl Gh {
     /// the verb.
     pub fn issues(&self, at: &CanonicalPath) -> Result<Vec<u8>, GhFailure> {
         let finished = self.runner.run(&issue_argv(), at).map_err(|err| {
+            // **A gh that is here and did not run**, which is not the state gh being absent
+            // is: telling somebody who can see gh on their `PATH` to install it sends them to
+            // fetch what they already have, and leaves the real fault unnamed.
+            //
+            // `%err` is deliberately gone from all three arms. `RunError::Argv` carries a
+            // [`ResolveError`] whose `Display` names the resolved path, and a spawn failure's
+            // `io::Error` can name one too — a path on `PATH` sits under a user's profile as
+            // often as not. That is the same rule that keeps gh's own stderr out of the log,
+            // and the arm's message is the kind, which is the vocabulary the rule allows.
             match err {
                 // A `gh` that resolved to a batch shim. No gh installation ships one, and
                 // letting it through silently would be the opposite of a chokepoint.
-                RunError::Argv(err) => tracing::warn!(%err, "gh refused its argument vector"),
+                RunError::Argv(_) => tracing::warn!("gh refused its argument vector"),
                 RunError::Empty => tracing::warn!("gh was given an empty argument vector"),
-                RunError::Spawn(err) => tracing::warn!(%err, "gh could not be started"),
+                RunError::Spawn(_) => tracing::warn!("gh could not be started"),
             }
-            GhFailure::NotInstalled
+            GhFailure::CouldNotRun
         })?;
 
         match classify(&finished) {
@@ -513,6 +540,24 @@ fn issue_argv() -> Vec<OsString> {
     .into_iter()
     .map(OsString::from)
     .collect()
+}
+
+/// Which resolution failure happened, as a closed set of names.
+///
+/// [`ResolveError`]'s `Display` renders the path it rejected, and a `PATH` entry sits under a
+/// user's profile as often as not — so the reason is summarised rather than rendered, for the
+/// same reason gh's own stderr is. **`debug!` is not an exemption from that**:
+/// [`crate::rpc::log_file::CONFINED_TARGETS`] exists precisely because debug and trace are the
+/// levels a person turns on and then mails the file.
+fn resolution_failure(err: &ResolveError) -> &'static str {
+    match err {
+        ResolveError::NotFound { .. } => "not on PATH",
+        ResolveError::NotAFile { .. } => "not a file",
+        ResolveError::NotExecutable { .. } => "not executable",
+        ResolveError::UnknownExtension { .. } => "no launchable extension",
+        ResolveError::MissingInterpreter { .. } => "interpreter missing",
+        ResolveError::UnsafeArgument { .. } => "unsafe argument",
+    }
 }
 
 /// gh's exit code when nothing has ever been authenticated.
