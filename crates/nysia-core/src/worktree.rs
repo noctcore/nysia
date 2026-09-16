@@ -852,9 +852,14 @@ mod tests {
             "the architecture doc fixes the path shape: {}",
             made
         );
+        // `at`, never `repo`. `made` is a `CanonicalPath` and `repo` is what `temp_dir()`
+        // handed back — on macOS those are `/private/var/…` and `/var/…`, two spellings of
+        // one directory that `starts_with` compares as different, because `/var` is a
+        // symlink. Comparing a resolved path against an unresolved one passes on Windows and
+        // on Linux and fails on exactly one runner.
         assert!(
             made.as_path()
-                .starts_with(repo.join(".nysia").join("worktrees")),
+                .starts_with(at.as_path().join(".nysia").join("worktrees")),
             "a worktree is confined to the base directory: {made}"
         );
 
