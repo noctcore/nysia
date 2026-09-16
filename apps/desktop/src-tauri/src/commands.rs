@@ -37,13 +37,17 @@
 //! be traced back to a pane. Nothing new was invented for it: the protocol already carried
 //! all four, and #75's complaint was that nothing used them for correlation.
 
+use std::path::PathBuf;
+
 use nysia_proto::envelope::{RequestPayload, ResponsePayload};
 use nysia_proto::handshake::DaemonIdentity;
 use nysia_proto::identity::SessionHandle;
+use nysia_proto::project::{Project, ProjectList, ProjectRegister, ProjectRegistered};
 use nysia_proto::session::{SessionClose, SessionCreate, SessionList, SessionSummary};
 use nysia_proto::terminal::{TerminalResize, TerminalSend};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::daemon::{CommandFailure, DaemonError};
 use crate::state::Client;
@@ -355,6 +359,119 @@ pub async fn host_platform() -> Failed<&'static str> {
     blocking("host_platform", || Ok(std::env::consts::OS)).await
 }
 
+/// Every folder registered as a project.
+///
+/// The list the sidebar draws. Until v0.3 wave C1 serves the verb this answers
+/// `unsupported`, which is a real answer and not a fault: the window shows an empty sidebar
+/// carrying the daemon's own sentence, rather than ten names it made up.
+///
+/// # Errors
+///
+/// [`CommandFailure`] if the daemon is unreachable or does not serve the verb yet.
+#[tauri::command]
+pub async fn project_list(app: AppHandle) -> Failed<Vec<Project>> {
+    let client = client(&app)?;
+    blocking("project_list", move || {
+        match client.request(RequestPayload::ProjectList(ProjectList {}))? {
+            ResponsePayload::ProjectList { projects } => Ok(projects),
+            other => Err(unexpected("project_list", &other)),
+        }
+    })
+    .await
+}
+
+/// Register a folder as a project.
+///
+/// Idempotent, and the answer says which of the two happened — see
+/// [`ProjectRegistered::already_registered`]. Registering a folder that is already
+/// registered is **not** an error and must not be shown as one (v0.3 plan §3.2).
+///
+/// The path travels unresolved: canonicalising is the daemon's job, and a client that did it
+/// first would be a second implementation of the identity rule that everything else in this
+/// milestone rests on.
+///
+/// # What can be slow here, and why it is still not the main thread
+///
+/// The daemon canonicalises before it does anything else, and `fs::canonicalize` on a
+/// disconnected network share blocks for the OS's own SMB timeout — outside any git deadline,
+/// because it happens before git is reached. That is the daemon's to bound. What this side
+/// owes the user is that a folder on a dead share cannot freeze the window, which is what
+/// [`blocking`] is for (traps register #2).
+///
+/// # Errors
+///
+/// [`CommandFailure`] carrying the daemon's own code and next steps: `not_a_repository`,
+/// `many_repositories` and `path_unreadable` are the three refusals §3.2 requires a caller
+/// to be able to tell apart, and [`CommandFailure::kind`](crate::daemon::CommandFailure)
+/// is what it tells them apart by.
+#[tauri::command]
+pub async fn project_register(app: AppHandle, path: String) -> Failed<ProjectRegistered> {
+    let client = client(&app)?;
+    blocking("project_register", move || {
+        // `String` at the Tauri boundary and `PathBuf` on the wire. The conversion is here
+        // rather than in the signature because a `PathBuf` deserialised from JavaScript would
+        // accept whatever the webview sent as a path shape; a `String` says plainly that what
+        // arrives is text, and the daemon is what decides whether it names a folder.
+        let request = ProjectRegister {
+            path: PathBuf::from(path),
+        };
+        match client.request(RequestPayload::ProjectRegister(request))? {
+            ResponsePayload::ProjectRegister(registered) => Ok(registered),
+            other => Err(unexpected("project_register", &other)),
+        }
+    })
+    .await
+}
+
+/// Ask the user for a folder, with the platform's own picker.
+///
+/// `Ok(None)` is a cancelled dialog, which is an outcome rather than a failure: the caller
+/// puts the `+` button back and says nothing.
+///
+/// # Why the picker is here and not in the webview
+///
+/// The window is a client with no privileged path (D-1/D-2) and `apps/web` may not import
+/// `@tauri-apps` outside its transport module, so browsing a disk is something only this
+/// process can do. Driving `tauri-plugin-dialog` from Rust rather than from JavaScript also
+/// keeps the plugin's own commands unreachable from the webview, which is why
+/// `capabilities/default.json` grants no `dialog:` permission — there is nothing there for
+/// the window to be allowed to call.
+///
+/// # Blocking, on the blocking pool, deliberately
+///
+/// `blocking_pick_folder` deadlocks when it is called *on* the main thread — it dispatches
+/// the dialog there and then waits for it — so it has to run somewhere else. [`blocking`] is
+/// that somewhere, and it is the same rule every other command follows rather than an
+/// exception carved for this one. A modal the user leaves open for a minute is a minute this
+/// thread is parked and the window is not.
+///
+/// # Errors
+///
+/// [`CommandFailure`] when the picked folder's name is not valid Unicode and therefore
+/// cannot be put on the wire. The message does not repeat the name: an error envelope is the
+/// thing most likely to be written to a log, and a folder name is a person's disk
+/// (traps register #13).
+#[tauri::command]
+pub async fn project_pick_folder(app: AppHandle) -> Failed<Option<String>> {
+    blocking("project_pick_folder", move || {
+        let Some(picked) = app.dialog().file().blocking_pick_folder() else {
+            return Ok(None);
+        };
+        let path = picked.into_path().map_err(|_| {
+            DaemonError::Io(
+                "the folder picker returned something that is not a path on this disk".to_owned(),
+            )
+        })?;
+        path.into_os_string().into_string().map(Some).map_err(|_| {
+            DaemonError::Io(
+                "that folder's name is not valid Unicode, so it cannot be sent to the daemon"
+                    .to_owned(),
+            )
+        })
+    })
+    .await
+}
+
 /// The events the webview is allowed to record, and the only ones.
 ///
 /// Three, and each is something **only the webview can see**. `daemon::stream` and `channel`
@@ -442,6 +559,36 @@ fn unexpected(verb: &str, got: &ResponsePayload) -> DaemonError {
     DaemonError::Protocol(format!("{verb} was answered with a {} payload", got.verb()))
 }
 
+/// The prefixes of every permission the folder picker's plugins would grant the webview.
+///
+/// `tauri-plugin-dialog` brings `tauri-plugin-fs` in with it, and between them they ship
+/// permission sets that let a webview open dialogs and read files straight off the disk.
+/// Nysia grants neither: the picker is driven from [`project_pick_folder`] on this side of
+/// the boundary, because the window is a client with no privileged path (D-1/D-2).
+///
+/// A Tauri v2 capability is what makes a plugin command reachable from JavaScript, so this
+/// is not a style rule — a capability naming nothing from either plugin is the whole reason
+/// neither is callable. Named here so [`granted_plugin_permissions`] can check it.
+const PICKER_PLUGIN_PREFIXES: &[&str] = &["dialog:", "fs:"];
+
+/// Which of `permissions` a picker plugin would have granted the webview.
+///
+/// Split out from the test that uses it so the check can be pointed at a list that *does*
+/// grant one, which is the proof that it trips (traps register #12). A check that reads the
+/// real file and passes says nothing on its own about whether it could ever fail.
+#[cfg(test)]
+fn granted_plugin_permissions(permissions: &[String]) -> Vec<&str> {
+    permissions
+        .iter()
+        .filter(|permission| {
+            PICKER_PLUGIN_PREFIXES
+                .iter()
+                .any(|prefix| permission.starts_with(prefix))
+        })
+        .map(String::as_str)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -450,6 +597,59 @@ mod tests {
     use nysia_proto::session::SessionCreated;
 
     use super::*;
+
+    /// The capability file's text, embedded rather than located.
+    ///
+    /// `include_str!` and not a path composed at run time: traps register #9 forbids baking
+    /// `CARGO_MANIFEST_DIR` into anything path-shaped, and what this asserts on is the
+    /// content. The path is resolved by the compiler and nothing path-shaped reaches the
+    /// binary.
+    const DEFAULT_CAPABILITY: &str = include_str!("../capabilities/default.json");
+
+    /// What `capabilities/default.json` grants the webview, in the order it lists them.
+    fn granted() -> Vec<String> {
+        let capability: serde_json::Value =
+            serde_json::from_str(DEFAULT_CAPABILITY).expect("the capability file is JSON");
+        capability["permissions"]
+            .as_array()
+            .expect("the capability lists permissions")
+            .iter()
+            .map(|permission| {
+                permission
+                    .as_str()
+                    .expect("a permission is a string")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_folder_picker_grants_the_webview_nothing() {
+        // The file is three lines from anyone adding `dialog:allow-open` to make something
+        // work, and a dialog permission that also reaches the filesystem is not what the
+        // picker is for. Asserted rather than described in a comment nobody runs.
+        assert_eq!(
+            granted_plugin_permissions(&granted()),
+            Vec::<&str>::new(),
+            "the picker is called from Rust; the webview needs no permission for it"
+        );
+    }
+
+    #[test]
+    fn the_capability_check_trips_on_a_permission_that_was_added() {
+        // The proof that the assertion above is load-bearing. Without this, a
+        // `PICKER_PLUGIN_PREFIXES` that had been emptied, or a filter that matched nothing,
+        // would go green against the real file and catch the change it exists to catch.
+        let widened = [
+            "core:default".to_owned(),
+            "dialog:allow-open".to_owned(),
+            "fs:allow-read-text-file".to_owned(),
+        ];
+        assert_eq!(
+            granted_plugin_permissions(&widened),
+            vec!["dialog:allow-open", "fs:allow-read-text-file"]
+        );
+    }
 
     /// What a keystroke might be, and what must never reach a log file.
     const SECRET: &str = "hunter2-correct-horse-battery-staple";
