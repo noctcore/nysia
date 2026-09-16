@@ -63,4 +63,23 @@ describe('observable', () => {
     expect(observable({ ...base, activeTab: null })).not.toEqual(observable(base));
     expect(observable({ ...base, tabs: base.tabs.slice(1) })).not.toEqual(observable(base));
   });
+
+  it('catches an add-project panel that appeared under an unrelated command', () => {
+    // The panel is on screen until the user dismisses it, so a command they did not press
+    // making it appear — or clearing the one they are reading — is a real defect and not a
+    // frame that ticked. Both directions, because a provider that reset it to `idle` on
+    // every command would pass a check that only looked for it appearing.
+    const added = {
+      ...base,
+      addProject: { phase: 'added' as const, name: 'nysia', alreadyRegistered: false },
+    };
+    expect(observable(added)).not.toEqual(observable(base));
+    expect(observable(base)).not.toEqual(observable(added));
+    expect(base.addProject.phase).toBe('idle');
+  });
+
+  it('catches the sidebar being told the project list is gone', () => {
+    const lost = { ...base, projectsUnavailable: 'this daemon does not serve the project verbs yet' };
+    expect(observable(lost)).not.toEqual(observable(base));
+  });
 });

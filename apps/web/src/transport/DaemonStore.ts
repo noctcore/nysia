@@ -1,22 +1,28 @@
 import type { PaneKey } from '../generated/PaneKey';
+import type { Project } from '../generated/Project';
+import type { ProjectRegistered } from '../generated/ProjectRegistered';
 import type { SessionHandle } from '../generated/SessionHandle';
 import type { SessionKind } from '../generated/SessionKind';
 import type { SessionSummary as WireSession } from '../generated/SessionSummary';
 import type { ShellProfile } from '../generated/ShellProfile';
+import { isAddProjectBusy, registerRefusal, type AddProjectState } from '../store/addProject';
 import { StoreCommandError, type StoreCommandName, type StoreError } from '../store/errors';
-import { SEED_ACTIVE_PROJECT, SEED_PROJECT_NAMES } from '../store/mock/seed';
 import {
   emptySnapshot,
   type LauncherGroup,
   type NavSection,
-  type Project,
   type ProjectId,
   type Store,
   type StoreSnapshot,
   type Tab,
   type WindowControls,
 } from '../store/types';
-import { describeFailure, isRetryable, type DaemonBridge } from './bridge';
+import {
+  asCommandFailure,
+  describeFailure,
+  isRetryable,
+  type DaemonBridge,
+} from './bridge';
 import type { StreamId } from './frames';
 import { SILENT_TRANSPORT_LOG, type TransportLog } from './log';
 import { REPLAY_BOUNDARY_DEADLINE_MS } from './surface/TerminalSurface';
@@ -35,14 +41,25 @@ import type { TerminalRouter } from './terminals';
  * observable: a window that has just started, attaching to a daemon that has been running
  * for hours, gets back the sessions that outlived the last window.
  *
- * **Projects are not, yet.** `nysia-proto` has no project or worktree verb — under §3 they
- * live in the daemon's JSON settings store, and the verb to read that store is deferred
- * with a named owner. The alternative that was considered and rejected was deriving a
- * project from each distinct session `cwd`: that invents a domain object out of an
- * unrelated signal, which is precisely what D-5 deleted the local task model to stop. So
- * the project *list* is W3's seed, held client-side and marked as such, and the sessions
- * shown against the active project are the daemon's real ones rather than seeded
- * placeholders. Nothing on screen claims to be running unless it is.
+ * **Projects are real too, now.** They used to be W3's seed — ten plausible names held
+ * client-side, marked as such in a comment nobody reading the sidebar could see. The verbs
+ * are on the wire (v0.3 wave A), so `project_list` is the authority and the seed is gone.
+ *
+ * What it is replaced by is sometimes *nothing*, and that is the point: until wave C1 serves
+ * the verbs the daemon answers `unsupported`, so the sidebar is empty and says why, in the
+ * daemon's own words. An empty sidebar that explains itself is worth more than ten names
+ * that cannot be told from real ones — and the sessions grafted onto the seeded project went
+ * with it for the same reason. Which worktree a session belongs to is something only the
+ * daemon knows; deriving it from a `cwd` invents a domain object out of an unrelated signal,
+ * which is precisely what D-5 deleted the local task model to stop.
+ *
+ * **A failed `project_list` never fails the connection.** It is fetched on every connect
+ * without anyone asking for it, so a refusal goes into `snapshot.projectsUnavailable` for
+ * the sidebar to show, not into the notice list and not into the reconnect loop's verdict.
+ * The first arrangement did the opposite: the fetch sat inside the connect sequence, so a
+ * daemon that does not serve the verb yet — which is *every* daemon today — dropped the
+ * window into `reconnecting` and retried forever against something no amount of waiting
+ * fixes.
  *
  * **Launchers are derived**, from `ShellProfile`'s four variants. Which shells exist on the
  * machine is properly the daemon's answer, but the four *kinds* are on the wire already,
@@ -248,6 +265,91 @@ export class DaemonStore implements Store {
     if (opened) {
       this.#update((current) => ({ ...current, activeTab: opened.paneKey }));
     }
+  };
+
+  /**
+   * Browse for a folder and register it.
+   *
+   * Two round trips and five endings, and **only one of them is a failure**. The picker
+   * answers with a path or with nothing; the daemon answers with a project, a project it
+   * already had, or one of §3.2's three refusals. All five resolve, writing what happened
+   * into `snapshot.addProject`. What rejects is a transport failure — a dropped socket, a
+   * daemon that does not serve the verb — because that is the only ending the notice list is
+   * the right place for.
+   *
+   * Getting that boundary wrong is visible to a user rather than merely untidy: a refusal
+   * routed through `runCommand` paints *"addProject failed"* in the corner, and §3.2 says in
+   * as many words that registering a folder twice is not an error. A folder holding several
+   * repositories is not one either — it is the ordinary shape of a `Projekty/` directory and
+   * a question about which one.
+   *
+   * The `+` is held shut while a picker is open. Two pickers is two registrations racing,
+   * and the second would land on a snapshot the first has already replaced.
+   */
+  addProject = async (): Promise<void> => {
+    if (isAddProjectBusy(this.#snapshot.addProject)) {
+      return;
+    }
+    this.#setAddProject({ phase: 'browsing' });
+
+    let picked: string | null;
+    try {
+      picked = await this.#bridge.invoke<string | null>('project_pick_folder');
+    } catch (cause) {
+      this.#setAddProject({ phase: 'idle' });
+      throw this.fail('addProject', describeFailure(cause));
+    }
+
+    // A cancelled dialog is an outcome, and the quietest one. Anything that is not a path is
+    // treated as one: the Rust side answers `null`, and a bridge that hands back `undefined`
+    // for a command it does not know would otherwise be registered as the folder `undefined`.
+    if (typeof picked !== 'string' || picked === '') {
+      this.#setAddProject({ phase: 'idle' });
+      return;
+    }
+
+    this.#setAddProject({ phase: 'registering' });
+    let registered: ProjectRegistered;
+    try {
+      registered = await this.#bridge.invoke<ProjectRegistered>('project_register', {
+        path: picked,
+      });
+    } catch (cause) {
+      const failure = asCommandFailure(cause);
+      const code = registerRefusal(failure?.kind ?? null);
+      if (failure !== null && code !== null) {
+        // The daemon's own sentence and its own steps, kept apart rather than joined: the
+        // panel puts the heading, the sentence and the steps in three different places, and
+        // for `many_repositories` the steps are the list of folders to choose between.
+        this.#setAddProject({
+          phase: 'refused',
+          code,
+          message: failure.message,
+          nextSteps: failure.nextSteps,
+        });
+        return;
+      }
+      this.#setAddProject({ phase: 'idle' });
+      throw this.fail('addProject', describeFailure(cause));
+    }
+
+    this.#setAddProject({
+      phase: 'added',
+      name: registered.project.name,
+      alreadyRegistered: registered.alreadyRegistered,
+    });
+    // The list is re-read rather than having the new project spliced into it: `project_list`
+    // decides the order, and a client that inserted its own would disagree with the daemon
+    // the first time anything else registered one.
+    await this.#refreshProjects();
+    // Selected either way. A folder that was already registered is still the one the user
+    // just went looking for, and leaving the sidebar where it was would answer a deliberate
+    // act with nothing moving.
+    this.#update((current) => ({ ...current, activeProjectId: registered.project.id }));
+  };
+
+  dismissAddProject = async (): Promise<void> => {
+    this.#setAddProject({ phase: 'idle' });
   };
 
   dismissError = async (id: string): Promise<void> => {
@@ -491,8 +593,69 @@ export class DaemonStore implements Store {
       return 'retry';
     }
 
+    // Deliberately after the try, and deliberately unable to throw. The sessions are what
+    // this connection is *for*; the project list is something the sidebar would like. A
+    // daemon that does not serve the verb yet is every daemon until wave C1, and putting
+    // this inside the sequence above turned that into an endless reconnect against a
+    // refusal that said, in the envelope, that waiting would not help.
+    await this.#refreshProjects();
+
     this.#update((current) => ({ ...current, status: 'ready' }));
     return 'connected';
+  }
+
+  /**
+   * Re-read the project list, and never throw.
+   *
+   * A refusal lands in `projectsUnavailable` as the daemon's own sentence, which the sidebar
+   * shows where the projects would have been. Not a notice: nobody asked for this list and
+   * it is fetched on every connect, so a notice would be a red box on every launch for
+   * something the user did not do — which is how a notice list stops being read.
+   *
+   * The projects already on screen are left alone on a failure rather than cleared. They
+   * were true when the daemon said them and this call says nothing about whether they still
+   * are; blanking the sidebar on a dropped socket would be inventing an answer in the other
+   * direction.
+   */
+  async #refreshProjects(): Promise<void> {
+    let projects: readonly Project[];
+    try {
+      projects = await this.#bridge.invoke<Project[]>('project_list');
+    } catch (cause) {
+      const message = describeFailure(cause);
+      this.#update((current) =>
+        current.projectsUnavailable === message
+          ? current
+          : { ...current, projectsUnavailable: message },
+      );
+      return;
+    }
+
+    this.#update((current) => {
+      // Same rule as `activeTab`: keep what is selected if it still exists, else the first
+      // row, else nothing. A stale id survives `project_list` no longer naming it otherwise,
+      // and `selectProject` rejects an id it cannot find — so the sidebar's next click would
+      // have failed against a project the sidebar is no longer drawing.
+      const activeProjectId =
+        projects.find((project) => project.id === current.activeProjectId)?.id ??
+        projects[0]?.id ??
+        null;
+      return {
+        ...current,
+        projects,
+        projectsUnavailable: null,
+        activeProjectId,
+        daemon: {
+          ...current.daemon,
+          // The status bar's third figure, which had nothing behind it until now.
+          worktreeCount: projects.reduce((total, project) => total + project.worktrees.length, 0),
+        },
+      };
+    });
+  }
+
+  #setAddProject(addProject: AddProjectState): void {
+    this.#update((current) => ({ ...current, addProject }));
   }
 
   /** Re-read the session list and rebuild everything derived from it. */
@@ -533,14 +696,10 @@ export class DaemonStore implements Store {
         tabs.find((tab) => tab.paneKey === current.activeTab)?.paneKey ??
         tabs[0]?.paneKey ??
         null;
-      const activeProjectId =
-        current.activeProjectId ?? SEED_ACTIVE_PROJECT;
       return {
         ...current,
         tabs,
         activeTab,
-        projects: projectsWith(sessions, activeProjectId),
-        activeProjectId,
         launchers: LAUNCHERS,
         daemon: { ...current.daemon, terminalCount: sessions.length },
       };
@@ -577,48 +736,6 @@ function toTab(session: WireSession): Tab {
     kind: session.kind,
     title: session.title,
   };
-}
-
-/**
- * The project list, with the daemon's real sessions against the active one.
- *
- * The list itself is W3's seed until the projects verb lands. What is deliberately *not*
- * seeded is the session rows: showing four invented sessions beside a sidebar that claims
- * to reflect a live daemon is how a user learns to distrust everything else on the screen.
- */
-function projectsWith(
-  sessions: readonly WireSession[],
-  activeProjectId: ProjectId,
-): readonly Project[] {
-  const now = Date.now();
-  return SEED_PROJECT_NAMES.map((name): Project => {
-    const id = `D:/dev/${name}`;
-    if (id !== activeProjectId) {
-      return { id, name, group: 'Dev', worktrees: [] };
-    }
-    return {
-      id,
-      name,
-      group: 'Dev',
-      worktrees: [
-        {
-          branch: 'master',
-          isPrimary: true,
-          sessions: sessions.map((session) => ({
-            paneKey: session.paneKey,
-            handle: session.handle,
-            kind: session.kind,
-            title: session.title,
-            // Lifecycle detection is v0.2 (the hook and the OSC 133 state machine), so a
-            // live session reports the one thing this build can prove: it exists, or it
-            // has exited.
-            status: session.exitStatus === null ? ('running' as const) : ('failed' as const),
-            startedAt: session.createdAtMs > 0 ? session.createdAtMs : now,
-          })),
-        },
-      ],
-    };
-  });
 }
 
 /**

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import type { Project as WireProject } from '../generated/Project';
 import type { SessionSummary as WireSession } from '../generated/SessionSummary';
 import { CREDIT_WINDOW_DEFAULT } from '../generated/wireConstants';
 import { StoreCommandError } from '../store/errors';
@@ -53,6 +54,16 @@ class FakeDaemon implements DaemonBridge {
   attaches = 0;
   /** Whether a control connection exists, as `Client::connect` decides. */
   #connected = false;
+  /**
+   * What `project_list` answers with, and what `project_register` appends to.
+   *
+   * Seeded with two, because the contract's fixture needs two projects to exercise
+   * selection. That is a requirement on the *fixture* and not on a provider: a daemon on a
+   * fresh machine has none, which is the case `no projects` below covers.
+   */
+  projects: WireProject[] = [wireProject('nysia'), wireProject('orca')];
+  /** What the folder picker answers with. `null` is a cancelled dialog. */
+  picks: string | null = 'D:/dev/valve';
   /** Ids handed out on this connection. Spent, never reissued — as proto requires. */
   #nextStream = 1;
   readonly streams = new Map<string, StreamId>();
@@ -126,6 +137,24 @@ class FakeDaemon implements DaemonBridge {
         this.sessions = this.sessions.filter((candidate) => candidate.handle !== handle);
         return undefined as T;
       }
+      case 'project_list':
+        return this.projects.map((project) => ({ ...project })) as T;
+      case 'project_pick_folder':
+        return this.picks as T;
+      case 'project_register': {
+        // Idempotent, because the daemon's is: the id is derived from the canonical path,
+        // so registering twice is one project and the answer says which happened. A fake
+        // that minted a second project would let a client through that showed a duplicate
+        // row on every re-register.
+        const path = String(args?.path);
+        const existing = this.projects.find((project) => project.id === projectId(path));
+        if (existing) {
+          return { project: existing, alreadyRegistered: true } as T;
+        }
+        const registered = wireProject(lastSegment(path));
+        this.projects.push(registered);
+        return { project: registered, alreadyRegistered: false } as T;
+      }
       default:
         return undefined as T;
     }
@@ -176,7 +205,42 @@ class FakeDaemon implements DaemonBridge {
 
 /** What the Rust side returns when a precondition is not met. */
 function disconnected(message: string): CommandFailure {
-  return { message, nextSteps: ['Start the Nysia daemon, then try again.'], retryable: true };
+  return {
+    kind: 'disconnected',
+    message,
+    nextSteps: ['Start the Nysia daemon, then try again.'],
+    retryable: true,
+  };
+}
+
+/** A project as `project_list` reports it, with the id the daemon would derive. */
+function wireProject(name: string): WireProject {
+  return {
+    id: projectId(`D:/dev/${name}`),
+    name,
+    group: 'Dev',
+    worktrees: [{ branch: 'master', isPrimary: true, sessions: [] }],
+  };
+}
+
+/**
+ * A stand-in for the daemon's `proj_<32 hex>`, derived from the path and nothing else.
+ *
+ * It is not the daemon's hash and does not pretend to be. What matters here is the property
+ * the daemon's id has and a random one would not: the same path reaches the same id, which
+ * is what makes registration idempotent rather than merely tidy.
+ */
+function projectId(path: string): string {
+  let hash = 0;
+  for (const code of path.toLowerCase()) {
+    hash = (hash * 31 + (code.codePointAt(0) ?? 0)) % 0xffff_ffff;
+  }
+  return `proj_${hash.toString(16).padStart(32, '0')}`;
+}
+
+function lastSegment(path: string): string {
+  const segments = path.split(/[\\/]/).filter((segment) => segment !== '');
+  return segments.at(-1) ?? path;
 }
 
 /** A wire session, numbered so a fixture reads clearly. */
@@ -284,17 +348,29 @@ describe('what the daemon is authoritative for', () => {
     expect(store.getSnapshot().tabs.some((tab) => tab.paneKey === closing)).toBe(false);
   });
 
-  it('shows the daemon’s own sessions against the project, never seeded ones', async () => {
-    // Showing four invented sessions beside a sidebar that claims to reflect a live daemon
-    // is how a user learns to distrust everything else on the screen.
+  it('shows the daemon’s projects, and invents no session rows against them', async () => {
+    // Both halves of "the sidebar stops pretending". The names come off `project_list` —
+    // they used to be ten transcribed from the design mock, held client-side and marked as
+    // such in a comment nobody reading the sidebar could see. And the sessions under a
+    // worktree are the daemon's too: the old provider grafted every live session onto the
+    // active project's `master`, which put four real sessions under a project that did not
+    // exist and made the true part indistinguishable from the invented one.
     const { store, daemon } = build(2);
     await ready(store);
 
-    const active = store.getSnapshot().projects.find(
-      (project) => project.id === store.getSnapshot().activeProjectId,
+    const snapshot = store.getSnapshot();
+    expect(snapshot.projects.map((project) => project.name)).toEqual(
+      daemon.projects.map((project) => project.name),
     );
-    const shown = active?.worktrees[0]?.sessions ?? [];
-    expect(shown.map((s) => s.handle)).toEqual(daemon.sessions.map((s) => s.handle));
+    expect(snapshot.projectsUnavailable).toBeNull();
+    // The daemon holds two sessions and reports no worktree sessions, so the sidebar shows
+    // none — rather than borrowing the ones in the tab strip.
+    expect(daemon.sessions).toHaveLength(2);
+    expect(snapshot.projects.flatMap((project) => project.worktrees.flatMap((w) => w.sessions))).toEqual(
+      [],
+    );
+    // And the status bar's worktree count is a fact about that list rather than a seeded 3.
+    expect(snapshot.daemon.worktreeCount).toBe(2);
   });
 
   it('keeps a session’s stream id stable when another one closes', async () => {
@@ -317,6 +393,7 @@ describe('a command that cannot be satisfied', () => {
     const { store, daemon } = build();
     await ready(store);
     daemon.failures.set('session_create', {
+      kind: 'spawn_failed',
       message: 'pwsh is not on PATH',
       nextSteps: ['Install PowerShell 7, or pick cmd from the + menu.'],
       retryable: false,
@@ -342,6 +419,215 @@ describe('a command that cannot be satisfied', () => {
 
     await store.closeTab(store.getSnapshot().tabs[0]?.paneKey ?? '').catch(() => {});
     expect(store.getSnapshot().errors.at(-1)?.message).toContain('no permission');
+  });
+});
+
+describe('adding a project', () => {
+  it('registers the folder the picker answered with, and selects it', async () => {
+    const { store, daemon } = build();
+    await ready(store);
+    daemon.picks = 'D:/dev/valve';
+
+    await store.addProject();
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.addProject).toEqual({
+      phase: 'added',
+      name: 'valve',
+      alreadyRegistered: false,
+    });
+    // The list is re-read rather than spliced, so the sidebar's order is the daemon's.
+    expect(snapshot.projects.map((project) => project.name)).toEqual(
+      daemon.projects.map((project) => project.name),
+    );
+    expect(snapshot.activeProjectId).toBe(daemon.projects.at(-1)?.id);
+    expect(snapshot.errors).toEqual([]);
+  });
+
+  it('says a folder is already there instead of pretending to have added it', async () => {
+    // §3.2: registering the same path twice is one project. `alreadyRegistered` is the
+    // daemon's answer to that, and it is not an error — it resolves, records nothing, and
+    // reaches the panel as its own outcome.
+    const { store, daemon } = build();
+    await ready(store);
+    daemon.picks = 'D:/dev/nysia';
+
+    const before = daemon.projects.length;
+    await expect(store.addProject()).resolves.toBeUndefined();
+
+    expect(store.getSnapshot().addProject).toEqual({
+      phase: 'added',
+      name: 'nysia',
+      alreadyRegistered: true,
+    });
+    expect(daemon.projects).toHaveLength(before);
+    expect(store.getSnapshot().errors, 'an idempotent register is not a failure').toEqual([]);
+  });
+
+  it('says nothing at all when the picker is cancelled', async () => {
+    const { store, daemon } = build();
+    await ready(store);
+    daemon.picks = null;
+
+    await store.addProject();
+    expect(store.getSnapshot().addProject).toEqual({ phase: 'idle' });
+    expect(store.getSnapshot().errors).toEqual([]);
+    expect(daemon.calls.some((call) => call.command === 'project_register')).toBe(false);
+  });
+
+  it('carries each of the three refusals to the dialog, not to the notice list', async () => {
+    // The claim this whole path exists for. A refusal is an *answer*: it resolves, so
+    // `runCommand` never routes it, and it reaches the panel with the daemon's own code,
+    // sentence and steps rather than as "addProject failed" in the corner.
+    const refusals = [
+      ['not_a_repository', 'that folder is not a git repository'],
+      ['many_repositories', 'but 3 of the folders in it are'],
+      ['path_unreadable', 'that path could not be read'],
+    ] as const;
+
+    for (const [kind, message] of refusals) {
+      const { store, daemon } = build();
+      await ready(store);
+      daemon.picks = 'D:/dev/whatever';
+      daemon.failures.set('project_register', {
+        kind,
+        message,
+        nextSteps: [`what to do about ${kind}`],
+        retryable: false,
+      });
+
+      await expect(store.addProject(), kind).resolves.toBeUndefined();
+      expect(store.getSnapshot().addProject, kind).toEqual({
+        phase: 'refused',
+        code: kind,
+        message,
+        nextSteps: [`what to do about ${kind}`],
+      });
+      expect(store.getSnapshot().errors, kind).toEqual([]);
+      store.dispose();
+    }
+  });
+
+  it('treats anything that is not a refusal as a command that failed', async () => {
+    // The other side of the same boundary. A dropped socket mid-register is not an answer
+    // about the folder, so it rejects and records — which is what puts it in front of the
+    // user, because the dialog has nothing to say about it.
+    const { store, daemon } = build();
+    await ready(store);
+    daemon.picks = 'D:/dev/whatever';
+    daemon.failures.set('project_register', disconnected('the connection to the daemon failed'));
+
+    const rejection = await store.addProject().catch((cause: unknown) => cause);
+    expect(rejection).toBeInstanceOf(StoreCommandError);
+    expect(store.getSnapshot().errors.at(-1)?.command).toBe('addProject');
+    // And the dialog goes back to idle rather than sitting on `registering` for ever.
+    expect(store.getSnapshot().addProject).toEqual({ phase: 'idle' });
+  });
+
+  it('opens one picker at a time', async () => {
+    // Two pickers is two registrations racing, and the second would land on a snapshot the
+    // first has already replaced.
+    const { store, daemon } = build();
+    await ready(store);
+    daemon.picks = 'D:/dev/valve';
+
+    await Promise.all([store.addProject(), store.addProject()]);
+
+    expect(daemon.calls.filter((call) => call.command === 'project_pick_folder')).toHaveLength(1);
+  });
+
+  it('clears the panel when it is dismissed', async () => {
+    const { store, daemon } = build();
+    await ready(store);
+    daemon.picks = 'D:/dev/valve';
+
+    await store.addProject();
+    expect(store.getSnapshot().addProject.phase).toBe('added');
+    await store.dismissAddProject();
+    expect(store.getSnapshot().addProject).toEqual({ phase: 'idle' });
+  });
+});
+
+describe('a daemon that does not serve the project verbs', () => {
+  const unsupported = {
+    kind: 'unsupported',
+    message: 'this daemon does not serve the project verbs yet',
+    nextSteps: ['Compare the two: `nysia --version` reports the client.'],
+    retryable: false,
+  } as const;
+
+  it('shows an empty sidebar carrying the daemon’s own sentence', async () => {
+    // What every daemon says until v0.3 wave C1, and therefore what this window does today.
+    // An empty sidebar that explains itself beats ten project names transcribed from a
+    // design mock, because a name on screen cannot be told from a real one.
+    const { store, daemon } = build();
+    daemon.failures.set('project_list', { ...unsupported, nextSteps: [...unsupported.nextSteps] });
+    await ready(store);
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.projects).toEqual([]);
+    expect(snapshot.projectsUnavailable).toContain('does not serve the project verbs');
+    expect(snapshot.projectsUnavailable).toContain('nysia --version');
+  });
+
+  it('does not put it in the notice list', async () => {
+    // Nobody asked for this list — it is fetched on every connect — so a red notice would be
+    // on screen at every launch for something the user did not do. That is how a notice list
+    // stops being read, and the sessions that *did* fail are what it is for.
+    const { store, daemon } = build();
+    daemon.failures.set('project_list', { ...unsupported, nextSteps: [...unsupported.nextSteps] });
+    await ready(store);
+
+    expect(store.getSnapshot().errors).toEqual([]);
+  });
+
+  it('still reaches ready, and stays there', async () => {
+    // The defect this arrangement exists to avoid, and it would have been every launch. The
+    // fetch used to sit inside the connect sequence, so a refusal dropped the window into
+    // `reconnecting` and retried for ever against an answer that says, in the envelope, that
+    // waiting will not help.
+    const daemon = new FakeDaemon();
+    daemon.seed([session(1)]);
+    // Not one-shot: this daemon refuses the verb every time, as a daemon from before wave C1
+    // does. A one-shot fixture would go green on a loop that simply got lucky on its second
+    // attempt.
+    daemon.refusals.set('project_list', {
+      failure: { ...unsupported, nextSteps: [...unsupported.nextSteps] },
+      times: Number.MAX_SAFE_INTEGER,
+    });
+    const store = new DaemonStore({
+      bridge: daemon,
+      router: new TerminalRouter({
+        bridge: daemon,
+        createTerminal: stubTerminals(),
+        platform: 'windows',
+      }),
+      retryDelaysMs: [0],
+    });
+    void store.run();
+    await ready(store);
+
+    const dials = daemon.connects;
+    await until(() => daemon.connects > dials, 20);
+    expect(store.getSnapshot().status).toBe('ready');
+    expect(daemon.connects, 'a refused project list is not a reason to reconnect').toBe(dials);
+    store.dispose();
+  });
+
+  it('keeps the projects it has when a later refresh cannot reach the daemon', async () => {
+    // They were true when the daemon said them, and a failed re-read says nothing about
+    // whether they still are. Blanking the sidebar would be inventing an answer in the other
+    // direction.
+    const { store, daemon } = build();
+    await ready(store);
+    expect(store.getSnapshot().projects.length).toBeGreaterThan(0);
+
+    daemon.picks = 'D:/dev/valve';
+    daemon.failures.set('project_list', disconnected('the connection to the daemon failed'));
+    await store.addProject();
+
+    expect(store.getSnapshot().projects.length).toBeGreaterThan(0);
+    expect(store.getSnapshot().projectsUnavailable).toContain('connection to the daemon failed');
   });
 });
 
@@ -469,6 +755,7 @@ describe('the connection', () => {
     // is what makes the difference observable — it never resolves unless the loop returns.
     const daemon = new FakeDaemon();
     daemon.failures.set('daemon_connect', {
+      kind: 'refused',
       message: 'this build speaks protocol v1, which is outside v2..=v2',
       nextSteps: ['Restart the daemon so both are the same version.'],
       retryable: false,
@@ -516,6 +803,7 @@ describe('the connection', () => {
     const daemon = new FakeDaemon();
     daemon.refusals.set('daemon_connect', {
       failure: {
+        kind: 'starting',
         message: 'Nysia started its runtime and it has not answered within 20 seconds',
         nextSteps: ['Nysia is still trying. If it never connects, the runtime wrote why to X.'],
         retryable: true,

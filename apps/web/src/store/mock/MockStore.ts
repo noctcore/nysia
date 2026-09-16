@@ -148,6 +148,33 @@ export class MockStore implements Store {
     this.#notifications.report(change, session);
   };
 
+  /**
+   * The mock has no filesystem, so browsing resolves the way a cancelled picker does.
+   *
+   * Not a stub that throws and not one that invents a project: the mock stands in for a
+   * daemon, and inventing a registration would mean inventing a `ProjectId`, which §3.1
+   * derives from a canonical path on a real disk. "The user closed the dialog" is a real
+   * outcome of this command and the only one reachable without one.
+   *
+   * A test that wants to see the panel builds a snapshot with the outcome already in it —
+   * `addProject` is snapshot state precisely so that is possible without a picker.
+   */
+  addProject = async (): Promise<void> => {
+    this.#update((current) =>
+      current.addProject.phase === 'idle'
+        ? current
+        : { ...current, addProject: { phase: 'idle' } },
+    );
+  };
+
+  dismissAddProject = async (): Promise<void> => {
+    this.#update((current) =>
+      current.addProject.phase === 'idle'
+        ? current
+        : { ...current, addProject: { phase: 'idle' } },
+    );
+  };
+
   dismissError = async (id: string): Promise<void> => {
     this.#update((current) => {
       const errors = current.errors.filter((error) => error.id !== id);

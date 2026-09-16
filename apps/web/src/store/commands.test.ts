@@ -90,7 +90,9 @@ describe('routeCommands', () => {
     const verbs = Object.keys(commands).filter((key) => key !== 'getSnapshot');
     expect(verbs.sort()).toEqual(
       [
+        'addProject',
         'closeTab',
+        'dismissAddProject',
         'dismissError',
         'openTab',
         'selectNav',

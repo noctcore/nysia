@@ -14,9 +14,14 @@ import { emptySnapshot, type LauncherGroup, type Project, type StoreSnapshot, ty
  * constructing the mock.
  *
  * Session ages are offsets from the moment the store is built rather than the mock's
- * pre-formatted `21h`. Two reasons: the daemon will send timestamps, so the sidebar has to
- * do the arithmetic either way; and a fixed epoch would make the seeded ages drift further
- * from the design every day the repository sits there.
+ * pre-formatted `21h`. Two reasons: the daemon sends timestamps, so the sidebar has to do
+ * the arithmetic either way; and a fixed epoch would make the seeded ages drift further from
+ * the design every day the repository sits there.
+ *
+ * The session rows are `nysia-proto`'s `SessionSummary` now rather than a hand-written
+ * lookalike, so `exitStatus: null` — still running — stands where a five-state `status` used
+ * to be guessed. A fixture whose shape is the wire's is the only kind that proves anything
+ * about what a component will be handed.
  */
 
 const MINUTE = 60_000;
@@ -85,16 +90,16 @@ function seedProjects(now: number): readonly Project[] {
               handle: KIREI_HANDLE,
               kind: 'agent' as const,
               title: 'Kirei deps but we already did…',
-              status: 'running' as const,
-              startedAt: now - 21 * HOUR,
+              createdAtMs: now - 21 * HOUR,
+              exitStatus: null,
             },
             {
               paneKey: PWSH_PANE,
               handle: PWSH_HANDLE,
               kind: 'shell' as const,
               title: 'pwsh',
-              status: 'idle' as const,
-              startedAt: now - 3 * MINUTE,
+              createdAtMs: now - 3 * MINUTE,
+              exitStatus: null,
             },
           ],
         },
@@ -197,7 +202,7 @@ function statusRow(
  * paints as *unknown* rather than as idle, and the seed should exercise it rather than
  * paper over it.
  *
- * `observedAt` is an offset from the moment the store is built, for `startedAt`'s reason
+ * `observedAt` is an offset from the moment the store is built, for `createdAtMs`'s reason
  * and one more: staleness is a comparison against the clock, so a fixed epoch would make
  * every seeded dot decay to *active* the first time anyone opened the repository a day
  * later.
@@ -224,6 +229,7 @@ export function createSeedSnapshot(now: number = Date.now()): StoreSnapshot {
     activeProjectId: SEED_ACTIVE_PROJECT,
     tabs: SEED_TABS,
     activeTab: SEED_ACTIVE_TAB,
+    projectsUnavailable: null,
     launchers: SEED_LAUNCHERS,
     daemon: {
       memoryBytes: 4 * 1024 ** 3,

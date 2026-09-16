@@ -19,6 +19,8 @@ export type StoreCommandName =
   | 'selectTab'
   | 'closeTab'
   | 'openTab'
+  | 'addProject'
+  | 'dismissAddProject'
   | 'dismissError'
   | 'window.minimize'
   | 'window.toggleMaximize'
