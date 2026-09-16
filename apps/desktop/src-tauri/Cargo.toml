@@ -24,6 +24,10 @@ nysia-proto = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { workspace = true }
+# The folder picker behind **Add a project**, driven from `commands::project_pick_folder`
+# and never from the webview — see the workspace table for why that means no `dialog:`
+# permission in `capabilities/default.json`.
+tauri-plugin-dialog = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

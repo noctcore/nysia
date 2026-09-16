@@ -47,6 +47,16 @@ libc = "0.2"
 
 tauri = { version = "2.11", features = [] }
 tauri-build = { version = "2.6", features = [] }
+# The native folder picker behind **Add a project** (v0.3 plan §4, wave B2). The webview
+# cannot reach the filesystem and must not (D-1/D-2), so browsing for a folder is the one
+# thing only the window process can do on the user's behalf.
+#
+# It is called from Rust and never from JavaScript, which is why
+# `apps/desktop/src-tauri/capabilities/default.json` grants no `dialog:` permission at all:
+# a capability entry is what lets the *webview* invoke a plugin's own commands, and nothing
+# in `apps/web` invokes this one. The surface stays "the window may open a folder picker",
+# which is narrower than the permission would have been.
+tauri-plugin-dialog = "2.7"
 
 # The Win32 surface v0.1 needs, declared up front so wave 2 never edits this table:
 # Job Objects with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` for tree-kill, because ConPTY has

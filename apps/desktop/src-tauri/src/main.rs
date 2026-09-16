@@ -45,6 +45,11 @@ fn main() -> ExitCode {
     // connecting is something the window does, not something it is born with (D-1).
     let app = tauri::Builder::default()
         .manage(state::Client::new())
+        // The native folder picker behind **Add a project**. Registered so the Rust side can
+        // call it; the webview cannot, because `capabilities/default.json` grants no
+        // `dialog:` permission and a plugin command the capability does not name is not
+        // reachable from JavaScript. `commands::project_pick_folder` is the whole surface.
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::daemon_connect,
             commands::daemon_status,
@@ -59,6 +64,9 @@ fn main() -> ExitCode {
             commands::terminal_send,
             commands::terminal_resize,
             commands::host_platform,
+            commands::project_list,
+            commands::project_register,
+            commands::project_pick_folder,
             commands::client_log,
         ]);
 
