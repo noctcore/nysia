@@ -5,6 +5,9 @@ import type { SessionHandle } from '../generated/SessionHandle';
 import type { SessionKind } from '../generated/SessionKind';
 import type { SessionSummary as WireSession } from '../generated/SessionSummary';
 import type { ShellProfile } from '../generated/ShellProfile';
+import { branchForIssue } from '../tasks/branchName';
+import type { Issue } from '../tasks/issue';
+import { isTasksBusy, unavailableReason } from '../tasks/tasks';
 import { isAddProjectBusy, registerRefusal, type AddProjectState } from '../store/addProject';
 import { StoreCommandError, type StoreCommandName, type StoreError } from '../store/errors';
 import {
@@ -25,6 +28,7 @@ import {
 } from './bridge';
 import type { StreamId } from './frames';
 import { SILENT_TRANSPORT_LOG, type TransportLog } from './log';
+import { readIssues, readStarted, type TaskStarted } from './tasks';
 import { REPLAY_BOUNDARY_DEADLINE_MS } from './surface/TerminalSurface';
 import type { TerminalRouter } from './terminals';
 
@@ -90,6 +94,15 @@ import type { TerminalRouter } from './terminals';
  * fail the same call, and only one of them is worth another twenty seconds.
  */
 type ConnectOutcome = 'connected' | 'retry' | 'stopped';
+
+/**
+ * What the Tasks panel offers when the failure carried no advice of its own.
+ *
+ * Deliberately one sentence naming the control that is on screen next to it, rather than
+ * something about daemons and logs: whoever is reading this is looking at a table with
+ * nothing in it, and the question they have is what to press.
+ */
+const RETRY_STEP = 'Press ↻ to ask again.';
 
 export class DaemonStore implements Store {
   #snapshot: StoreSnapshot = emptySnapshot('connecting');
@@ -193,7 +206,18 @@ export class DaemonStore implements Store {
       throw this.fail('selectProject', `No project ${id} is open.`);
     }
     this.#update((current) =>
-      current.activeProjectId === id ? current : { ...current, activeProjectId: id },
+      current.activeProjectId === id
+        ? current
+        : // The issues belong to the project that was showing, and so does the line saying
+          // what the last `Start →` did. Carrying either across would put one repository's
+          // work under another's name — and `Start →` derives a branch for the *active*
+          // project, so a stale row is a worktree in the wrong repository one click away.
+          {
+            ...current,
+            activeProjectId: id,
+            tasks: { phase: 'idle' },
+            taskStart: { phase: 'idle' },
+          },
     );
   };
 
@@ -358,6 +382,133 @@ export class DaemonStore implements Store {
 
   dismissAddProject = async (): Promise<void> => {
     this.#setAddProject({ phase: 'idle' });
+  };
+
+  /**
+   * Ask the daemon for the active project's issues, and never throw.
+   *
+   * **Every ending is an answer.** D-5 queries GitHub live, so the query can fail three ways
+   * a user must be able to tell apart — `gh` absent, `gh` unauthenticated, the query itself
+   * refused — and wave C's contract says an empty list for any of them is a lie. So all three
+   * land in `snapshot.tasks` as the screen's own content, with the daemon's sentence and next
+   * steps verbatim, rather than in the notice list over a table that looks like a repository
+   * with no work in it.
+   *
+   * That includes the answer every daemon gives *today*: `tasks_list` is served by wave C1,
+   * so until it lands this is refused as `unsupported` and the screen says so in the daemon's
+   * words. Which is the same arrangement `#refreshProjects` was built with one wave ago, for
+   * the same reason — a window that treated "not served yet" as a transport failure would
+   * reconnect forever against something no amount of waiting fixes.
+   *
+   * With no active project it does nothing at all. There is nothing to ask GitHub about, and
+   * the screen says that for itself rather than being handed a refusal nobody sent.
+   */
+  refreshTasks = async (): Promise<void> => {
+    const project = this.#snapshot.activeProjectId;
+    if (project === null || isTasksBusy(this.#snapshot.tasks)) {
+      return;
+    }
+    // The confirmation from the last start goes with the list it was about.
+    this.#update((current) => ({
+      ...current,
+      tasks: { phase: 'loading' },
+      taskStart: { phase: 'idle' },
+    }));
+
+    let issues: readonly Issue[];
+    try {
+      issues = readIssues(await this.#bridge.invoke<unknown>('tasks_list', { project }));
+    } catch (cause) {
+      const failure = asCommandFailure(cause);
+      this.#update((current) => ({
+        ...current,
+        tasks: {
+          phase: 'unavailable',
+          reason: unavailableReason(failure?.kind ?? null),
+          // `describeFailure` is deliberately not used: it joins the sentence and the first
+          // step into one string, and this panel puts them in two different places — the
+          // steps are the part that says `gh auth login`.
+          message: failure?.message ?? describeFailure(cause),
+          // The daemon's envelope guarantees at least one step, so the fallback is only ever
+          // reached by a failure that never became one — a Tauri-level error before the
+          // command ran, or an answer this window could not parse. Those have no advice
+          // attached and still must not leave the panel a dead end, and asking again is the
+          // one action this screen always offers.
+          nextSteps: failure?.nextSteps ?? [RETRY_STEP],
+        },
+      }));
+      return;
+    }
+
+    this.#update((current) => ({ ...current, tasks: { phase: 'loaded', issues } }));
+  };
+
+  /**
+   * Hand an issue to an agent: a branch-keyed worktree, a session in it, and a tab.
+   *
+   * **The branch is derived here and the issue number never leaves this method.** D-6 is made
+   * unrepresentable rather than merely forbidden — the request carries a project and a
+   * branch, and there is no field an issue id could travel in — so `tasks/branchName.ts` runs
+   * before the request exists and the daemon never learns which issue this was.
+   *
+   * Unlike {@link refreshTasks} this rejects and records. Somebody pressed a button, so a
+   * branch that will not check out or a repository that moved has to reach them with the
+   * daemon's own next steps, wherever they are looking by then.
+   *
+   * The session list is re-read rather than having a tab spliced in, for `openTab`'s reason:
+   * `session_list` decides what exists, and a client that invented a row would disagree with
+   * the daemon the first time anything else opened one.
+   */
+  startTask = async (issue: Issue): Promise<void> => {
+    const project = this.#snapshot.activeProjectId;
+    if (project === null) {
+      throw this.fail('startTask', 'No project is selected, so there is nowhere to start it.');
+    }
+    if (this.#snapshot.taskStart.phase === 'starting') {
+      return;
+    }
+
+    const branch = branchForIssue(issue);
+    this.#update((current) => ({
+      ...current,
+      taskStart: { phase: 'starting', issue: issue.number },
+    }));
+
+    let started: TaskStarted;
+    try {
+      started = readStarted(
+        await this.#bridge.invoke<unknown>('task_start', {
+          request: {
+            project,
+            branch,
+            // One agent in v1 and no provider trait (D-3, D-4), and the design is explicit
+            // that `Start →` hands the issue to an agent. `profile` is for a shell, so it is
+            // null here rather than absent: the field exists on the wire either way.
+            kind: 'agent',
+            profile: null,
+          },
+        }),
+      );
+      // Inside the try, like `openTab`: this is a round trip, and a failure here has to reach
+      // the user as a `StoreCommandError` or it reaches nobody.
+      await this.#refresh();
+    } catch (cause) {
+      this.#update((current) => ({ ...current, taskStart: { phase: 'idle' } }));
+      throw this.fail('startTask', describeFailure(cause));
+    }
+
+    this.#update((current) => ({
+      ...current,
+      taskStart: {
+        phase: 'started',
+        issue: issue.number,
+        // The daemon's branch, not the one asked for. They should agree, and if they ever do
+        // not it is the daemon that knows which worktree it actually opened.
+        branch: started.branch,
+        paneKey: started.paneKey,
+        adopted: started.adopted,
+      },
+    }));
   };
 
   dismissError = async (id: string): Promise<void> => {
