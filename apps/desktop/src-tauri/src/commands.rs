@@ -42,7 +42,10 @@ use std::path::PathBuf;
 use nysia_proto::envelope::{RequestPayload, ResponsePayload};
 use nysia_proto::handshake::DaemonIdentity;
 use nysia_proto::identity::SessionHandle;
-use nysia_proto::project::{Project, ProjectId, ProjectList, ProjectRegister, ProjectRegistered};
+use nysia_proto::project::{
+    Project, ProjectId, ProjectList, ProjectRegister, ProjectRegistered, ProjectStart,
+    ProjectStarted,
+};
 use nysia_proto::session::{SessionClose, SessionCreate, SessionList, SessionSummary};
 use nysia_proto::tasks::{Issue, TasksList};
 use nysia_proto::terminal::{TerminalResize, TerminalSend};
@@ -376,6 +379,49 @@ pub async fn project_list(app: AppHandle) -> Failed<Vec<Project>> {
         match client.request(RequestPayload::ProjectList(ProjectList {}))? {
             ResponsePayload::ProjectList { projects } => Ok(projects),
             other => Err(unexpected("project_list", &other)),
+        }
+    })
+    .await
+}
+
+/// `Start →`: a branch-keyed worktree, a session in it, and the tab the window opens.
+///
+/// The Tasks screen's one write. The request carries a project and a **branch** — there is
+/// no field an issue number could travel in, which is D-6 made unrepresentable rather than
+/// merely forbidden (see [`ProjectStart`]) — so the window derives the branch before the
+/// request exists and the daemon never learns which issue it was.
+///
+/// # What this forwarder has to preserve
+///
+/// **The refusal code.** [`DaemonError::kind`] passes a *named* [`nysia_proto::ErrorCode`]
+/// through as its own wire string and flattens only [`nysia_proto::ErrorCode::Other`] to
+/// `"other"` — so a code the window can act on reaches it only if the daemon named one.
+/// The refusals this verb builds are written down in one place, `start_refusal` and its
+/// neighbours in `crates/nysia-core/src/rpc/project.rs`: `invalid_request` for a branch git
+/// will not accept or one whose worktree directory is gone, `path_unreadable` for a
+/// registered folder that no longer opens, `unknown_project`, `unsupported` for a session
+/// kind this daemon does not serve yet, and `internal` for git itself.
+///
+/// Nothing on this side can check that a later one is named too — a refusal built with
+/// `ErrorCode::Other` would reach the screen as `other` and the notice would say only that
+/// something went wrong. This paragraph names where to look rather than claiming a property
+/// it cannot hold.
+///
+/// **The seconds.** This canonicalises, runs git up to four times and spawns a pty, so it is
+/// the second command here that genuinely waits. On the main thread that is a window frozen
+/// for the length of a `git worktree add` (traps register #2), so it goes to the blocking
+/// pool like every other verb.
+///
+/// # Errors
+///
+/// [`CommandFailure`] carrying the daemon's own code, sentence and next steps.
+#[tauri::command]
+pub async fn project_start(app: AppHandle, request: ProjectStart) -> Failed<ProjectStarted> {
+    let client = client(&app)?;
+    blocking("project_start", move || {
+        match client.request(RequestPayload::ProjectStart(request))? {
+            ResponsePayload::ProjectStart(started) => Ok(started),
+            other => Err(unexpected("project_start", &other)),
         }
     })
     .await
