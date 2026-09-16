@@ -525,6 +525,25 @@ mod tests {
             }
         }
 
+        // [`TARGET_CAP`] is the answer to the other half of the finding — the excerpt had no
+        // length cap — and no target either leg above comes near, so the arm that applies it
+        // is reached only by a line shaped differently from the ones a run produces. This is
+        // that line. Without the case the cap is a constant and a sentence rather than a
+        // bound, which is the shape of thing this PR is fixing.
+        let overlong = "x".repeat(TARGET_CAP * 2);
+        let said = where_it_is(
+            &format!("2026-09-16T00:00:00.000000Z ERROR {overlong}: {message}\n"),
+            PLANTED,
+        );
+        assert!(
+            said.contains(&format!("`{}…`", "x".repeat(TARGET_CAP))),
+            "an over-long target is not cut at {TARGET_CAP} and marked: {said}"
+        );
+        assert!(
+            !said.contains(&overlong),
+            "the cap did not bound the target: {said}"
+        );
+
         // A line no subscriber wrote — the notes `filter` puts on stderr before one exists, and
         // anything libtest prints. It has no level to name and so nothing to say, and what it
         // may not do about that is answer with the line.
