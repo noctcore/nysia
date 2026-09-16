@@ -29,6 +29,8 @@
 //! which is the right way round, because the alternative is a directive that silently does
 //! nothing and a person who concludes the log is broken.
 
+use std::io::Write;
+
 use nysia_core::rpc::log_file;
 use tracing_subscriber::EnvFilter;
 
@@ -126,8 +128,13 @@ fn parsed(asked: &str) -> EnvFilter {
 /// explaining the same refusal differently. See the module docs for why this is stderr and
 /// not `tracing`: at the point [`filter`] runs there is no subscriber, and for a spawned
 /// daemon stderr is the log file anyway.
+///
+/// `writeln!` and not `eprintln!`, which panics when the write fails. The one thing this
+/// line is for is telling somebody why their `NYSIA_LOG` did nothing, and a process that
+/// died over saying it would have answered a refused directive with no daemon at all.
+/// `main` writes every one of its own stderr lines the same way, for the same reason.
 fn note(what: &str) {
-    eprintln!("{what}");
+    let _ = writeln!(std::io::stderr(), "{what}");
 }
 
 #[cfg(test)]
