@@ -282,23 +282,7 @@ fn start_request(args: &StartArgs) -> Result<ProjectStart, VerbError> {
             "pass the branch the worktree is keyed by, as in `--branch feat/projects`",
         ));
     }
-    if args.kind == SessionKind::Agent {
-        // A profile (and its distro) name a shell. Passing either with `--kind agent`
-        // would travel to the daemon and be ignored — `program_for` only consults the
-        // profile on a shell — which is a flag silently doing nothing.
-        if args.profile.is_some() {
-            return Err(VerbError::argument(
-                "--profile names a shell, and --kind agent is not one",
-                "omit --profile, or pass --kind shell",
-            ));
-        }
-        if args.distro.is_some() {
-            return Err(VerbError::argument(
-                "--distro names a WSL distribution for a shell, and --kind agent is not one",
-                "omit --distro, or pass --kind shell",
-            ));
-        }
-    }
+    refuse_shell_flags_on_an_agent(args.kind, args.profile.is_some(), args.distro.is_some())?;
     Ok(ProjectStart {
         project: parse_project_id(&args.id)?,
         branch: args.branch.clone(),
@@ -354,6 +338,33 @@ fn status_pane(args: &StatusArgs) -> Result<Option<PaneKey>, VerbError> {
         .transpose()
 }
 
+/// `--profile` and `--distro` name a shell. Passing either with `--kind agent` would
+/// travel to the daemon and be ignored — `program_for` only consults the profile on a
+/// shell — which is a flag silently doing nothing. Shared so `project start` and
+/// `session create` refuse the same pair the same way.
+fn refuse_shell_flags_on_an_agent(
+    kind: SessionKind,
+    has_profile: bool,
+    has_distro: bool,
+) -> Result<(), VerbError> {
+    if kind != SessionKind::Agent {
+        return Ok(());
+    }
+    if has_profile {
+        return Err(VerbError::argument(
+            "--profile names a shell, and --kind agent is not one",
+            "omit --profile, or pass --kind shell",
+        ));
+    }
+    if has_distro {
+        return Err(VerbError::argument(
+            "--distro names a WSL distribution for a shell, and --kind agent is not one",
+            "omit --distro, or pass --kind shell",
+        ));
+    }
+    Ok(())
+}
+
 /// Parse a session handle, saying what a good one looks like.
 fn parse_handle(raw: &str) -> Result<SessionHandle, VerbError> {
     raw.parse().map_err(|err| {
@@ -392,10 +403,13 @@ fn create_request(args: &CreateArgs) -> Result<SessionCreate, VerbError> {
         env_overrides.insert(key.to_owned(), value.to_owned());
     }
 
+    refuse_shell_flags_on_an_agent(args.kind, args.profile.is_some(), args.distro.is_some())?;
     Ok(SessionCreate {
-        // v0.1 serves shells. An agent session is refused by the daemon with next steps
-        // naming the version that serves it, rather than by a flag this build cannot honour.
-        kind: SessionKind::Shell,
+        // The daemon serves both kinds. session create has no worktree to write, so there
+        // is nothing to refuse before a write — but `--kind agent` with `--profile` is
+        // still refused here, same as `project start`, so the two verbs agree about the
+        // same pair of flags.
+        kind: args.kind,
         pane_key,
         profile: args
             .profile
@@ -826,6 +840,7 @@ mod tests {
 
     fn create_args() -> CreateArgs {
         CreateArgs {
+            kind: SessionKind::Shell,
             profile: None,
             distro: None,
             cwd: None,
@@ -849,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn a_start_defaults_to_a_shell_and_can_ask_for_an_agent() {
+    fn a_start_forwards_the_kind_it_was_given() {
         let shell = start_request(&start_args()).expect("the defaults are valid");
         assert_eq!(shell.kind, SessionKind::Shell);
         assert!(shell.profile.is_none());
@@ -946,6 +961,36 @@ mod tests {
             "the CLI has no pane; the daemon mints the key"
         );
         assert!(request.env_overrides.is_empty());
+    }
+
+    #[test]
+    fn a_create_forwards_the_kind_it_was_given() {
+        let agent = create_request(&CreateArgs {
+            kind: SessionKind::Agent,
+            ..create_args()
+        })
+        .expect("an agent create with no profile is valid");
+        assert_eq!(agent.kind, SessionKind::Agent);
+        assert!(agent.profile.is_none());
+    }
+
+    #[test]
+    fn a_shell_profile_is_refused_on_an_agent_create() {
+        let err = create_request(&CreateArgs {
+            kind: SessionKind::Agent,
+            profile: Some(ProfileArg::Pwsh),
+            ..create_args()
+        })
+        .expect_err("a profile names a shell");
+        assert!(!err.envelope().next_steps().is_empty());
+
+        let err = create_request(&CreateArgs {
+            kind: SessionKind::Agent,
+            distro: Some("Ubuntu-24.04".to_owned()),
+            ..create_args()
+        })
+        .expect_err("a distro names a shell");
+        assert!(!err.envelope().next_steps().is_empty());
     }
 
     #[test]
