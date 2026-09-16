@@ -315,10 +315,16 @@ export interface Store {
    * list for any of those is a lie"* — so the refusals are the screen's content rather than
    * a red box in the corner over a table that looks like a repository with no work in it.
    *
-   * Calling it while a query is in flight does nothing; two answers racing would leave
-   * whichever lost on screen. With no active project it does nothing at all — there is
-   * nothing to ask GitHub about, and the screen says so for itself rather than being told by
-   * a refusal that was never sent.
+   * Calling it while a query is in flight does nothing. Two *can* still be outstanding, and
+   * a provider owes the stronger guarantee that covers it: switching project puts this state
+   * back to `idle`, which un-holds the control that was shut, so leaving and returning to one
+   * project leaves two of its queries in the air. Whichever answers last must not be allowed
+   * to win on that alone — an abandoned query answering with a refusal would replace a list
+   * that had just arrived, and the screen would say nobody is signed in over a repository it
+   * had finished drawing a moment earlier.
+   *
+   * With no active project it does nothing at all — there is nothing to ask GitHub about, and
+   * the screen says so for itself rather than being told by a refusal that was never sent.
    */
   refreshTasks(): Promise<void>;
   /**

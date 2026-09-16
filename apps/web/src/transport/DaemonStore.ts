@@ -152,6 +152,29 @@ export class DaemonStore implements Store {
    */
   #streamEpoch = 0;
   #nextErrorId = 1;
+  /**
+   * How many task queries this store has started, so a late one can be told from the live one.
+   *
+   * **The project is not enough to identify a query, and the gap it leaves is reachable
+   * rather than theoretical.** `withActiveProject` puts `tasks` back to `idle` whenever the
+   * selection moves, which un-holds the `↻` that {@link isTasksBusy} was holding — so
+   * `refreshTasks(A)`, `selectProject(B)`, `refreshTasks(B)`, `selectProject(A)`,
+   * `refreshTasks(A)` leaves two queries for A outstanding at once, and an ownership test on
+   * the id alone passes for both.
+   *
+   * What lands then is whichever answered last, which can be the *first* — and the harm is
+   * not that the rows would be a little old. The fresh query can load A's issues and the
+   * stale one replace them with a refusal: the table empties and the screen reads *"GitHub
+   * CLI is not signed in"* over a repository whose list had just arrived, recoverable only
+   * by pressing `↻`.
+   *
+   * A counter closes it because it is *monotonic*: every query gets a number no later query
+   * can wear, so "am I still the live one" is a question with one answer. {@link #settleStart}
+   * does the stronger version of the same thing with object identity, which is available to
+   * it because a start writes a state object it can hold on to; a query writes nothing until
+   * it answers, so it carries a number instead.
+   */
+  #taskQuery = 0;
   #disposed = false;
 
   constructor(options: {
@@ -404,6 +427,9 @@ export class DaemonStore implements Store {
     if (project === null || isTasksBusy(this.#snapshot.tasks)) {
       return;
     }
+    // Taken before the round trip and carried through both endings — see {@link #taskQuery}.
+    this.#taskQuery += 1;
+    const query = this.#taskQuery;
     // The confirmation from the last start goes with the list it was about — unless a start
     // is still in flight, which is reachable by pressing `↻` while one runs. Clearing that
     // would un-busy the row mid-worktree and then flip it back when the answer landed, so a
@@ -420,7 +446,7 @@ export class DaemonStore implements Store {
       issues = readIssues(await this.#bridge.invoke<unknown>('tasks_list', { project }));
     } catch (cause) {
       const failure = asCommandFailure(cause);
-      this.#settle(project, {
+      this.#settle(project, query, {
         phase: 'unavailable',
         reason: unavailableReason(failure?.kind ?? null),
         // `describeFailure` is deliberately not used: it joins the sentence and the first
@@ -438,24 +464,33 @@ export class DaemonStore implements Store {
       return;
     }
 
-    this.#settle(project, { phase: 'loaded', issues });
+    this.#settle(project, query, { phase: 'loaded', issues });
   };
 
   /**
    * Write a task answer, unless the screen has moved on since it was asked for.
    *
-   * The round trip is not instant and the active project can change during it: switch
-   * projects while a query is in flight and the effect fires a second one, so two answers are
-   * outstanding and whichever lands last wins. Without this check that can be the *first*
-   * one — and project A's issues would sit under project B's name, which is the same ending
-   * {@link withActiveProject} exists to prevent, reached by a different road.
+   * The round trip is not instant and two things can move under it, so there are two tests
+   * and neither implies the other.
    *
-   * Discarding is right rather than merely safe: the newer query is already in flight, so the
+   * **The project**, because switching while a query is in flight leaves the answer belonging
+   * to a repository that is no longer showing. Without this, project A's issues would sit
+   * under project B's name — the same ending {@link withActiveProject} exists to prevent,
+   * reached by a different road. The id is still checked on its own because the selection can
+   * move without a second query being asked for at all: `selectProject` does not fetch, the
+   * Tasks screen's effect does, and it only runs while that screen is mounted.
+   *
+   * **The query number**, because the project is the same in the case that actually loses
+   * data. Leave A, come back to A, and both queries are A's — so an id comparison cannot tell
+   * the live answer from the abandoned one, and the abandoned one can arrive second and win.
+   * {@link #taskQuery} carries the whole of why that is worse than stale rows.
+   *
+   * Discarding is right rather than merely safe: a newer query is already in flight, so the
    * screen is about to be correct without this answer, and `loading` is what it shows in the
    * meantime.
    */
-  #settle(project: ProjectId, tasks: TasksState): void {
-    if (this.#snapshot.activeProjectId !== project) {
+  #settle(project: ProjectId, query: number, tasks: TasksState): void {
+    if (this.#snapshot.activeProjectId !== project || this.#taskQuery !== query) {
       return;
     }
     this.#update((current) => ({ ...current, tasks }));
