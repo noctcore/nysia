@@ -2204,7 +2204,7 @@ dependencies = [
 
 [[package]]
 name = "nysia"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2220,7 +2220,7 @@ dependencies = [
 
 [[package]]
 name = "nysia-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -2239,7 +2239,7 @@ dependencies = [
 
 [[package]]
 name = "nysia-desktop"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "nysia-core",
  "nysia-proto",
@@ -2256,7 +2256,7 @@ dependencies = [
 
 [[package]]
 name = "nysia-proto"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
