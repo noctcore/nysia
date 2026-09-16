@@ -123,9 +123,19 @@ impl TasksService {
 
         let answer = gh.issues(&at).map_err(refusal)?;
         let issues = parse(&answer).map_err(|err| {
-            // gh's own bytes are **not** in the envelope: a JSON parse error quotes the input
-            // it failed on, and that input is a list of issue titles (traps register #13/#14).
-            tracing::warn!(project = %stored.id, %err, "gh's issue list could not be read");
+            // **Not `%err`**, which was the first draft. Measured: `serde_json::Error`'s
+            // `Display` does not quote the surrounding input, but it does echo the offending
+            // *scalar* — `invalid type: string "<some issue title>", expected u64` is
+            // reachable from a malformed answer. That is a response body in a log line, which
+            // `rpc::log_file` bans outright, so what is recorded is the classification and
+            // the position: a closed-set name and two numbers.
+            tracing::warn!(
+                project = %stored.id,
+                problem = ?err.classify(),
+                line = err.line(),
+                column = err.column(),
+                "gh's issue list could not be read"
+            );
             unreadable()
         })?;
 

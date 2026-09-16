@@ -61,15 +61,28 @@
 //!
 //! Trap 14: no error variant echoes a payload, and a repository path names a person's disk.
 //! gh's stderr carries repository names and URLs — `https://api.github.com/graphql` is in the
-//! 401 line — so **it never goes into an error envelope.** [`GhFailure`] carries no gh text
-//! at all; the daemon words each state itself. The stderr is logged at `warn`, bounded, which
-//! is where v0.2's logging work already confines it, and this does not widen that.
+//! 401 line, and a failed lookup names `<owner>/<repo>` — so **it never goes into an error
+//! envelope.** [`GhFailure`] carries no gh text at all; the daemon words each state itself.
+//!
+//! **It does not reach a log line either**, which is a stricter answer than "confined to a
+//! log" and is the one [`crate::rpc::log_file`] requires: *"no request or response bodies at
+//! all. A verb's name, a handle, a pane key, a stream id, a byte count and a boolean are the
+//! whole vocabulary."* A repository slug names what somebody is working on exactly as a
+//! session's `cwd` does, and that rule bans the `cwd` by name. So a refused query records its
+//! [`GhFailure`] — a closed set of names — the exit code, the truncation flag and the number
+//! of bytes gh wrote. Enough to tell which ending happened and that gh had something to say,
+//! without reproducing any of it.
+//!
+//! The cost is real and worth stating: a classification this module gets *wrong* cannot be
+//! diagnosed from the log alone, because the text that would settle it is the text being
+//! withheld. That is the trade the rule makes everywhere else in the daemon, and the
+//! measured table above plus the tests pinning it are what stand in for it.
 
 use std::ffi::OsString;
 use std::time::Duration;
 
 use super::path::CanonicalPath;
-use super::runner::{EnvPolicy, Finished, RunError, Runner, trim_stderr};
+use super::runner::{EnvPolicy, Finished, RunError, Runner};
 use crate::pty::ResolveError;
 
 /// How long a `gh issue list` gets before it is killed.
@@ -407,13 +420,26 @@ impl Gh {
 
         match classify(&finished) {
             Some(failure) => {
-                // **The one place gh's own words are allowed to go**, and it is a log line
-                // rather than an envelope. gh's stderr carries repository names and URLs
-                // (trap 14), so it is bounded here and never travels to a caller.
+                // **gh's own words go nowhere — not to a caller, and not here.** The first
+                // draft logged the trimmed stderr, on the reasoning that a log is where a
+                // payload is confined rather than widened. `rpc::log_file`'s rule is
+                // stricter than that and says so in a sentence: *"no request or response
+                // bodies at all. A verb's name, a handle, a pane key, a stream id, a byte
+                // count and a boolean are the whole vocabulary."* gh's stderr is another
+                // program's response body, and it carries repository slugs — `GraphQL: Could
+                // not resolve to a Repository with the name '<owner>/<repo>'` names a
+                // repository the same way a `cwd` names what a person is working on, which
+                // that rule bans outright.
+                //
+                // So what is recorded is the classification and three numbers, which is
+                // exactly the permitted vocabulary. `GhFailure` has no variant carrying data,
+                // so its `Debug` is a closed set of names and cannot grow a payload later
+                // without somebody adding a field to it.
                 tracing::warn!(
+                    failure = ?failure,
                     exit = finished.code.unwrap_or(-1),
                     truncated = finished.truncated,
-                    stderr = %trim_stderr(&finished.stderr),
+                    stderr_bytes = finished.stderr.len(),
                     "a gh issue query did not return a list"
                 );
                 Err(failure)
