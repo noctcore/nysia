@@ -519,3 +519,374 @@ fn path_kind(err: &PathError) -> &'static str {
         PathError::NotADirectory { .. } => "the path is a file",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::testing::{Scratch, git_or_skip};
+
+    /// A service over a database of this test's own.
+    ///
+    /// The directory is returned so the caller can remove it last: the `-wal` and `-shm` live
+    /// beside the database, and a test that removes only the file it named leaves two.
+    fn service(tag: &str) -> (std::path::PathBuf, Arc<ProjectService>) {
+        let dir = std::env::temp_dir().join(format!("nysia-projects-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory for the database");
+        let store = Arc::new(Store::open(dir.join("nysia.db")).expect("the store opens"));
+        let service = Arc::new(ProjectService::new(store, Arc::new(SessionRegistry::new())));
+        (dir, service)
+    }
+
+    /// Register `path`, expecting it to be accepted.
+    fn register(
+        service: &ProjectService,
+        path: impl Into<std::path::PathBuf>,
+    ) -> ProjectRegistered {
+        let path = path.into();
+        match service.register(&ProjectRegister { path: path.clone() }) {
+            ResponsePayload::ProjectRegister(registered) => registered,
+            other => panic!("{} should have registered, got {other:?}", path.display()),
+        }
+    }
+
+    /// The envelope a refused verb answered with.
+    fn refused(payload: ResponsePayload) -> ErrorEnvelope {
+        match payload {
+            ResponsePayload::Error(envelope) => envelope,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// Every project the service lists.
+    async fn listed(service: &Arc<ProjectService>) -> Vec<Project> {
+        match service.list().await {
+            ResponsePayload::ProjectList { projects } => projects,
+            other => panic!("expected a list, got {other:?}"),
+        }
+    }
+
+    /// Other spellings of `repo` that name the same folder on this platform.
+    fn spellings(repo: &std::path::Path) -> Vec<std::path::PathBuf> {
+        #[allow(unused_mut)]
+        let mut spellings = vec![
+            // Portable, and the one that does not depend on the filesystem's own rules:
+            // nothing but `fs::canonicalize` folds a `..` away.
+            repo.join("..").join(
+                repo.file_name()
+                    .expect("the fixture repository has a folder name"),
+            ),
+        ];
+        #[cfg(windows)]
+        {
+            // Two spellings Windows calls one folder and a byte comparison does not.
+            spellings.push(std::path::PathBuf::from(
+                repo.to_string_lossy().to_uppercase(),
+            ));
+            spellings.push(std::path::PathBuf::from(
+                repo.to_string_lossy().replace('\\', "/"),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            // A symlink is a different path to the same directory, and resolving it is the
+            // whole of what `CanonicalPath` promises.
+            let link = repo.with_file_name("linked-repo");
+            let _ = std::fs::remove_file(&link);
+            if std::os::unix::fs::symlink(repo, &link).is_ok() {
+                spellings.push(link);
+            }
+        }
+        spellings
+    }
+
+    /// **The idempotency rule, measured against the daemon rather than against proto.**
+    ///
+    /// `ProjectId::from_canonical_path` is pure and is tested where it lives. What is tested
+    /// nowhere else is that the *daemon* canonicalises before deriving one, and the
+    /// acceptance test cannot see it: it registers a folder once.
+    ///
+    /// The portable second spelling is `…/repo/../repo`, chosen because
+    /// `ProjectId::normalise` does **not** resolve `..` — only `fs::canonicalize` does. A
+    /// daemon that hashed what the caller typed answers two ids for it, on every platform.
+    /// Case and symlinks are added on top because each bites on one platform only, and a
+    /// missing canonicalisation is invisible on macOS by luck: `temp_dir()` is under `/var`,
+    /// a symlink to `/private/var` that only resolving folds.
+    #[tokio::test]
+    async fn registering_one_folder_twice_through_different_spellings_is_one_project() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-idempotent");
+        let repo = scratch.repository("repo");
+        let (dir, service) = service("idempotent");
+
+        let first = register(&service, &repo);
+        assert!(
+            !first.already_registered,
+            "the first registration created the project"
+        );
+
+        // **The proof this test trips** (traps register #12). It is only worth running if its
+        // second spelling is one that nothing *but* canonicalising folds, and that is a
+        // property of `ProjectId::normalise` rather than something to assume: normalise trims
+        // separators and, on Windows, folds case and slashes — it does not resolve `..`. So
+        // the id derived from the raw spelling must differ from the one the daemon answered.
+        // Without this the whole test would pass against a daemon that never canonicalised at
+        // all, because two calls with the same argument agree however wrong they both are.
+        let traversed = repo.join("..").join(
+            repo.file_name()
+                .expect("the fixture repository has a folder name"),
+        );
+        assert_ne!(
+            ProjectId::from_canonical_path(&traversed).expect("a temp directory is Unicode"),
+            first.project.id,
+            "the second spelling must be one only canonicalisation folds, or this test \
+             measures nothing"
+        );
+
+        for spelling in spellings(&repo) {
+            let again = register(&service, &spelling);
+            assert!(
+                again.already_registered,
+                "{} is the same folder, so registering it again is not a second project",
+                spelling.display()
+            );
+            assert_eq!(
+                again.project.id,
+                first.project.id,
+                "{} must derive the id the daemon already holds for that folder",
+                spelling.display()
+            );
+        }
+
+        let projects = listed(&service).await;
+        assert_eq!(
+            projects
+                .iter()
+                .map(|project| &project.id)
+                .collect::<Vec<_>>(),
+            vec![&first.project.id],
+            "one folder, however it is spelled, is one project"
+        );
+
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Pointing at a folder *inside* a repository registers the repository.
+    ///
+    /// `git::inspect` deliberately does not fold "inside a repository" into "is a
+    /// repository", leaving the choice to its caller; this is that choice, and the reason is
+    /// the rule above. Without it `…/repo` and `…/repo/sub` are two ids for one repository —
+    /// the same project in the sidebar twice, with the same worktree list, and nothing to
+    /// tell the two apart by.
+    #[tokio::test]
+    async fn registering_a_folder_inside_a_repository_registers_the_repository() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-inside");
+        let repo = scratch.repository("repo");
+        let inside = scratch.folder("repo/crates/core");
+        let (dir, service) = service("inside");
+
+        let root = register(&service, &repo);
+        let below = register(&service, &inside);
+
+        assert_eq!(
+            below.project.id, root.project.id,
+            "a folder inside a repository is that repository"
+        );
+        assert!(below.already_registered);
+        assert_eq!(listed(&service).await.len(), 1);
+
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A registered repository reports the branch its checkout is on, marked primary.
+    #[tokio::test]
+    async fn a_registered_repository_reports_the_branch_its_checkout_is_on() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-branch");
+        let repo = scratch.repository("repo");
+        let (dir, service) = service("branch");
+
+        let registered = register(&service, &repo);
+        assert_eq!(registered.project.name, "repo", "the folder's own name");
+        assert_eq!(registered.project.group, Project::DEFAULT_GROUP);
+
+        let projects = listed(&service).await;
+        let [project] = projects.as_slice() else {
+            panic!("one repository is one project, got {projects:?}");
+        };
+        let [worktree] = project.worktrees.as_slice() else {
+            panic!("one checkout is one worktree, got {:?}", project.worktrees);
+        };
+        assert_eq!(worktree.branch, Scratch::BRANCH);
+        assert!(
+            worktree.is_primary,
+            "the checkout the project was registered from is the primary one"
+        );
+        assert!(
+            worktree.sessions.is_empty(),
+            "no session was started in it, so none is listed under it"
+        );
+
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// §3.2's cases, each said in its own words rather than as "could not register".
+    #[tokio::test]
+    async fn each_thing_a_folder_can_turn_out_to_be_is_said_in_its_own_words() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-refusals");
+        let plain = scratch.folder("plain");
+        let many = scratch.folder("many");
+        scratch.repository("many/one");
+        scratch.repository("many/two");
+        let (dir, service) = service("refusals");
+
+        let not_a_repository = refused(service.register(&ProjectRegister { path: plain }));
+        assert_eq!(*not_a_repository.code(), ErrorCode::NotARepository);
+
+        let several = refused(service.register(&ProjectRegister { path: many }));
+        assert_eq!(*several.code(), ErrorCode::ManyRepositories);
+        assert!(
+            several.message().contains('2'),
+            "the refusal states how many it found: {}",
+            several.message()
+        );
+        assert!(
+            several
+                .next_steps()
+                .iter()
+                .any(|step| step.contains("one") && step.contains("two")),
+            "it names them, so the person can pick one: {:?}",
+            several.next_steps()
+        );
+
+        assert!(
+            listed(&service).await.is_empty(),
+            "Nysia registers one repository at a time, so a folder of them registers none"
+        );
+
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **The leak guard.** A refusal never repeats the path it was given.
+    ///
+    /// An error envelope is the thing a daemon is most likely to log verbatim, and a
+    /// repository path names a person's disk (traps register #13/#14). `RegisterRefusal` has
+    /// no field to carry one; this is what stops the daemon putting one there anyway. Every
+    /// [`GitError`] and [`PathError`] variant's `Display` contains a path, so a single
+    /// `err.to_string()` anywhere on a refusal path fails this.
+    #[tokio::test]
+    async fn a_refusal_does_not_repeat_the_path_it_was_given() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-no-leak");
+        // A distinctive component, so the assertion cannot pass merely because the path was
+        // short or ordinary.
+        let missing = scratch.root().join("a-clients-private-repository");
+        let (dir, service) = service("no-leak");
+
+        let envelope = refused(service.register(&ProjectRegister {
+            path: missing.clone(),
+        }));
+        assert_eq!(*envelope.code(), ErrorCode::PathUnreadable);
+
+        let said = format!("{} {:?}", envelope.message(), envelope.next_steps());
+        for secret in [
+            missing.to_string_lossy().into_owned(),
+            "a-clients-private-repository".to_owned(),
+        ] {
+            assert!(
+                !said.contains(&secret),
+                "the refusal carried {secret:?}, which names the caller's disk: {said}"
+            );
+        }
+
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Forgetting an id nothing is registered under is refused, not quietly accepted.
+    ///
+    /// The alternative — treating it as idempotent — exits zero on a typo and leaves the
+    /// person believing they forgot something they did not. It mirrors `session_close` on a
+    /// stale handle.
+    #[tokio::test]
+    async fn forgetting_a_project_that_is_not_there_says_so() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-forget");
+        let repo = scratch.repository("repo");
+        let (dir, service) = service("forget");
+
+        let registered = register(&service, &repo);
+        let id = registered.project.id.clone();
+
+        assert!(matches!(
+            service.forget(&ProjectForget { id: id.clone() }),
+            ResponsePayload::ProjectForget
+        ));
+        assert!(
+            listed(&service).await.is_empty(),
+            "the registration is gone"
+        );
+        assert!(
+            repo.join(".git").exists(),
+            "forgetting removes the registration and nothing on disk"
+        );
+
+        let again = refused(service.forget(&ProjectForget { id }));
+        assert_eq!(*again.code(), ErrorCode::UnknownProject);
+
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A registered folder that has stopped being a repository still lists.
+    ///
+    /// Dropping it would lose a project the store still holds — and the next registration of
+    /// that same folder would answer `alreadyRegistered: true` for something the sidebar
+    /// never showed. It lists with no worktrees, which is what "git did not describe it"
+    /// looks like on the wire, and forgetting it stays the person's decision.
+    #[tokio::test]
+    async fn a_project_git_can_no_longer_describe_is_listed_without_its_worktrees() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-degraded");
+        let repo = scratch.repository("repo");
+        let (dir, service) = service("degraded");
+        let registered = register(&service, &repo);
+
+        // The folder stays and stops being a repository, which is the half that can be
+        // arranged portably. An unplugged drive reaches the same answer by the other route.
+        std::fs::remove_dir_all(repo.join(".git")).expect("the git directory can be removed");
+
+        let projects = listed(&service).await;
+        let [project] = projects.as_slice() else {
+            panic!("the project is still registered, got {projects:?}");
+        };
+        assert_eq!(project.id, registered.project.id);
+        assert!(
+            project.worktrees.is_empty(),
+            "git cannot describe it, so it has no worktrees to report"
+        );
+
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
