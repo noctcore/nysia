@@ -440,6 +440,10 @@ export function describeStoreContract(name: string, create: StoreFactory): void 
         // Not tidiness. The issues belong to the project that was showing, and `Start →`
         // derives a branch to create a worktree *in the active project* — so a list that
         // outlived its project is a worktree in the wrong repository, one click away.
+        //
+        // The confirmation line goes with them. *"#7 started in a new worktree on
+        // issue/7-…"* names an issue that does not exist in the repository now showing, and
+        // it is the one thing on the screen with nothing above it to contradict it.
         const store = await ready();
         await store.refreshTasks();
 
@@ -449,6 +453,44 @@ export function describeStoreContract(name: string, create: StoreFactory): void 
 
         await store.selectProject(other?.id ?? '');
         expect(store.getSnapshot().tasks).toEqual({ phase: 'idle' });
+        expect(store.getSnapshot().taskStart).toEqual({ phase: 'idle' });
+      });
+
+      it('forgets an answer still in flight, not only one that had settled', async () => {
+        // **The gap the test above leaves open**, and the reason it is worth a second one:
+        // clearing a *settled* list says nothing about one that is mid-round-trip. Both
+        // verbs are asked here and neither is awaited before the project moves, so each
+        // provider's answer lands — if it lands at all — on a screen that has moved on.
+        //
+        // Every ending of that is the same: `idle`. The write is dropped, `selectProject`
+        // left nothing behind it, and the screen's own effect is what asks again for the
+        // project now showing. A provider that instead wrote the old project's answer would
+        // put one repository's issues, or a confirmation naming one repository's issue,
+        // under another's name — which is the hazard the whole reset exists for, reached by
+        // the road a settled list never travels.
+        //
+        // Not awaiting is the whole mechanism, so it is deliberate rather than untidy: a
+        // provider that answers synchronously settles before `selectProject` runs and is
+        // cleared by the assertion above, and one that awaits anything at all leaves the
+        // write outstanding across the switch. Both must end in the same place.
+        const store = await ready();
+        const { projects, activeProjectId } = store.getSnapshot();
+        const other = projects.find((project) => project.id !== activeProjectId);
+        expect(other, 'fixture needs a second project').toBeDefined();
+
+        const listed = store.refreshTasks();
+        // Swallowed rather than asserted on: whether this provider can start anything is its
+        // own business — the test above is where that is pinned down — and an unhandled
+        // rejection from a provider that refuses would fail this for the wrong reason.
+        const started = store.startTask(A_TASK).then(
+          () => undefined,
+          () => undefined,
+        );
+        await store.selectProject(other?.id ?? '');
+        await Promise.all([listed, started]);
+
+        expect(store.getSnapshot().tasks).toEqual({ phase: 'idle' });
+        expect(store.getSnapshot().taskStart).toEqual({ phase: 'idle' });
       });
 
       it('either starts or rejects, and never leaves the button spinning', async () => {

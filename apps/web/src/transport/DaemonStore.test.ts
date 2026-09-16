@@ -1236,7 +1236,97 @@ describe('starting an issue', () => {
     expect(errors.at(-1)?.command).toBe('startTask');
     expect(errors.at(-1)?.message).toContain('Close the other worktree');
   });
+
+  it('drops a confirmation the screen has already moved past', async () => {
+    // `discards an answer that arrives after the project changed`, for the other verb, and
+    // one notch worse. A worktree takes seconds, so switching projects mid-start is ordinary
+    // — and the line this writes names an issue by number. Landing it late puts *"#200
+    // started in a new worktree on issue/200-…"* under a repository where issue 200 is
+    // somebody else's, with a correct table above it and nothing to contradict it.
+    const { store, daemon } = build();
+    await ready(store);
+    const held = hold(daemon, 'task_start');
+
+    const starting = store.startTask(A_ROW);
+    await until(() => store.getSnapshot().taskStart.phase === 'starting');
+    const other = store.getSnapshot().projects[1];
+    await store.selectProject(other?.id ?? '');
+
+    held.release(0);
+    await starting;
+    // The worktree was still made and its tab is in the strip — what is dropped is a line of
+    // prose about a screen the user has left.
+    expect(store.getSnapshot().taskStart).toEqual({ phase: 'idle' });
+    expect(store.getSnapshot().tabs.length).toBeGreaterThan(2);
+  });
+
+  it('does not let an abandoned start un-busy the one that replaced it', async () => {
+    // The case a check on the project — or on the issue number — lets through, which is why
+    // the write is claimed by identity instead. Switch away and back and the phase is `idle`
+    // again, so the *same row* can be pressed a second time while the first request is still
+    // outstanding. Both are `#200`, both are in project A; only one of them owns the phase.
+    //
+    // Letting the first answer land here would say a worktree exists while the second is
+    // still being made, un-disable every `Start →` in the table, and report `adopted` for the
+    // wrong one of the two requests.
+    const { store, daemon } = build();
+    await ready(store);
+    const held = hold(daemon, 'task_start');
+
+    const abandoned = store.startTask(A_ROW);
+    await until(() => store.getSnapshot().taskStart.phase === 'starting');
+    const other = store.getSnapshot().projects[1];
+    const first = store.getSnapshot().projects[0];
+    await store.selectProject(other?.id ?? '');
+    await store.selectProject(first?.id ?? '');
+
+    const current = store.startTask(A_ROW);
+    await until(() => store.getSnapshot().taskStart.phase === 'starting');
+
+    // Only the abandoned one. The live start stays outstanding, which is the whole point:
+    // the question is what an answer nobody is waiting for does to a row that is still busy.
+    held.release(0);
+    await abandoned;
+    expect(
+      store.getSnapshot().taskStart,
+      'the abandoned start wrote over the live one',
+    ).toEqual({ phase: 'starting', issue: 200 });
+
+    held.release(1);
+    await current;
+    expect(store.getSnapshot().taskStart.phase).toBe('started');
+  });
 });
+
+/**
+ * Hold one command open, and release its calls **one at a time, in the order they arrived**.
+ *
+ * {@link FakeDaemon} answers in a microtask, which models a round trip but not two
+ * overlapping ones — and overlapping is the only state in which any of the ownership checks
+ * above can be observed at all.
+ *
+ * Releasing individually is what makes the last test say anything. Freeing both at once let
+ * the second answer land while the first was still in its `session_list` refresh, so the
+ * snapshot reached `started` either way and the assertion passed against a store with no
+ * ownership check in it — a test that watched the right screen and proved nothing.
+ */
+function hold(daemon: FakeDaemon, command: string): { release: (call: number) => void } {
+  const waiting: (() => void)[] = [];
+  const realInvoke = daemon.invoke.bind(daemon);
+  daemon.invoke = async <T,>(name: string, args?: Record<string, unknown>): Promise<T> => {
+    if (name === command) {
+      await new Promise<void>((resolve) => waiting.push(resolve));
+    }
+    return realInvoke<T>(name, args);
+  };
+  return {
+    release: (call: number) => {
+      const resume = waiting[call];
+      expect(resume, `no call ${call} of ${command} is waiting`).toBeDefined();
+      resume?.();
+    },
+  };
+}
 
 /** The issue every start test presses, whose branch is `issue/200-add-the-tasks-screen`. */
 const A_ROW = {
