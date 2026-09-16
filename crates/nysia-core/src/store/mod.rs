@@ -5,9 +5,9 @@
 //! and transactions. Settings stay JSON, written atomically, because a human is expected to
 //! open them in an editor.
 //!
-//! The project list was on the JSON side of that line until v0.3 moved it: `v0.3-delivery-
-//! plan.md` §3.3 asks for the registration to survive a daemon restart, and nobody
-//! hand-edits which folders are registered — the dialog does it.
+//! The project list was on the JSON side of that line until v0.3 moved it.
+//! `docs/plans/v0.3-delivery-plan.md` §3.3 asks for a registration to survive a daemon
+//! restart, and nobody hand-edits which folders are registered — the dialog does it.
 //!
 //! There is no local task domain model: tasks are GitHub Issues, queried live (D-5).
 //!
