@@ -9,9 +9,13 @@
 //!
 //! # What is here now
 //!
-//! Discovery, which is what registering a project needs (v0.3 §3.1): every worktree of a
-//! repository, the branch each is on, and which one the person is looking at. Creation,
-//! removal and the confinement gates arrive with the worktree manager.
+//! **Discovery**, which is what registering a project needs (v0.3 §3.1): every worktree of a
+//! repository, the branch each is on, and which one the person is looking at.
+//!
+//! **Creation and adoption**, which is what `Start →` needs (v0.3 §3): [`ensure`] hands back
+//! the worktree for a branch, making one only when git does not already list one. Removal,
+//! pruning and the confinement gates arrive with the worktree manager in v0.4 — which is why
+//! nothing here deletes anything, including a worktree whose session failed to start.
 //!
 //! Read through [`git worktree list --porcelain -z`][porcelain]. `-z` rather than plain
 //! `--porcelain` because a worktree path may contain a newline — `git worktree add
@@ -345,7 +349,9 @@ pub fn ensure(git: &Git, at: &CanonicalPath, branch: &str) -> Result<Started, St
         };
     }
 
-    let path = free_directory(&base_dir(&worktrees, at), branch)?;
+    let nysia_dir = nysia_dir(&worktrees, at);
+    conceal(&nysia_dir);
+    let path = free_directory(&nysia_dir.join(WORKTREE_BASE[1]), branch)?;
     let existing_branch = branch_exists(git, at, branch)?;
     let mut command = if existing_branch {
         // The branch is there and unused: check it out.
@@ -417,14 +423,14 @@ fn branch_exists(git: &Git, at: &CanonicalPath, branch: &str) -> Result<bool, Gi
         .any(|line| line.trim_end_matches('\r') == wanted))
 }
 
-/// The directory new worktrees go under.
+/// The directory Nysia keeps its worktrees in, which is the one it also has to conceal.
 ///
-/// The **main** worktree's root, so every worktree of a repository lands in one place
+/// Under the **main** worktree's root, so every worktree of a repository lands in one place
 /// whichever checkout the project was registered from — registering a linked worktree must
 /// not scatter a second base directory inside the first. Falls back to the folder that was
 /// inspected when git lists no main worktree with a directory, which is what a bare
 /// repository looks like.
-fn base_dir(worktrees: &[Worktree], at: &CanonicalPath) -> PathBuf {
+fn nysia_dir(worktrees: &[Worktree], at: &CanonicalPath) -> PathBuf {
     let root = worktrees
         .iter()
         .find(|worktree| worktree.is_main)
@@ -433,7 +439,39 @@ fn base_dir(worktrees: &[Worktree], at: &CanonicalPath) -> PathBuf {
             || at.as_path().to_path_buf(),
             |path| path.as_path().to_path_buf(),
         );
-    root.join(WORKTREE_BASE[0]).join(WORKTREE_BASE[1])
+    root.join(WORKTREE_BASE[0])
+}
+
+/// Keep the directory Nysia makes out of the repository it makes it in.
+///
+/// The path shape puts worktrees **inside the main worktree**, so `.nysia/` is untracked and
+/// `git add -A` stages the worktree as an *embedded git repository*: a gitlink committed by
+/// accident, with git's own hint about submodules scrolling past. That is a mistake this
+/// module causes and so has to prevent. A `.gitignore` of `*` inside `.nysia/` hides the
+/// whole of it — including itself, which is why nothing has to be added anywhere else.
+///
+/// **Written inside the folder Nysia created, and nowhere else.** `.git/info/exclude` would
+/// work too and is the person's file; §3.1 says Nysia does not write into the folder beyond
+/// ordinary git operations, so the one thing it writes is in the directory it owns, goes when
+/// they delete that directory, and changes nothing about how their repository treats anything
+/// else.
+///
+/// Best effort, and it is not allowed to fail a `Start →`: a repository where this cannot be
+/// written is one where the worktree almost certainly cannot be created either, and the
+/// worktree is what was asked for. An existing file is left alone — it may be a person's.
+fn conceal(nysia_dir: &Path) {
+    if std::fs::create_dir_all(nysia_dir).is_err() {
+        return;
+    }
+    let ignore = nysia_dir.join(".gitignore");
+    if ignore.exists() {
+        return;
+    }
+    if let Err(err) = std::fs::write(&ignore, "*\n") {
+        // `io::Error`'s `Display` names no path, so this says what happened without saying
+        // where (traps register #13/#14).
+        tracing::warn!(%err, "could not hide Nysia's worktree directory from git");
+    }
 }
 
 /// A directory under `base` that nothing is using yet.
@@ -841,6 +879,47 @@ mod tests {
             collided.worktree().canonical.as_ref(),
             Some(&made),
             "two branches must not share one worktree directory"
+        );
+    }
+
+    #[test]
+    fn a_worktree_nysia_makes_does_not_turn_up_in_the_repository_it_is_in() {
+        let Some(git) = crate::git::testing::git_or_skip() else {
+            return;
+        };
+        let scratch = crate::git::testing::Scratch::new("worktree-conceal");
+        let repo = scratch.repository("repo");
+        let at = CanonicalPath::of(&repo).expect("the repository resolves");
+
+        ensure(&git, &at, "feat/projects").expect("the branch starts");
+
+        // **The assertion that matters is git's**, not the presence of a file. The path shape
+        // puts worktrees inside the main worktree, so without concealment `git status` shows
+        // `.nysia/` and `git add -A` stages the worktree as an embedded git repository — a
+        // gitlink committed by accident. Asserting only that `.gitignore` exists would pass
+        // against a `.gitignore` that said nothing.
+        let status = git
+            .run(&GitCommand::new(["status", "--porcelain"]), &at)
+            .expect("git reports status");
+        assert!(
+            status.is_empty(),
+            "starting a branch left the repository dirty: {:?}",
+            String::from_utf8_lossy(&status)
+        );
+
+        // And the concealment is inside the folder Nysia created, not in the person's own
+        // files: §3.1 says Nysia does not write into the folder beyond ordinary git
+        // operations, so `.git/info/exclude` is left alone.
+        let exclude = repo.join(".git").join("info").join("exclude");
+        let excluded = std::fs::read_to_string(&exclude).unwrap_or_default();
+        assert!(
+            !excluded.contains("nysia"),
+            "Nysia wrote into the repository's own exclude file: {excluded}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join(".nysia").join(".gitignore"))
+                .expect("the concealment is in Nysia's own directory"),
+            "*\n"
         );
     }
 
