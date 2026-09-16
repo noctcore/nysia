@@ -60,6 +60,7 @@ macro_rules! error_codes {
             type = "\"unknown_session\" | \"invalid_request\" | \"unsupported\" | \"path_refused\" \
                     | \"spawn_failed\" | \"session_busy\" | \"unknown_project\" \
                     | \"not_a_repository\" | \"many_repositories\" | \"path_unreadable\" \
+                    | \"gh_missing\" | \"gh_unauthenticated\" | \"query_failed\" \
                     | \"internal\" | (string & {})"
         )]
         pub enum ErrorCode {
@@ -124,6 +125,23 @@ error_codes! {
     ManyRepositories => "many_repositories",
     /// The path offered for registration does not exist, or could not be read.
     PathUnreadable => "path_unreadable",
+    /// The GitHub CLI is not installed, so issues cannot be queried at all (D-5).
+    ///
+    /// One of the three states the Tasks screen draws a distinct heading for, and the
+    /// friendliest: it is a thing a user finishes once and never meets again, which is why
+    /// the window tones it as setup rather than as an error.
+    GhMissing => "gh_missing",
+    /// The GitHub CLI is installed and has no usable credentials.
+    ///
+    /// Covers both roads to it — nobody ever signed in, and a token that was rejected — which
+    /// are one state to a user because *sign in* is the answer to both.
+    GhUnauthenticated => "gh_unauthenticated",
+    /// The issue query itself failed: offline, rate-limited, or no such repository.
+    ///
+    /// Deliberately the widest of the three, and the window's fallback for any code it does
+    /// not recognise. The message is what distinguishes these for a person, so a heading per
+    /// network condition would be words guessing at a sentence that is already there.
+    QueryFailed => "query_failed",
     /// The daemon failed in a way the caller did nothing to cause.
     Internal => "internal",
 }

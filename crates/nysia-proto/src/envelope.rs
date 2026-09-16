@@ -40,6 +40,7 @@ use crate::project::{
 };
 use crate::session::{SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary};
 use crate::stream::{StreamAttach, StreamAttached, StreamDetach};
+use crate::tasks::{Issue, TasksList};
 use crate::terminal::{
     TerminalRead, TerminalReadResult, TerminalResize, TerminalSend, TerminalWait,
     TerminalWaitResult,
@@ -154,6 +155,8 @@ pub enum RequestPayload {
     ProjectForget(ProjectForget),
     /// `Start ->`: a branch-keyed worktree, a session in it, and a tab.
     ProjectStart(ProjectStart),
+    /// List a project's open GitHub issues, queried live (D-5).
+    TasksList(TasksList),
 }
 
 impl RequestPayload {
@@ -179,6 +182,7 @@ impl RequestPayload {
             Self::ProjectList(_) => "project_list",
             Self::ProjectForget(_) => "project_forget",
             Self::ProjectStart(_) => "project_start",
+            Self::TasksList(_) => "tasks_list",
         }
     }
 
@@ -222,7 +226,10 @@ impl RequestPayload {
             | Self::TerminalWait(_)
             | Self::AgentStatusGet(_)
             | Self::AgentStatusList(_)
-            | Self::ProjectList(_) => false,
+            | Self::ProjectList(_)
+            // Querying GitHub changes nothing here or there. D-5 keeps no local task model,
+            // so there is not even a cache for a second call to disturb.
+            | Self::TasksList(_) => false,
         }
     }
 }
@@ -353,6 +360,16 @@ pub enum ResponsePayload {
     ProjectForget,
     /// The worktree, the session and the pane the window opens a tab on.
     ProjectStart(ProjectStarted),
+    /// A project's open issues, as GitHub answered a moment ago.
+    ///
+    /// An **empty list is a fact about the repository**, not a failure, and keeping the two
+    /// apart is the whole point of the verb: a user with no issues and a user whose token
+    /// expired must not see the same screen. Every way of having nothing to show that is
+    /// *not* "there is nothing" is an [`ErrorEnvelope`] with one of three codes.
+    TasksList {
+        /// The rows.
+        issues: Vec<Issue>,
+    },
     /// The verb failed.
     Error(ErrorEnvelope),
 }
@@ -380,6 +397,7 @@ impl ResponsePayload {
             Self::ProjectList { .. } => "project_list",
             Self::ProjectForget => "project_forget",
             Self::ProjectStart(_) => "project_start",
+            Self::TasksList { .. } => "tasks_list",
             Self::Error(_) => "error",
         }
     }
@@ -556,6 +574,9 @@ mod tests {
                 kind: crate::identity::SessionKind::Shell,
                 profile: None,
             }),
+            RequestPayload::TasksList(TasksList {
+                project: project_id(),
+            }),
         ];
         for payload in payloads {
             let envelope = RequestEnvelope::new(payload);
@@ -584,6 +605,15 @@ mod tests {
 
         assert!(!RequestPayload::SessionList(SessionList {}).is_mutation());
         assert!(!RequestPayload::TerminalRead(TerminalRead::screen(handle())).is_mutation());
+        // Reading GitHub changes nothing anywhere. D-5 keeps no local task model, so unlike
+        // every other verb that touches a project there is not even a row for a repeat to
+        // disturb — which is why this one is a read despite naming a project.
+        assert!(
+            !RequestPayload::TasksList(TasksList {
+                project: project_id(),
+            })
+            .is_mutation()
+        );
         assert!(
             !RequestPayload::TerminalWait(TerminalWait {
                 handle: handle(),

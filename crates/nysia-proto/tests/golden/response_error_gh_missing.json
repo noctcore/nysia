@@ -1,0 +1,13 @@
+{
+  "code": "gh_missing",
+  "message": "the GitHub CLI is not installed, so issues cannot be listed",
+  "nextCommandArgs": null,
+  "nextSteps": [
+    "Install the GitHub CLI from https://cli.github.com.",
+    "Then run `gh auth login` to sign in."
+  ],
+  "receipt": null,
+  "requestId": "req_11111111-1111-4111-8111-111111111111",
+  "retryable": false,
+  "type": "error"
+}

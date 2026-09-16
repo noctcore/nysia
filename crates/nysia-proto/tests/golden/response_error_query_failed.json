@@ -1,0 +1,13 @@
+{
+  "code": "query_failed",
+  "message": "GitHub did not answer the issue query",
+  "nextCommandArgs": null,
+  "nextSteps": [
+    "Check your network connection and try again.",
+    "If you are signed in and online, GitHub may be rate-limiting you."
+  ],
+  "receipt": null,
+  "requestId": "req_11111111-1111-4111-8111-111111111111",
+  "retryable": true,
+  "type": "error"
+}

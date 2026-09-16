@@ -2,6 +2,7 @@
 import type { AgentStatus } from "./AgentStatus";
 import type { AgentStatusSubscribed } from "./AgentStatusSubscribed";
 import type { ErrorEnvelope } from "./ErrorEnvelope";
+import type { Issue } from "./Issue";
 import type { MutationReceipt } from "./MutationReceipt";
 import type { Project } from "./Project";
 import type { ProjectRegistered } from "./ProjectRegistered";
@@ -43,4 +44,8 @@ statuses: Array<AgentStatus>, } | { "type": "agent_status_subscribe" } & AgentSt
 /**
  * The rows.
  */
-projects: Array<Project>, } | { "type": "project_forget" } | { "type": "project_start" } & ProjectStarted | { "type": "error" } & ErrorEnvelope);
+projects: Array<Project>, } | { "type": "project_forget" } | { "type": "project_start" } & ProjectStarted | { "type": "tasks_list", 
+/**
+ * The rows.
+ */
+issues: Array<Issue>, } | { "type": "error" } & ErrorEnvelope);

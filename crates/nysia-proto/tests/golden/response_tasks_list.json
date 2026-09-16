@@ -1,0 +1,28 @@
+{
+  "issues": [
+    {
+      "author": "Shironex",
+      "labels": [
+        "area:daemon",
+        "area:tasks"
+      ],
+      "number": 200,
+      "state": "open",
+      "title": "The issue list, served from the daemon",
+      "updatedAt": "2026-09-16T09:12:44Z",
+      "url": "https://github.com/Shironex/nysia/issues/200"
+    },
+    {
+      "author": null,
+      "labels": [],
+      "number": 87,
+      "state": "open",
+      "title": "A row whose author GitHub will not name",
+      "updatedAt": "2026-09-02T17:40:11Z",
+      "url": "https://github.com/Shironex/nysia/issues/87"
+    }
+  ],
+  "receipt": null,
+  "requestId": "req_11111111-1111-4111-8111-111111111111",
+  "type": "tasks_list"
+}

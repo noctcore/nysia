@@ -63,6 +63,7 @@ use nysia_proto::session::{
     ShellProfile,
 };
 use nysia_proto::stream::{StreamAttach, StreamAttached, StreamDetach, StreamId};
+use nysia_proto::tasks::{Issue, IssueState, TasksList};
 use nysia_proto::terminal::{
     LineCursor, ReadMode, TerminalRead, TerminalReadResult, TerminalResize, TerminalSend,
     TerminalWait, TerminalWaitResult, WaitFor, WaitOutcome,
@@ -686,6 +687,102 @@ goldens! {
     response_error_path_unreadable: ResponseEnvelope = ResponseEnvelope::new(
         request_id(),
         ResponsePayload::Error(RegisterRefusal::Unreadable.into_envelope()),
+    );
+
+    request_tasks_list: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::TasksList(TasksList { project: project_id() }),
+    };
+
+    // The shape the Tasks screen has been parsing out of a hand-written mirror since it
+    // shipped, now spelled by Rust (D-13). Pinned as a fixture because the window's reader
+    // refuses a row missing `number`, `title`, `updatedAt` or `url` — so a rename here does
+    // not break a test over there, it empties the screen at runtime.
+    //
+    // The two flattened fields are the point of the document: `author` is a **login string**
+    // where gh sends an object, and `labels` are **names** where gh sends objects with a hex
+    // colour. Both are decided by the daemon, and both would be invisible in a Rust-side
+    // round trip that never saw gh's shape.
+    response_tasks_list: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::TasksList {
+            issues: vec![
+                Issue {
+                    number: 200,
+                    title: "The issue list, served from the daemon".to_owned(),
+                    state: IssueState::Open,
+                    updated_at: "2026-09-16T09:12:44Z".to_owned(),
+                    url: "https://github.com/Shironex/nysia/issues/200".to_owned(),
+                    author: Some("Shironex".to_owned()),
+                    labels: vec!["area:daemon".to_owned(), "area:tasks".to_owned()],
+                },
+                // An issue whose author's account is gone, and which carries no labels.
+                // GitHub really does answer this way, and the window renders the row without
+                // a name rather than refusing the list — so `null` has to be in a fixture,
+                // or the only spelling anybody ever sees is the one with an author.
+                Issue {
+                    number: 87,
+                    title: "A row whose author GitHub will not name".to_owned(),
+                    state: IssueState::Open,
+                    updated_at: "2026-09-02T17:40:11Z".to_owned(),
+                    url: "https://github.com/Shironex/nysia/issues/87".to_owned(),
+                    author: None,
+                    labels: Vec::new(),
+                },
+            ],
+        },
+    );
+
+    // **An empty list is a fact about the repository, not a failure**, and this is the
+    // fixture that says so on the wire. The three refusals below it are the other three
+    // endings; a client that could not tell this document from one of those is the lie the
+    // whole verb exists to prevent.
+    response_tasks_list_empty: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::TasksList { issues: Vec::new() },
+    );
+
+    // The three the Tasks screen draws distinct headings for. Fixtures rather than unit
+    // assertions for the reason the registration refusals are: "tellable apart" is a claim
+    // about what a *peer* reads, and the code it branches on is the whole answer.
+    response_error_gh_missing: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::Error(ErrorEnvelope::new(
+            ErrorCode::GhMissing,
+            "the GitHub CLI is not installed, so issues cannot be listed",
+            NextSteps::new("Install the GitHub CLI from https://cli.github.com.")
+                .expect("a literal next step")
+                .and("Then run `gh auth login` to sign in."),
+        )),
+    );
+
+    response_error_gh_unauthenticated: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::Error(
+            ErrorEnvelope::new(
+                ErrorCode::GhUnauthenticated,
+                "the GitHub CLI has no credentials for this repository",
+                NextSteps::new("Run `gh auth login` to sign in.")
+                    .expect("a literal next step")
+                    .and("If you signed in before, the token may have expired; sign in again."),
+            )
+            .with_next_command_args(["gh", "auth", "login"]),
+        ),
+    );
+
+    response_error_query_failed: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::Error(
+            ErrorEnvelope::new(
+                ErrorCode::QueryFailed,
+                "GitHub did not answer the issue query",
+                NextSteps::new("Check your network connection and try again.")
+                    .expect("a literal next step")
+                    .and("If you are signed in and online, GitHub may be rate-limiting you."),
+            )
+            .retryable(true),
+        ),
     );
 
     // The rule §2.1 puts in bold, pinned where a client actually reads it.
