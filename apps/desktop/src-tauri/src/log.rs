@@ -41,13 +41,14 @@
 //! [`crate::commands`] logs a verb's *name* and never its payload, and the one entry point
 //! the webview can reach takes a name from a closed list and two numbers.
 //!
-//! The rule binds the crates this process links as well as the code it writes, so
-//! [`log_file::CONFINED_TARGETS`] is layered over whatever `NYSIA_LOG` asked for. Under D-1
-//! and D-7 the terminal state and the PTYs both live in the daemon, so this process runs no VT
-//! and opens no pty, and nothing here is expected to reach any of those targets — the list is
-//! applied anyway, because "this binary happens not to call it today" is the kind of premise
-//! that stops being true without anybody noticing, and the whole point of the rule is that it
-//! does not depend on remembering.
+//! The rule binds the crates this process links as well as the code it writes, so `NYSIA_LOG`
+//! is put through [`log_file::screen_directives`] and [`log_file::CONFINED_TARGETS`] is folded
+//! in behind what survives — the same two halves the daemon applies, and for the same reason
+//! neither is enough alone. Under D-1 and D-7 the terminal state and the PTYs both live in the
+//! daemon, so this process runs no VT and opens no pty, and nothing here is expected to reach
+//! any of those targets. Both halves are applied anyway, because "this binary happens not to
+//! call it today" is the kind of premise that stops being true without anybody noticing, and
+//! the whole point of the rule is that it does not depend on remembering.
 //!
 //! `portable_pty` is the entry that makes that argument concrete rather than cautious. It is
 //! already linked here, through `nysia-core`, and the line it writes about a spawn that failed
@@ -55,14 +56,36 @@
 //! window that grew one path into a pty would have started leaking on the day it did, with no
 //! `NYSIA_LOG` involved and nothing to prompt anybody to go and add the entry.
 //!
-//! `nysia`'s own `log` module is where the confinement is tested; this applies the same list.
+//! The daemon's `log` module is where the confinement is explained. It is not where this copy
+//! is proved: a lock on one door is not a policy, and a proof of one door is not a proof of
+//! two. The tests at the bottom of this file ask this process's own `confine` the question,
+//! and they fail if this copy stops screening or stops folding.
+//!
+//! # Where a refused directive is announced
+//!
+//! Through `tracing`, after the subscriber is up, so that it reaches the window's log file and
+//! not only stderr. That is the whole reason this module exists: under
+//! `windows_subsystem = "windows"` a packaged window has no stderr, so the daemon's answer —
+//! print it before the subscriber and let the redirected stderr carry it — would put the one
+//! line that explains why `NYSIA_LOG` did nothing into the one stream this process does not
+//! have. The wording is `log_file`'s, so the two processes cannot come to say it differently.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use nysia_core::rpc::{Endpoint, log_file};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
+
+/// What the window logs when `NYSIA_LOG` asks for nothing this filter can use.
+///
+/// The daemon's default, and the same reasoning: a window that refused to start over a
+/// malformed `NYSIA_LOG` would have turned a typo into an outage. It is also where a value
+/// whose every directive was refused lands — an `EnvFilter` built from an empty string enables
+/// nothing at all, so falling through to one would answer `NYSIA_LOG=vte::ansi=trace` with a
+/// window that logs nothing.
+const DEFAULT_DIRECTIVES: &str = "info";
 
 /// How often the window measures its own log against the cap.
 ///
@@ -80,10 +103,13 @@ const TRIM_INTERVAL: Duration = Duration::from_secs(30);
 /// diagnostics file would have turned a nuisance into an outage — and the first thing anybody
 /// would want in order to debug *that* is the log it declined to open.
 pub fn install() -> Option<PathBuf> {
-    let filter = confine(
-        tracing_subscriber::EnvFilter::try_from_env("NYSIA_LOG")
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-    );
+    let asked = std::env::var(log_file::LOG_ENV).unwrap_or_default();
+    let lifted = log_file::confinement_lifted();
+    let filter = if lifted {
+        unconfined(&asked)
+    } else {
+        confine(&asked)
+    };
 
     let opened = Endpoint::from_env()
         .map_err(|err| format!("the runtime directory could not be named: {err}"))
@@ -94,7 +120,7 @@ pub fn install() -> Option<PathBuf> {
                 .map_err(|err| format!("the log could not be opened: {err}"))
         });
 
-    match opened {
+    let opened = match opened {
         Ok((path, file)) => {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
@@ -119,23 +145,68 @@ pub fn install() -> Option<PathBuf> {
             tracing::warn!(%why, "the window has no log file; diagnostics go to stderr only");
             None
         }
+    };
+
+    // Only now is there anywhere to put these. On a packaged Windows build this is the first
+    // moment in the process's life that anything it says can be read at all, which is why they
+    // are said here rather than from `confine` the way the daemon says them.
+    if lifted {
+        tracing::warn!("{}", log_file::unconfined_note());
+    } else {
+        for refused in log_file::screen_directives(&asked).refused {
+            tracing::warn!("{}", log_file::refusal_note(refused));
+        }
     }
+
+    opened
 }
 
 /// Hold the linked crates down, whatever `NYSIA_LOG` asked for.
 ///
-/// Applied *after* the user's filter, so raising the level to debug something does not also
-/// switch off the rule that keeps PTY bytes and a caller's paths out of the file (CLAUDE.md
-/// §6). A directive that does not parse is skipped rather than panicking a window at startup,
-/// and `every_confined_directive_parses` in `nysia`'s `log` module is what stops one shipping
-/// — though a parse is only half of it, because a directive can also parse and match nothing.
+/// Two halves, the daemon's two. The screen refuses a directive that could out-specify an
+/// entry — `NYSIA_LOG=vte::ansi=trace` names a module where the entry names a crate, and
+/// `EnvFilter` resolves a callsite against the longest target that matches it. The fold is
+/// applied *after* the user's filter, so raising the level to debug something does not switch
+/// the rule off either (CLAUDE.md §6).
+///
+/// A directive that does not parse is skipped rather than panicking a window at startup, and
+/// `every_confined_directive_parses` in `nysia`'s `log` module is what stops one shipping —
+/// though a parse is only half of it, because a directive can also parse and match nothing.
 /// `a_failed_spawns_path_does_not_reach_a_confined_log`, beside it, is the half that plants a
-/// real spawn and reads the log back.
-fn confine(filter: tracing_subscriber::EnvFilter) -> tracing_subscriber::EnvFilter {
+/// real spawn. Neither of those can speak for this copy, which is what the tests below are for.
+fn confine(asked: &str) -> EnvFilter {
+    let screened = log_file::screen_directives(asked);
+
     log_file::CONFINED_TARGETS
         .iter()
         .filter_map(|directive| directive.parse().ok())
-        .fold(filter, tracing_subscriber::EnvFilter::add_directive)
+        .fold(
+            parsed(&screened.honoured.join(",")),
+            EnvFilter::add_directive,
+        )
+}
+
+/// `asked` honoured in full, with [`log_file::CONFINED_TARGETS`] **not** applied.
+///
+/// Reached only when [`log_file::UNCONFINED_ENV`] is set, and named so that this is what a
+/// reviewer finds when they ask how the confinement can be off (CLAUDE.md §6). The window is
+/// not where anybody would go looking for `vte` output — it runs no VT — but the variable is
+/// one variable for the whole of Nysia, and a window that quietly ignored it while the daemon
+/// honoured it would be a second rule nobody wrote down. [`install`] says what it means, into
+/// the log, once there is a subscriber to say it through.
+fn unconfined(asked: &str) -> EnvFilter {
+    parsed(asked)
+}
+
+/// `asked` as an `EnvFilter`, or [`DEFAULT_DIRECTIVES`] when it is empty or does not parse.
+///
+/// The empty case is answered here rather than left to `EnvFilter`, which reads an empty string
+/// as a filter with no directives at all — one that enables nothing, not one that falls back.
+fn parsed(asked: &str) -> EnvFilter {
+    if asked.trim().is_empty() {
+        return EnvFilter::new(DEFAULT_DIRECTIVES);
+    }
+    EnvFilter::try_new(asked).unwrap_or_else(|_| EnvFilter::new(DEFAULT_DIRECTIVES))
 }
 
 /// Both sinks at once: the log file, and the stderr a developer is watching.
@@ -190,8 +261,209 @@ fn spawn_trim(path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    /// A sentinel no terminal would produce and no test could mistake for anything else.
+    ///
+    /// The daemon's, deliberately. The two modules are asking the same question about the same
+    /// list, and somebody who greps for one of these tests should land on both.
+    const SENTINEL: &str = "ZZZ-DBG-SENTINEL-4f3e9a";
+
+    /// Everything the window's log file holds after `body` ran under `filter`.
+    ///
+    /// A thread-local subscriber, never a global one: `install` calls `.init()`, which can
+    /// happen once per process, and the case that matters most here is the one *without* the
+    /// screen.
+    ///
+    /// The file alone rather than [`sink`], which would also write to stderr. What is being
+    /// asked is what the filter let through; `sink`'s other half is already held by
+    /// `an_event_reaches_the_file_and_not_only_stderr`, and keeping it out of this means a test
+    /// that deliberately leaks a sentinel does not print it into the run.
+    fn through(filter: EnvFilter, body: impl FnOnce()) -> String {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let nth = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("nysia-window-filter-{}-{nth}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("nysiad.window.log");
+
+        let file = log_file::open_for_append(&path).expect("a log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(Arc::new(file))
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+
+        let written = std::fs::read_to_string(&path).expect("the log");
+        let _ = std::fs::remove_dir_all(&dir);
+        written
+    }
+
+    /// This module's filter as it was before the screen: `NYSIA_LOG` whole, the list folded in.
+    ///
+    /// The control, and the shape the bug had here too. Every test below asserts the positive
+    /// through this **in the same body** before it asserts the negative, so that filtering the
+    /// run to one test name cannot leave a vacuous pass behind (traps register #12).
+    fn as_it_was_before_the_screen(asked: &str) -> EnvFilter {
+        log_file::CONFINED_TARGETS
+            .iter()
+            .filter_map(|directive| directive.parse().ok())
+            .fold(EnvFilter::new(asked), EnvFilter::add_directive)
+    }
+
+    /// One line on each target [`log_file::CONFINED_TARGETS`] holds down, at its real level.
+    ///
+    /// Raised rather than provoked, and that is the honest limit of what this file can do:
+    /// under D-1 and D-7 this process runs no VT and opens no pty, so there is nothing here to
+    /// make `vte` or `portable_pty` write of their own accord. `nysia`'s `log` module has the
+    /// other end — real bytes through the real parser, and a real spawn that cannot succeed.
+    /// What this holds is that *this copy* of the rule answers the same events the same way.
+    fn as_the_terminal_crates_would(sentinel: &str) {
+        tracing::debug!(target: "vte::ansi", "[unhandled osc_dispatch]: [{sentinel}]");
+        tracing::trace!(target: "alacritty_terminal::term", "Setting title to '{sentinel}'");
+        tracing::error!(target: "portable_pty::win::pseudocon", "CreateProcessW `{sentinel}` failed");
+        tracing::warn!(target: "portable_pty::cmdbuilder", "$SHELL -> {sentinel} not executable");
+    }
+
+    #[test]
+    fn the_windows_filter_refuses_a_module_qualified_nysia_log() {
+        // CLAUDE.md §6 on this door. `EnvFilter` resolves a callsite against its longest
+        // matching target and `CONFINED_TARGETS` names crates, so a directive that names a
+        // module out-specified every entry — in this process exactly as in the daemon, because
+        // it is the same list applied the same way.
+        //
+        // `vte:=trace` is the case a `::`-boundary screen would let through: four characters
+        // against three, and `"vte::ansi".starts_with("vte:")`.
+        for asked in [
+            "vte::ansi=trace",
+            "vte:=trace",
+            "alacritty_terminal::term=trace",
+            "portable_pty::win::pseudocon=trace",
+            "portable_pty::cmdbuilder=trace",
+            "info,vte::ansi=trace",
+        ] {
+            let leaked = through(as_it_was_before_the_screen(asked), || {
+                as_the_terminal_crates_would(SENTINEL);
+            });
+            assert!(
+                leaked.contains(SENTINEL),
+                "NYSIA_LOG={asked} reached nothing even unscreened, so the assertion below \
+                 would hold for the wrong reason: {leaked}"
+            );
+
+            let written = through(confine(asked), || as_the_terminal_crates_would(SENTINEL));
+            assert!(
+                !written.contains(SENTINEL),
+                "NYSIA_LOG={asked} out-specified the window's confinement: {written}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_windows_filter_refuses_a_span_directive() {
+        // The other hole, on this door. `EnvFilter::enabled` answers out of the span scope
+        // before it consults a single target directive, so one of these enables every target
+        // at its level however the list is spelled.
+        //
+        // The second spelling names a target of this crate's own and a span of this crate's
+        // own, which is what makes it the dangerous shape: it looks like a directive about the
+        // window and hands over everything the linked crates would have printed. Its target has
+        // to match the span's, which is this module's path, so if that moves the control says
+        // so rather than passing quietly.
+        for asked in ["[serving]=trace", "nysia_desktop[serving]=trace"] {
+            let leaked = through(as_it_was_before_the_screen(asked), || {
+                tracing::info_span!("serving").in_scope(|| as_the_terminal_crates_would(SENTINEL));
+            });
+            assert!(
+                leaked.contains(SENTINEL),
+                "NYSIA_LOG={asked} enabled nothing even unscreened, so the assertion below \
+                 would hold for the wrong reason: {leaked}"
+            );
+
+            let written = through(confine(asked), || {
+                tracing::info_span!("serving").in_scope(|| as_the_terminal_crates_would(SENTINEL));
+            });
+            assert!(
+                !written.contains(SENTINEL),
+                "NYSIA_LOG={asked} reached every target through its span scope: {written}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_window_folds_the_list_in_when_nothing_named_those_crates() {
+        // The half the screen cannot do, and the one this copy is likeliest to lose quietly.
+        // Nothing in `NYSIA_LOG=trace` names a confined crate, so the screen refuses nothing
+        // and the entire answer is the fold. This is what fails if this door stops folding
+        // `CONFINED_TARGETS` in — the "lock on one door" the module docs are about, as a check
+        // rather than as a sentence.
+        let leaked = through(EnvFilter::new("trace"), || {
+            as_the_terminal_crates_would(SENTINEL);
+        });
+        assert!(
+            leaked.contains(SENTINEL),
+            "the unguarded filter dropped these too, so the assertion below proves nothing: \
+             {leaked}"
+        );
+
+        let written = through(confine("trace"), || {
+            as_the_terminal_crates_would(SENTINEL);
+            tracing::trace!(target: "nysia_desktop::commands", verb = "stream_attach", "served");
+        });
+        assert!(
+            !written.contains(SENTINEL),
+            "the window folded nothing in and the linked crates printed: {written}"
+        );
+        assert!(
+            written.contains("stream_attach"),
+            "the window's own lines went down with them: {written}"
+        );
+    }
+
+    #[test]
+    fn the_windows_way_out_is_the_same_one_variable() {
+        // `NYSIA_LOG_UNCONFINED` is one variable for the whole of Nysia, and a window that
+        // quietly ignored it while the daemon honoured it would be a second rule nobody wrote
+        // down. Both halves in one body, as above: the way out lets something out, and the same
+        // string does not get out without it.
+        let asked = "vte::ansi=trace";
+
+        let lifted = through(unconfined(asked), || as_the_terminal_crates_would(SENTINEL));
+        assert!(
+            lifted.contains(SENTINEL),
+            "the window's way out does not let anything out: {lifted}"
+        );
+
+        let held = through(confine(asked), || as_the_terminal_crates_would(SENTINEL));
+        assert!(
+            !held.contains(SENTINEL),
+            "the same string was honoured without anybody naming the way out: {held}"
+        );
+    }
+
+    #[test]
+    fn refusing_every_directive_still_leaves_the_windows_own_lines() {
+        // A screen that answered `NYSIA_LOG=vte::ansi=trace` with a window that logged nothing
+        // would have traded one bug for a worse one, and this module's whole reason for
+        // existing is that a silent window is unreadable in a release build.
+        let written = through(confine("vte::ansi=trace"), || {
+            tracing::info!(target: "nysia_desktop::commands", verb = "stream_attach", "served");
+            tracing::debug!(target: "nysia_desktop::commands", "below the default");
+        });
+
+        assert!(
+            written.contains("stream_attach"),
+            "refusing the only directive left the window with no log at all: {written}"
+        );
+        assert!(
+            !written.contains("below the default"),
+            "the fallback is `info`, not `debug`: {written}"
+        );
+    }
 
     #[test]
     fn an_event_reaches_the_file_and_not_only_stderr() {
