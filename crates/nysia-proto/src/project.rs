@@ -559,28 +559,6 @@ impl RegisterRefusal {
     }
 }
 
-/// What a daemon that does not serve the project verbs yet answers with.
-///
-/// **Scaffolding, and v0.3 wave C1 replaces it.** The verbs are on the wire from wave A so
-/// that the store and the daemon are built against one definition of them; until C1 serves
-/// them for real, a daemon that is asked has to say something, and `unsupported` is exactly
-/// the code for "a verb this daemon does not serve". The alternative — leaving the variants
-/// out until something can answer them — would leave the wire tags undefined for the two
-/// waves that have to agree on them.
-#[must_use]
-pub fn unsupported_envelope() -> ErrorEnvelope {
-    ErrorEnvelope::new(
-        ErrorCode::Unsupported,
-        "this daemon does not serve the project verbs yet",
-        steps(
-            "The daemon answering is older than the client asking, or is a build from before \
-             v0.3 wave C.",
-            &["Compare the two: `nysia --version` reports the client, and the daemon logs its own at startup."],
-        ),
-    )
-    .with_next_command_args(["nysia", "--version"])
-}
-
 /// The last segment of `name`, cut at `/` and `\` on **every** platform.
 ///
 /// Not [`Path::file_name`], and the difference is a leak. `Path` splits on the separators
@@ -971,29 +949,6 @@ mod tests {
             "{written}"
         );
         assert!(written.contains("4 of the folders"), "{written}");
-    }
-
-    #[test]
-    fn the_unserved_answer_says_it_is_scaffolding() {
-        // Wave C1 replaces it. Until then this is what a project verb meets, and a reader
-        // of a red acceptance test needs it to say so rather than to look like a decision.
-        let envelope = unsupported_envelope();
-        assert_eq!(envelope.code(), &ErrorCode::Unsupported);
-        assert!(!envelope.is_retryable());
-        assert_eq!(
-            envelope.next_command_args(),
-            Some(["nysia".to_owned(), "--version".to_owned()].as_slice())
-        );
-        // The strings a caller reads verbatim. A wrapped source line that kept its
-        // indentation would reach them as a run of spaces.
-        for text in std::iter::once(envelope.message())
-            .chain(envelope.next_steps().iter().map(String::as_str))
-        {
-            assert!(
-                !text.contains("  "),
-                "a run of spaces reached a caller: {text:?}"
-            );
-        }
     }
 
     #[test]

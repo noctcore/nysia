@@ -48,7 +48,6 @@ pub use identity::{IdentityError, Incarnation, PaneKey, SessionHandle, SessionKi
 pub use project::{
     MAX_LISTED_REPOSITORIES, Project, ProjectError, ProjectForget, ProjectId, ProjectList,
     ProjectRegister, ProjectRegistered, ProjectStart, ProjectStarted, RegisterRefusal, Worktree,
-    unsupported_envelope,
 };
 pub use session::{
     ExitStatus, SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary,
