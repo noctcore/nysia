@@ -611,11 +611,50 @@ fn print_issues(issues: &[Issue], json: bool) {
             issue.number,
             // The login, or a word rather than a blank: GitHub reports no author for a
             // deleted account, and an empty column reads as a rendering fault.
-            issue.author.as_deref().unwrap_or("(no author)"),
-            issue.title,
-            issue.labels.join(", ")
+            plain(issue.author.as_deref().unwrap_or("(no author)")),
+            plain(&issue.title),
+            plain(&issue.labels.join(", "))
         );
     }
+}
+
+/// Somebody else's text, with the characters a terminal acts on rather than shows.
+///
+/// Every field [`print_issues`] writes but the number is text out of a repository this machine
+/// does not own, and `println!` goes to a terminal. The daemon already scrubs `GH_FORCE_TTY`
+/// and `CLICOLOR_FORCE` out of gh's environment for precisely this reason — so that escape
+/// sequences cannot reach a stream something else parses — and nothing was doing the same for
+/// the fields on their way back out.
+///
+/// # What was measured, and what was not
+///
+/// **Not measured against GitHub.** 1,000 real titles from `cli/cli` and `microsoft/vscode`
+/// were scanned and not one carried a C0, a DEL or a C1 character, so whether GitHub would
+/// store such a title is unproven in both directions — and finding out would mean writing to
+/// somebody's repository, which is not a thing to do to answer a question. So this is reasoned
+/// rather than demonstrated: the text is another repository's, the sink is a terminal, and one
+/// pass over a string is cheap enough not to need an exploit first.
+///
+/// 23 of those 1,000 titles carry legitimate non-ASCII, which is why this removes **only the
+/// control classes**: `char::is_control` is Unicode `Cc`, exactly C0, DEL and C1. A title in
+/// Japanese, or with an emoji in it, comes through untouched.
+///
+/// **Bidirectional overrides are deliberately not handled.** U+202E and its neighbours can
+/// reorder a rendered line without being control characters, and they are a real spoofing
+/// class — but they are category `Cf`, alongside the zero-width joiner that ordinary emoji
+/// sequences are built from, so removing that category wholesale would corrupt titles that are
+/// merely expressive. Narrowing it to the override range is a separate change with its own
+/// evidence, and claiming it here without doing it would be worse than leaving it named.
+fn plain(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// A project's worktrees, as one line names them.
@@ -878,6 +917,40 @@ mod tests {
         ];
         for error in errors {
             assert!(!error.envelope().next_steps().is_empty(), "{error}");
+        }
+    }
+
+    #[test]
+    fn another_repositorys_text_cannot_drive_the_terminal_it_is_printed_to() {
+        // `tasks list` prints an issue's title, author and labels, and all three are text
+        // from a repository this machine does not own. The daemon keeps `GH_FORCE_TTY` and
+        // `CLICOLOR_FORCE` away from gh so that escapes cannot reach a parsed stream; this is
+        // the same rule applied to the fields rather than to the environment.
+        //
+        // The sequences below are the ones that matter to a terminal and not to a reader:
+        // erase-display, a cursor jump, an OSC that retitles the window, and a bell.
+        let steered = plain("Fix\u{1b}[2J\u{1b}[1;1H\u{1b}]0;owned\u{7}the parser\u{7}");
+        for obeyed in ['\u{1b}', '\u{7}'] {
+            assert!(
+                !steered.contains(obeyed),
+                "{obeyed:?} survived into a line a terminal reads: {steered:?}"
+            );
+        }
+        // A C1 introducer is the same attack in one byte, and it is a control character by
+        // the same definition rather than by a second list someone has to remember.
+        assert!(!plain("Fix\u{9b}2Jthe parser").contains('\u{9b}'));
+        // And a newline, which would otherwise turn one row into two and let a title forge a
+        // row of its own.
+        assert!(!plain("Fix the parser\n500   nobody       anything at all").contains('\n'));
+
+        // What must **not** change: 23 of 1,000 real titles carry non-ASCII, and a guard that
+        // flattened them would be a bug reported by everybody rather than an attack stopped.
+        for ordinary in [
+            "修正: パーサーを直す",
+            "Fix the parser 🎉",
+            "Use an em dash — like this",
+        ] {
+            assert_eq!(plain(ordinary), ordinary);
         }
     }
 }
