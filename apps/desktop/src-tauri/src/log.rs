@@ -59,7 +59,9 @@
 //! The daemon's `log` module is where the confinement is explained. It is not where this copy
 //! is proved: a lock on one door is not a policy, and a proof of one door is not a proof of
 //! two. The tests at the bottom of this file ask this process's own `confine` the question,
-//! and they fail if this copy stops screening or stops folding.
+//! and they fail if this copy stops screening or stops folding. One of them asks [`install`]
+//! itself instead, in a process of its own, because which of the two a window reaches is a
+//! runtime branch and no test that builds the filter by hand can reach it.
 //!
 //! # Where a refused directive is announced
 //!
@@ -646,7 +648,10 @@ mod tests {
             .find(&note)
             .unwrap_or_else(|| panic!("the refusal is not in the file at all: {written}"));
         let here_at = written.find(here).unwrap_or_else(|| {
-            panic!("the window never said where it was logging, so there is nothing to order against: {written}")
+            panic!(
+                "the window never said where it was logging, so there is nothing for the \
+                    refusal to be ahead of: {written}"
+            )
         });
         assert!(
             note_at < here_at,

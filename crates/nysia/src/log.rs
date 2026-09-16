@@ -143,7 +143,7 @@ fn parsed(asked: &str) -> EnvFilter {
 /// `writeln!` and not `eprintln!`, which panics when the write fails. The one thing this
 /// line is for is telling somebody why their `NYSIA_LOG` did nothing, and a process that
 /// died over saying it would have answered a refused directive with no daemon at all.
-/// `main` writes every one of its own stderr lines the same way, for the same reason.
+/// `main` answers its own stderr the same way, for the same reason.
 fn note(what: &str) {
     let _ = writeln!(std::io::stderr(), "{what}");
 }
@@ -440,8 +440,10 @@ mod tests {
         //
         // `filter` is what chooses between the two, on `log_file::confinement_lifted`, and it
         // is not called here: that reads the process environment, which every test in this
-        // binary shares. `the_confinement_is_not_lifted_unless_its_own_variable_is_set`, in
-        // `log_file`'s own tests, is what holds the default to the confined branch.
+        // binary shares. `the_runtime_branch_confines_unless_the_way_out_is_named` is where
+        // that choice is made in a process of its own and read back, and
+        // `crates/nysia/tests/log_confinement.rs` is where the shipped binary makes it.
+        // Both were written because this test passed while that branch was mutated open.
         let asked = "vte::ansi=trace";
 
         let lifted = through(unconfined(asked), || as_the_terminal_crates_would(SENTINEL));
