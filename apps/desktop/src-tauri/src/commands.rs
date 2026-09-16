@@ -42,8 +42,9 @@ use std::path::PathBuf;
 use nysia_proto::envelope::{RequestPayload, ResponsePayload};
 use nysia_proto::handshake::DaemonIdentity;
 use nysia_proto::identity::SessionHandle;
-use nysia_proto::project::{Project, ProjectList, ProjectRegister, ProjectRegistered};
+use nysia_proto::project::{Project, ProjectId, ProjectList, ProjectRegister, ProjectRegistered};
 use nysia_proto::session::{SessionClose, SessionCreate, SessionList, SessionSummary};
+use nysia_proto::tasks::{Issue, TasksList};
 use nysia_proto::terminal::{TerminalResize, TerminalSend};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager};
@@ -375,6 +376,45 @@ pub async fn project_list(app: AppHandle) -> Failed<Vec<Project>> {
         match client.request(RequestPayload::ProjectList(ProjectList {}))? {
             ResponsePayload::ProjectList { projects } => Ok(projects),
             other => Err(unexpected("project_list", &other)),
+        }
+    })
+    .await
+}
+
+/// A project's open GitHub issues, queried live (D-5).
+///
+/// The Tasks screen's only data source. The project and nothing else travels: the daemon
+/// resolves the registered folder and lets `gh` read the repository out of it, so there is no
+/// slug or path on this call — which is also what keeps a person's disk out of it (traps
+/// register #13/#14).
+///
+/// # What this forwarder has to preserve
+///
+/// **The refusal code.** The screen draws three different headings — `gh_missing`,
+/// `gh_unauthenticated`, `query_failed` — and degrades a code it does not recognise to the
+/// last. That works because [`CommandFailure::kind`](crate::daemon::CommandFailure) is the
+/// daemon's own code for a *known* `ErrorCode` and the literal `"other"` for anything else,
+/// and the three codes are known to `nysia-proto` as of v0.3 wave C3. A generic message here
+/// would collapse all three into one heading and put the screen back to saying the same thing
+/// about four different endings, which is exactly what the plan's §5 forbids.
+///
+/// **An empty list is a success.** A repository with no open issues answers `Ok(vec![])`, not
+/// an error, and the screen says "No open issues" rather than "not signed in".
+///
+/// # Errors
+///
+/// [`CommandFailure`] carrying the daemon's own code, sentence and next steps — including
+/// `gh auth login` as `nextCommandArgs` when the credentials are the problem.
+#[tauri::command]
+pub async fn tasks_list(app: AppHandle, project: ProjectId) -> Failed<Vec<Issue>> {
+    let client = client(&app)?;
+    // Blocking, and the one command here that waits on the network: the daemon spawns `gh`,
+    // which is a round trip to GitHub. On the main thread that is a frozen webview (traps
+    // register #2).
+    blocking("tasks_list", move || {
+        match client.request(RequestPayload::TasksList(TasksList { project }))? {
+            ResponsePayload::TasksList { issues } => Ok(issues),
+            other => Err(unexpected("tasks_list", &other)),
         }
     })
     .await
