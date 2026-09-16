@@ -7,7 +7,7 @@ import type { SessionSummary as WireSession } from '../generated/SessionSummary'
 import type { ShellProfile } from '../generated/ShellProfile';
 import { branchForIssue } from '../tasks/branchName';
 import type { Issue } from '../tasks/issue';
-import { isTasksBusy, unavailableReason } from '../tasks/tasks';
+import { isTasksBusy, unavailableReason, type TasksState } from '../tasks/tasks';
 import { isAddProjectBusy, registerRefusal, type AddProjectState } from '../store/addProject';
 import { StoreCommandError, type StoreCommandName, type StoreError } from '../store/errors';
 import {
@@ -205,20 +205,7 @@ export class DaemonStore implements Store {
     if (!this.#snapshot.projects.some((project) => project.id === id)) {
       throw this.fail('selectProject', `No project ${id} is open.`);
     }
-    this.#update((current) =>
-      current.activeProjectId === id
-        ? current
-        : // The issues belong to the project that was showing, and so does the line saying
-          // what the last `Start →` did. Carrying either across would put one repository's
-          // work under another's name — and `Start →` derives a branch for the *active*
-          // project, so a stale row is a worktree in the wrong repository one click away.
-          {
-            ...current,
-            activeProjectId: id,
-            tasks: { phase: 'idle' },
-            taskStart: { phase: 'idle' },
-          },
-    );
+    this.#update((current) => withActiveProject(current, id));
   };
 
   selectTab = async (paneKey: PaneKey): Promise<void> => {
@@ -375,7 +362,7 @@ export class DaemonStore implements Store {
     // would leave a selection nothing renders and a `selectProject` that rejects.
     this.#update((current) =>
       current.projects.some((project) => project.id === registered.project.id)
-        ? { ...current, activeProjectId: registered.project.id }
+        ? withActiveProject(current, registered.project.id)
         : current,
     );
   };
@@ -424,28 +411,46 @@ export class DaemonStore implements Store {
       issues = readIssues(await this.#bridge.invoke<unknown>('tasks_list', { project }));
     } catch (cause) {
       const failure = asCommandFailure(cause);
-      this.#update((current) => ({
-        ...current,
-        tasks: {
-          phase: 'unavailable',
-          reason: unavailableReason(failure?.kind ?? null),
-          // `describeFailure` is deliberately not used: it joins the sentence and the first
-          // step into one string, and this panel puts them in two different places — the
-          // steps are the part that says `gh auth login`.
-          message: failure?.message ?? describeFailure(cause),
-          // The daemon's envelope guarantees at least one step, so the fallback is only ever
-          // reached by a failure that never became one — a Tauri-level error before the
-          // command ran, or an answer this window could not parse. Those have no advice
-          // attached and still must not leave the panel a dead end, and asking again is the
-          // one action this screen always offers.
-          nextSteps: failure?.nextSteps ?? [RETRY_STEP],
-        },
-      }));
+      this.#settle(project, {
+        phase: 'unavailable',
+        reason: unavailableReason(failure?.kind ?? null),
+        // `describeFailure` is deliberately not used: it joins the sentence and the first
+        // step into one string, and this panel puts them in two different places — the
+        // steps are the part that says `gh auth login`.
+        message: failure?.message ?? describeFailure(cause),
+        // The daemon's envelope promises at least one step, so this fallback is for a failure
+        // that never became one — a Tauri-level error before the command ran, or an answer
+        // this window could not parse. Tested on `length` rather than on nullishness: an
+        // envelope carrying an *empty* list is not nullish, and `??` would pass it straight
+        // through to a panel with a heading, a sentence and no way out of it.
+        nextSteps:
+          failure !== null && failure.nextSteps.length > 0 ? failure.nextSteps : [RETRY_STEP],
+      });
       return;
     }
 
-    this.#update((current) => ({ ...current, tasks: { phase: 'loaded', issues } }));
+    this.#settle(project, { phase: 'loaded', issues });
   };
+
+  /**
+   * Write a task answer, unless the screen has moved on since it was asked for.
+   *
+   * The round trip is not instant and the active project can change during it: switch
+   * projects while a query is in flight and the effect fires a second one, so two answers are
+   * outstanding and whichever lands last wins. Without this check that can be the *first*
+   * one — and project A's issues would sit under project B's name, which is the same ending
+   * {@link withActiveProject} exists to prevent, reached by a different road.
+   *
+   * Discarding is right rather than merely safe: the newer query is already in flight, so the
+   * screen is about to be correct without this answer, and `loading` is what it shows in the
+   * meantime.
+   */
+  #settle(project: ProjectId, tasks: TasksState): void {
+    if (this.#snapshot.activeProjectId !== project) {
+      return;
+    }
+    this.#update((current) => ({ ...current, tasks }));
+  }
 
   /**
    * Hand an issue to an agent: a branch-keyed worktree, a session in it, and a tab.
@@ -803,11 +808,13 @@ export class DaemonStore implements Store {
         projects.find((project) => project.id === current.activeProjectId)?.id ??
         projects[0]?.id ??
         null;
+      // Through the setter, because this is the *third* place the active project moves and
+      // it moves on every connect and reconnect: a daemon that has forgotten a project falls
+      // back to the first row here, silently, while the Tasks screen is open.
       return {
-        ...current,
+        ...withActiveProject(current, activeProjectId),
         projects,
         projectsUnavailable: null,
-        activeProjectId,
         daemon: {
           ...current.daemon,
           // The status bar's third figure, which had nothing behind it until now.
@@ -889,6 +896,42 @@ export class DaemonStore implements Store {
       listener();
     }
   }
+}
+
+/**
+ * Move the active project, taking everything that belonged to the old one with it.
+ *
+ * **The one place `activeProjectId` is written**, and it is a function rather than a rule
+ * because the rule was already broken when it was only a rule. `store/types.ts` says the task
+ * list is reset whenever the active project moves; the project moves in *three* places — a
+ * click in the sidebar, the selection after **Add a project**, and the fallback to the first
+ * row in `#refreshProjects`, which runs on every connect and every reconnect — and only the
+ * first of them did it.
+ *
+ * What that cost is not cosmetic and not a race. Register a folder while the Tasks screen is
+ * open and the active project becomes the new one, while `tasks` still holds the *previous*
+ * repository's issues; the screen's refetch only fires on `idle`, so those rows stay on
+ * screen under the new project's name. `Start →` on one of them then asks for a branch
+ * derived from the old repository's issue, in the new repository — a worktree and an agent
+ * session in the wrong project, one click away, which is the exact hazard three comments in
+ * this file cite as the reason the reset exists.
+ *
+ * Returns `current` unchanged when the id has not moved, so it is safe on the paths that call
+ * it every connect.
+ */
+function withActiveProject(
+  current: StoreSnapshot,
+  activeProjectId: ProjectId | null,
+): StoreSnapshot {
+  if (current.activeProjectId === activeProjectId) {
+    return current;
+  }
+  return {
+    ...current,
+    activeProjectId,
+    tasks: { phase: 'idle' },
+    taskStart: { phase: 'idle' },
+  };
 }
 
 /** One wire session as the chrome sees it. */

@@ -1101,6 +1101,71 @@ describe('the task list, which is the screen’s whole subject', () => {
     await store.selectProject(other?.id ?? '');
     expect(store.getSnapshot().tasks).toEqual({ phase: 'idle' });
   });
+
+  it('forgets them when registering a project moves the selection', async () => {
+    // The second of three places the active project moves, and the one that shipped broken:
+    // only `selectProject` reset the list, so registering a folder with the Tasks screen open
+    // left the *previous* repository's issues on screen under the new project's name. The
+    // screen's refetch only fires on `idle`, so they stayed — and `Start →` on one of them
+    // would have made a worktree in the new repository for the old one's issue.
+    const { store } = build();
+    await ready(store);
+    await store.refreshTasks();
+    expect(store.getSnapshot().tasks.phase).toBe('loaded');
+
+    await store.addProject();
+    expect(store.getSnapshot().activeProjectId).not.toBeNull();
+    expect(store.getSnapshot().tasks).toEqual({ phase: 'idle' });
+  });
+
+  it('forgets them when a reconnect falls back to a different project', async () => {
+    // The third place, and the quietest: `#refreshProjects` keeps the selection if the daemon
+    // still names it and otherwise takes the first row. That runs on every connect and every
+    // reconnect, so a daemon that has forgotten a project moves the selection with nobody
+    // touching anything.
+    const { store, daemon } = build();
+    await ready(store);
+    await store.refreshTasks();
+    const wasActive = store.getSnapshot().activeProjectId;
+    expect(store.getSnapshot().tasks.phase).toBe('loaded');
+
+    daemon.projects = daemon.projects.filter((project) => project.id !== wasActive);
+    daemon.drop();
+    await until(() => store.getSnapshot().activeProjectId !== wasActive);
+
+    expect(store.getSnapshot().tasks).toEqual({ phase: 'idle' });
+  });
+
+  it('discards an answer that arrives after the project changed', async () => {
+    // The same ending by a different road. A round trip is not instant, so switching projects
+    // mid-query leaves two answers outstanding — and whichever lands last wins. Without an
+    // ownership check on the write, that can be the *first*, and project A's issues settle
+    // under project B.
+    const { store, daemon } = build();
+    await ready(store);
+
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const realInvoke = daemon.invoke.bind(daemon);
+    daemon.invoke = async <T,>(command: string, args?: Record<string, unknown>): Promise<T> => {
+      if (command === 'tasks_list') {
+        await held;
+      }
+      return realInvoke<T>(command, args);
+    };
+
+    const inFlight = store.refreshTasks();
+    const other = store.getSnapshot().projects[1];
+    await store.selectProject(other?.id ?? '');
+    release();
+    await inFlight;
+
+    // The stale answer is dropped, not painted. `idle` is what `selectProject` left, and the
+    // screen's own effect is what asks again for the project now showing.
+    expect(store.getSnapshot().tasks).toEqual({ phase: 'idle' });
+  });
 });
 
 describe('starting an issue', () => {
