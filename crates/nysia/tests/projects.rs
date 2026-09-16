@@ -1,18 +1,22 @@
 //! The v0.3 acceptance test: **a registered folder is still there, under the same id,
 //! after the daemon restarts**.
 //!
-//! # It is written to fail, and that is the point
+//! # It was written to fail, and that is the point
 //!
-//! Nothing behind it exists yet. `nysia project` is not a verb, there is no projects table,
-//! and `crates/nysia-core/src/rpc/server.rs` answers the three project verbs with
-//! `unsupported` because wave A put them on the wire and nothing serves them. So this is
-//! `#[ignore]`d with a reason naming **v0.3 wave C1** — `docs/plans/v0.3-delivery-plan.md`
-//! §4 — and `cargo test --workspace` stays green with it in the tree. **It is expected to
-//! fail until C1 lands.** When C1 removes the `#[ignore]`, nothing else here should move:
-//! a test edited to fit the code it grades is a test that grades nothing.
+//! When this landed in wave A nothing behind it existed: `nysia project` was not a verb,
+//! there was no projects table, and `crates/nysia-core/src/rpc/server.rs` answered the three
+//! project verbs with `unsupported` because wave A had put them on the wire and nothing
+//! served them. It was `#[ignore]`d with a reason naming **v0.3 wave C1** —
+//! `docs/plans/v0.3-delivery-plan.md` §4 — so that `cargo test --workspace` stayed green
+//! with it in the tree.
 //!
-//! It is written now, in wave A, for the reason `survival.rs` and `agent_status.rs` were.
-//! Three later PRs can each be green against their own unit tests and still not add up to a
+//! C1 landed them and the `#[ignore]` came off. **Nothing else about the test moved** —
+//! no assertion, no timeout, no step of the harness — which is the only reason its passing
+//! means anything: a test edited to fit the code it grades is a test that grades nothing.
+//! The prose below was brought into the past tense and nothing it describes changed.
+//!
+//! It was written in wave A, for the reason `survival.rs` and `agent_status.rs` were. Three
+//! later PRs can each be green against their own unit tests and still not add up to a
 //! project that survives a restart, and a test written after them would be written to fit
 //! them.
 //!
@@ -32,22 +36,21 @@
 //!
 //! # Read this before you trust a red
 //!
-//! A red here is either "the feature is absent", which is what it says today, or "the
-//! harness is broken", and only one of those is worth keeping. The failure message carries
-//! all four runs — both `project` verbs, on both daemons — so the two are tellable apart
-//! without rerunning anything:
+//! A red here is either "the feature regressed" or "the harness is broken", and only one of
+//! those is worth keeping. The failure message carries all four runs — both `project` verbs,
+//! on both daemons — so the two are tellable apart without rerunning anything:
 //!
-//! - **The feature is absent** looks like clap refusing the argv: `unrecognized subcommand
-//!   'project'`, exit 2, nothing on stdout. That is the expected red.
+//! - **The feature regressed** looks like a verb answering an error envelope, or a project
+//!   list that comes back empty or under a different id after the restart.
 //! - **The harness is broken** looks like the daemon never answering or `git` not
 //!   resolving. Those are this file's bugs and the fix is in this file — including the one
 //!   that is already handled: see [`Nysiad::restart`] for the stale Unix socket a killed
-//!   daemon leaves behind, which stops its replacement binding and is a defect in
-//!   `rpc/**` rather than in this test.
+//!   daemon leaves behind.
 //!
 //! The steps before the restart are captured rather than asserted, so the restart happens
-//! on every run — including today's. A `.ok()` on the register step would mean the half of
-//! the harness that matters most had never executed until the day the feature landed.
+//! on every run — it happened on every red run too, before the verbs existed. A `.ok()` on
+//! the register step would have meant the half of the harness that matters most never
+//! executed until the day the feature landed.
 //!
 //! **Which `git` this run drove is announced** on the process's real stderr, green runs
 //! included. libtest captures `print!`/`eprintln!` per test thread and shows it only when a
@@ -60,7 +63,7 @@
 //! ```
 //!
 //! ```text
-//! cargo test -p nysia --test projects -- --ignored --nocapture
+//! cargo test -p nysia --test projects -- --nocapture
 //! ```
 
 use std::ffi::OsStr;
@@ -217,14 +220,22 @@ impl Nysiad {
     /// # The stale Unix socket, which is not this test's subject
     ///
     /// On Unix the endpoint is a file, and a killed daemon skips the `Drop` that unlinks
-    /// it — so the replacement's `bind` fails with `AddrInUse`, `nysia --daemon` reads that
-    /// as "another daemon already holds the endpoint", and exits zero without serving.
-    /// Nothing on the spawn path removes the file first. **That is a real defect on the
-    /// crash-recovery path**, it belongs to whoever owns `crates/nysia-core/src/rpc/**`
-    /// (v0.3 wave C), and this harness unlinks the file itself so that a red here means the
-    /// project was forgotten rather than that the second daemon never started. Windows is
-    /// unaffected: a pipe name *is* the object and stops existing when the last handle to
-    /// it closes, so there is no such thing as a stale pipe.
+    /// it — so the replacement's `bind` fails with `AddrInUse`, which `nysia --daemon` used
+    /// to read as "another daemon already holds the endpoint" and exit zero without serving.
+    /// **That was a real defect on the crash-recovery path**, and C1 fixed it where it
+    /// lived: `rpc::transport`'s `bind_unix` now decides by trying to reach what the socket
+    /// names, exactly as `rpc::discovery` decides a lease is stale, and removes it only when
+    /// nothing answers.
+    ///
+    /// This unlink stays anyway, and stays deliberately. It keeps *this* test's subject to
+    /// one thing: with it, a red here means the project was forgotten, and it cannot mean
+    /// the second daemon never started. The fix has proofs of its own beside the code it is
+    /// in — `a_socket_a_killed_daemon_left_behind_does_not_stop_its_replacement` and the two
+    /// mutations that keep it from unlinking a live socket or a file that is not one — and
+    /// those run on the same macOS leg this does. Two tests, two subjects.
+    ///
+    /// Windows is unaffected throughout: a pipe name *is* the object and stops existing when
+    /// the last handle to it closes, so there is no such thing as a stale pipe.
     ///
     /// The unlink happens **after** the proof above, not before, or the proof would be
     /// measuring a socket this file had just deleted.
@@ -422,9 +433,6 @@ fn told(label: &str, run: &Run) -> String {
 }
 
 #[test]
-#[ignore = "expected to fail until v0.3 wave C1 (docs/plans/v0.3-delivery-plan.md §4) \
-            serves the project verbs, adds the projects table and ships the `nysia project` \
-            CLI; there is no verb, no store table and no subcommand to pass against today"]
 fn a_registered_project_is_still_there_with_its_id_after_the_daemon_restarts() {
     let git = announce_git();
     let mut daemon = Nysiad::start("restart");
