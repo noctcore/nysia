@@ -56,10 +56,13 @@ const DEFAULT_DIRECTIVES: &str = "info";
 pub fn filter() -> EnvFilter {
     let asked = std::env::var(log_file::LOG_ENV).unwrap_or_default();
     if log_file::confinement_lifted() {
-        unconfined(&asked)
-    } else {
-        confine(&asked)
+        note(&log_file::unconfined_note());
+        return unconfined(&asked);
     }
+    for refused in log_file::screen_directives(&asked).refused {
+        note(&log_file::refusal_note(refused));
+    }
+    confine(&asked)
 }
 
 /// `asked` with every directive that could undo the confinement refused, and
@@ -77,14 +80,6 @@ pub fn filter() -> EnvFilter {
 /// imagined.
 fn confine(asked: &str) -> EnvFilter {
     let screened = log_file::screen_directives(asked);
-    for refused in &screened.refused {
-        note(&format!(
-            "`{refused}` was not applied. It could switch off the rule that keeps terminal \
-             bytes and a caller's paths out of this log. Set {}=1 as well to have it anyway, \
-             and then do not share the file.",
-            log_file::UNCONFINED_ENV
-        ));
-    }
 
     log_file::CONFINED_TARGETS
         .iter()
@@ -105,14 +100,12 @@ fn confine(asked: &str) -> EnvFilter {
 ///
 /// The log it produces can carry terminal output, a window title, an environment block and the
 /// working directory of a spawn: everything `log_file`'s module docs say a Nysia log never
-/// contains. So it says so, into that same log, before anything else is written to it.
+/// contains. [`filter`] says so, into that same log, before anything else is written to it.
+///
+/// Building the filter and saying what it is are separate here for the same reason the screen
+/// is separate from the fold: a function that both builds and announces is one somebody can
+/// call without the announcement, and this is the one it would be worst to call quietly.
 fn unconfined(asked: &str) -> EnvFilter {
-    note(&format!(
-        "{} is set. NYSIA_LOG is being honoured in full, so this log can contain terminal \
-         output, a window title, an environment block and a caller's paths. It is not a file \
-         to attach to an issue.",
-        log_file::UNCONFINED_ENV
-    ));
     parsed(asked)
 }
 
@@ -129,9 +122,12 @@ fn parsed(asked: &str) -> EnvFilter {
 
 /// Say something about the filter, before there is a subscriber to say it through.
 ///
-/// See the module docs for why this is stderr and not `tracing`.
+/// The wording comes from `log_file` so that this process and the window cannot drift into
+/// explaining the same refusal differently. See the module docs for why this is stderr and
+/// not `tracing`: at the point [`filter`] runs there is no subscriber, and for a spawned
+/// daemon stderr is the log file anyway.
 fn note(what: &str) {
-    eprintln!("{}: {what}", log_file::LOG_ENV);
+    eprintln!("{what}");
 }
 
 #[cfg(test)]
