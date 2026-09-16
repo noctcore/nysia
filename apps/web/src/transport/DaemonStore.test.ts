@@ -1177,6 +1177,75 @@ describe('the task list, which is the screen’s whole subject', () => {
     // screen's own effect is what asks again for the project now showing.
     expect(store.getSnapshot().tasks).toEqual({ phase: 'idle' });
   });
+
+  it('does not let an abandoned query replace the live one’s list with a refusal', async () => {
+    // The gap an id comparison leaves, and the reason it is not benign. Leave project A, come
+    // back to it, and both queries are A's — so `activeProjectId` matches for both and the one
+    // that lands last wins, which can be the one nobody is waiting for.
+    //
+    // Stale *rows* under the right name would be a small lie. This is the bigger one: the live
+    // query loads A's issues, the abandoned query then answers with a refusal, and the table
+    // empties under the heading `GitHub CLI is not signed in` over a repository whose list had
+    // just arrived. Nothing on screen contradicts it and only `↻` clears it.
+    const { store, daemon } = build();
+    await ready(store);
+    const held = hold(daemon, 'tasks_list');
+    const first = store.getSnapshot().projects[0];
+    const other = store.getSnapshot().projects[1];
+
+    const abandoned = store.refreshTasks();
+    await store.selectProject(other?.id ?? '');
+    const elsewhere = store.refreshTasks();
+    await store.selectProject(first?.id ?? '');
+    const live = store.refreshTasks();
+
+    // The live query answers first and puts A's issues on screen.
+    held.release(2);
+    await live;
+    expect(store.getSnapshot().tasks.phase).toBe('loaded');
+
+    // Then the abandoned one answers — with the failure that makes this worth a guard.
+    daemon.failures.set('tasks_list', refusal('gh_unauthenticated', 'not signed in', 'Sign in.'));
+    held.release(0);
+    await abandoned;
+
+    expect(
+      store.getSnapshot().tasks.phase,
+      'a query nobody was waiting for emptied the table',
+    ).toBe('loaded');
+
+    held.release(1);
+    await elsewhere;
+  });
+
+  it('keeps the refresh held when a late answer for the same project lands', async () => {
+    // The second effect of the same root. `selectProject` resets `tasks` to `idle`, which
+    // un-holds the `↻` that `isTasksBusy` was holding — so a second query for the same project
+    // can be started while the first is still outstanding. When the first then answers, it used
+    // to flip `tasks` to `loaded` and un-hold the button *again*, letting a user start a third
+    // against a query that has not come back.
+    const { store, daemon } = build();
+    await ready(store);
+    const held = hold(daemon, 'tasks_list');
+    const first = store.getSnapshot().projects[0];
+    const other = store.getSnapshot().projects[1];
+
+    const abandoned = store.refreshTasks();
+    await store.selectProject(other?.id ?? '');
+    await store.selectProject(first?.id ?? '');
+    const live = store.refreshTasks();
+
+    held.release(0);
+    await abandoned;
+    expect(
+      store.getSnapshot().tasks,
+      'an answer to an abandoned query un-held the refresh',
+    ).toEqual({ phase: 'loading' });
+
+    held.release(1);
+    await live;
+    expect(store.getSnapshot().tasks.phase).toBe('loaded');
+  });
 });
 
 describe('starting an issue', () => {
