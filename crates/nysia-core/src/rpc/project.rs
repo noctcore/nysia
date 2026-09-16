@@ -550,10 +550,19 @@ fn refuse(refusal: &RegisterRefusal, err: &GitError) -> ErrorEnvelope {
 /// agent-status spool: there is no spool behind a registration, and telling somebody their
 /// project will be drained at the next daemon start would be a promise nothing keeps.
 fn store_refusal(err: &StoreError) -> ErrorEnvelope {
+    // `%err` here and `store_kind` in the envelope, which is the same split `git_refusal`
+    // makes one screen up and for a related reason. The log is the daemon's own file and the
+    // path is the daemon's own database, so naming it there is what makes the line worth
+    // keeping; the envelope is read by a person, rendered in a window and pasted into issues,
+    // and `C:\Users\<name>\AppData\Local\…\nysia.db` puts somebody's account name in all
+    // three for no benefit — the recovery below names the file without spelling it.
     tracing::warn!(%err, "a project could not be read or written");
     envelope(
         ErrorCode::Internal,
-        format!("the daemon could not record that project: {err}"),
+        format!(
+            "the daemon could not record that project: {}",
+            store_kind(err)
+        ),
         "retry the verb; nothing was written if it failed",
         &["check that the daemon's runtime directory is writable and not full"],
     )
@@ -579,7 +588,10 @@ fn list_refusal(err: &StoreError) -> ErrorEnvelope {
     tracing::warn!(%err, "the project list could not be read");
     envelope(
         ErrorCode::Internal,
-        format!("the daemon could not read its project list: {err}"),
+        format!(
+            "the daemon could not read its project list: {}",
+            store_kind(err)
+        ),
         "stop the daemon and move that database file aside, then register the folders again",
         &[
             "forgetting one project cannot fix this: the row that will not read is the one \
@@ -709,6 +721,44 @@ fn joining(detail: &str) -> ErrorEnvelope {
         &["`nysia session list` will show whether the daemon is still serving"],
     )
     .retryable(true)
+}
+
+/// A store failure's variant, as a phrase an envelope can carry.
+///
+/// **The variant and never the message.** Every path-carrying [`StoreError`] names the
+/// database file in its `Display`, and that file lives under the person's profile:
+///
+/// ```text
+/// the daemon could not read its project list: could not read the id of a project in the
+/// store at C:\Users\kacpe\AppData\Local\…\nysia.db: a project id is `proj_<32 …>`, got …
+/// ```
+///
+/// It is the *daemon's* own runtime path rather than a caller's, which is why the leak guard
+/// beside `register` did not cover it — that one is about a path the caller supplied. It is
+/// still somebody's account name, in an envelope that reaches a window and gets pasted into
+/// issues. The recovery names the file without spelling it, so nothing is lost by saying
+/// which kind of failure it was instead, and the whole `Display` still goes to the log.
+///
+/// Exhaustive on purpose, like [`git_kind`]: a variant added later has to be given a phrase
+/// here rather than silently falling into a catch-all that says nothing.
+fn store_kind(err: &StoreError) -> &'static str {
+    match err {
+        StoreError::Io { .. } => "its database file could not be read or written",
+        StoreError::Sqlite { .. } => "its database refused the operation",
+        StoreError::NotWal { .. } => "its database is not in WAL mode",
+        StoreError::Migration { .. } | StoreError::MigrationOrder { .. } => {
+            "its database could not be migrated to this build's schema"
+        }
+        StoreError::SchemaAhead { .. } => "its database was written by a newer build of Nysia",
+        StoreError::State { .. }
+        | StoreError::Pane { .. }
+        | StoreError::Project { .. }
+        | StoreError::Question { .. }
+        | StoreError::Timestamp { .. }
+        | StoreError::NegativeTimestamp { .. } => "its database holds a row this build cannot read",
+        StoreError::Symlink { .. } => "its database path is a symbolic link, which is refused",
+        StoreError::Poisoned => "a panic in the daemon left its database connection unusable",
+    }
 }
 
 /// A git failure's variant, as a word for a log line.
@@ -1000,13 +1050,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// **The leak guard.** A refusal never repeats the path it was given.
+    /// **The leak guard.** A refusal names no path — the caller's or the daemon's own.
     ///
     /// An error envelope is the thing a daemon is most likely to log verbatim, and a
     /// repository path names a person's disk (traps register #13/#14). `RegisterRefusal` has
     /// no field to carry one; this is what stops the daemon putting one there anyway. Every
     /// [`GitError`] and [`PathError`] variant's `Display` contains a path, so a single
     /// `err.to_string()` anywhere on a refusal path fails this.
+    ///
+    /// # The second half, and why it was missing
+    ///
+    /// This used to cover only the path a *caller* supplied, and #94 was right that no
+    /// envelope carried one of those. What it did not cover is the daemon's own database
+    /// path, which `store_refusal` and `list_refusal` rendered straight into the message:
+    ///
+    /// ```text
+    /// the daemon could not read its project list: could not read the id of a project in the
+    /// store at C:\Users\kacpe\AppData\Local\…\nysia.db: …
+    /// ```
+    ///
+    /// Not a caller's path, and still a person's account name, in an envelope that reaches a
+    /// window and gets pasted into issues. The guard is widened rather than the finding
+    /// argued with: a refusal names no path, and which path it was is not the interesting
+    /// part.
     #[tokio::test]
     async fn a_refusal_does_not_repeat_the_path_it_was_given() {
         let Some(_git) = git_or_skip() else {
@@ -1034,8 +1100,52 @@ mod tests {
             );
         }
 
+        // The daemon's own database path, through the two envelopes that used to render a
+        // whole `StoreError`. Every path-carrying variant spells the file, so one variant
+        // stands for all of them — and the one chosen is the one #94 measured.
+        let database = dir.join("nysia.db");
+        let store_leak = StoreError::Sqlite {
+            action: "read the id of a project",
+            path: database.clone(),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        };
+        for envelope in [store_refusal(&store_leak), list_refusal(&store_leak)] {
+            let said = format!("{} {:?}", envelope.message(), envelope.next_steps());
+            for secret in [
+                database.to_string_lossy().into_owned(),
+                "nysia.db".to_owned(),
+                whoami(),
+            ] {
+                assert!(
+                    !said.contains(&secret),
+                    "the refusal carried {secret:?}, which names the daemon's own disk and \
+                     the account it runs as: {said}"
+                );
+            }
+            assert!(
+                !envelope.next_steps().is_empty(),
+                "and still says what to do about it"
+            );
+        }
+
         drop(service);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The account this process runs as, as it appears inside a profile path.
+    ///
+    /// Asserted on as well as the path itself, because a message could name the account
+    /// without naming the whole file — and that is the part that identifies a person.
+    fn whoami() -> String {
+        for var in ["USERNAME", "USER", "LOGNAME"] {
+            if let Some(name) = std::env::var_os(var)
+                && !name.is_empty()
+            {
+                return name.to_string_lossy().into_owned();
+            }
+        }
+        // Nothing to compare against rather than something that matches everything.
+        "\u{0}".to_owned()
     }
 
     /// Forgetting an id nothing is registered under is refused, not quietly accepted.
