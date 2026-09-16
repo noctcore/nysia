@@ -83,11 +83,10 @@
 //! for `question` payloads: the file is created `0600` before SQLite opens it, and a
 //! symlinked path is refused rather than followed.
 //!
-//! On the way out, no error here names a registered path. [`StoreError::Project`] carries the
-//! **database's** path, as every sibling variant does, and its source is a
-//! [`nysia_proto::ProjectError`] —
-//! whose `ProjectIdShape` echoes a stored id, which is a digest, and whose `PathNotUnicode`
-//! carries nothing at all.
+//! On the way out, no error here names a registered path. [`StoreError::Project`] carries
+//! the **database's** path, as every sibling variant does, and its source is a
+//! [`nysia_proto::ProjectError`] — whose `ProjectIdShape` echoes a stored id, which is a
+//! digest, and whose `PathNotUnicode` carries nothing at all.
 
 use std::path::{Path, PathBuf};
 
