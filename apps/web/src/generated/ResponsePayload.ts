@@ -4,6 +4,7 @@ import type { AgentStatusSubscribed } from "./AgentStatusSubscribed";
 import type { ErrorEnvelope } from "./ErrorEnvelope";
 import type { Project } from "./Project";
 import type { ProjectRegistered } from "./ProjectRegistered";
+import type { ProjectStarted } from "./ProjectStarted";
 import type { SessionCreated } from "./SessionCreated";
 import type { SessionSummary } from "./SessionSummary";
 import type { StreamAttached } from "./StreamAttached";
@@ -36,4 +37,4 @@ statuses: Array<AgentStatus>, } | { "type": "agent_status_subscribe" } & AgentSt
 /**
  * The rows.
  */
-projects: Array<Project>, } | { "type": "project_forget" } | { "type": "error" } & ErrorEnvelope;
+projects: Array<Project>, } | { "type": "project_forget" } | { "type": "project_start" } & ProjectStarted | { "type": "error" } & ErrorEnvelope;

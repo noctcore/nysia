@@ -43,8 +43,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::error::{ErrorCode, ErrorEnvelope, NextSteps};
+use crate::identity::{PaneKey, SessionHandle, SessionKind};
 use crate::newtype::deserialize_via_from_str;
-use crate::session::SessionSummary;
+use crate::session::{SessionSummary, ShellProfile};
 
 /// Why a project value could not be read.
 ///
@@ -346,6 +347,81 @@ pub struct ProjectRegistered {
     /// The dialog needs it to say "that project is already in your sidebar" instead of
     /// pretending to have added it.
     pub already_registered: bool,
+}
+
+/// `Start →`: a branch-keyed worktree, a session in it, and what the window needs to open a
+/// tab.
+///
+/// # It carries a branch and it cannot carry an issue number
+///
+/// **This is D-6 made unrepresentable rather than merely forbidden.** Worktrees are keyed by
+/// branch, never by a task id; nightcore shipped three bugs from task-keying, and `Start →`
+/// is exactly where the temptation comes back, because an issue number is right there and
+/// makes a tidy directory name. There is no field for one here. A client that wanted to key
+/// by issue would have to change this type, in review, with this paragraph attached —
+/// which is the whole point of spelling a decision in a type instead of a rule.
+///
+/// So **deriving a branch name from an issue happens in the window, before the request
+/// exists**, and the daemon never sees the issue at all.
+///
+/// # Adoption, not just creation
+///
+/// A worktree for that branch may already be on disk — someone made it outside Nysia, or an
+/// earlier `Start →` made it. The verb adopts it rather than failing, and
+/// [`ProjectStarted::adopted`] says which happened. A verb that failed on an existing
+/// worktree would make the second `Start →` on a branch an error a person has to resolve by
+/// hand, in the one workflow this milestone exists to make routine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ProjectStart {
+    /// Which registered project.
+    pub project: ProjectId,
+    /// The branch the worktree is keyed by, created if it is not there yet.
+    ///
+    /// A plain string, as [`Worktree::branch`] is, and for the same reason: git's own rules
+    /// for what a branch may be called are `git check-ref-format`'s, and restating a subset
+    /// of them here would refuse names git accepts. The daemon asks git rather than guessing.
+    pub branch: String,
+    /// Which session to start in it.
+    pub kind: SessionKind,
+    /// Which shell, where `kind` is [`SessionKind::Shell`]. `null` takes the platform
+    /// default.
+    pub profile: Option<ShellProfile>,
+}
+
+/// What `Start →` opened, in one answer.
+///
+/// **Everything the window needs to open a tab, so there is no second round trip.** The
+/// branch because that is the worktree's key and what the tab is labelled by, the handle
+/// because that is what routes a terminal verb, and the pane key because that is what the
+/// window records against its own leaf and what agent status is attributed to. A client that
+/// had to call `session_list` to find the session it had just asked for would be racing
+/// every other client's creates to identify its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ProjectStarted {
+    /// The branch the worktree is keyed by — the one that was asked for.
+    ///
+    /// Echoed rather than assumed. It is what the tab is labelled with, and a client reading
+    /// it from the answer cannot drift from what the daemon actually checked out.
+    pub branch: String,
+    /// Whether the worktree was already there.
+    ///
+    /// `false` means Nysia created it. `true` means it adopted one — from an earlier
+    /// `Start →`, or from a `git worktree add` somebody ran themselves. The dialog needs it
+    /// to say "opened the worktree you already had" rather than implying it made one.
+    pub adopted: bool,
+    /// The session's routing id.
+    pub handle: SessionHandle,
+    /// The pane the session was opened in.
+    ///
+    /// Minted by the daemon, because `Start →` creates the session before any window has a
+    /// leaf to name — the tab is opened *from* this answer. That is the same rule
+    /// [`SessionCreate::pane_key`](crate::SessionCreate) states for a `null` key, reached by
+    /// a different route.
+    pub pane_key: PaneKey,
 }
 
 /// How many repositories a [`RegisterRefusal::ManyRepositories`] names.

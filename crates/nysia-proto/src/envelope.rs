@@ -34,7 +34,10 @@ use crate::agent::{
 };
 use crate::error::ErrorEnvelope;
 use crate::newtype::deserialize_via_from_str;
-use crate::project::{Project, ProjectForget, ProjectList, ProjectRegister, ProjectRegistered};
+use crate::project::{
+    Project, ProjectForget, ProjectList, ProjectRegister, ProjectRegistered, ProjectStart,
+    ProjectStarted,
+};
 use crate::session::{SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary};
 use crate::stream::{StreamAttach, StreamAttached, StreamDetach};
 use crate::terminal::{
@@ -149,6 +152,8 @@ pub enum RequestPayload {
     ProjectList(ProjectList),
     /// Forget a project's registration.
     ProjectForget(ProjectForget),
+    /// `Start ->`: a branch-keyed worktree, a session in it, and a tab.
+    ProjectStart(ProjectStart),
 }
 
 impl RequestPayload {
@@ -173,6 +178,7 @@ impl RequestPayload {
             Self::ProjectRegister(_) => "project_register",
             Self::ProjectList(_) => "project_list",
             Self::ProjectForget(_) => "project_forget",
+            Self::ProjectStart(_) => "project_start",
         }
     }
 
@@ -205,7 +211,12 @@ impl RequestPayload {
             // but it would answer `alreadyRegistered: true` the second time, telling the
             // caller its own first attempt had beaten it there.
             | Self::ProjectRegister(_)
-            | Self::ProjectForget(_) => true,
+            | Self::ProjectForget(_)
+            // `Start ->` creates a worktree and spawns a session. Adoption makes it
+            // idempotent by *branch* — a second one on the same branch opens a second session
+            // in the worktree the first made — so a retry that ran twice would leave a
+            // session nobody asked for and no way to tell it from one somebody did.
+            | Self::ProjectStart(_) => true,
             Self::SessionList(_)
             | Self::TerminalRead(_)
             | Self::TerminalWait(_)
@@ -340,6 +351,8 @@ pub enum ResponsePayload {
     },
     /// The registration is gone. The folder is not.
     ProjectForget,
+    /// The worktree, the session and the pane the window opens a tab on.
+    ProjectStart(ProjectStarted),
     /// The verb failed.
     Error(ErrorEnvelope),
 }
@@ -366,6 +379,7 @@ impl ResponsePayload {
             Self::ProjectRegister(_) => "project_register",
             Self::ProjectList { .. } => "project_list",
             Self::ProjectForget => "project_forget",
+            Self::ProjectStart(_) => "project_start",
             Self::Error(_) => "error",
         }
     }
@@ -533,6 +547,15 @@ mod tests {
             }),
             RequestPayload::ProjectList(ProjectList {}),
             RequestPayload::ProjectForget(ProjectForget { id: project_id() }),
+            RequestPayload::ProjectStart(ProjectStart {
+                project: project_id(),
+                // A branch with a slash in it, because that is the shape a derived one takes
+                // and the shape a directory name cannot hold. It round-trips as itself here;
+                // what the daemon does about the directory is the daemon's business.
+                branch: "feat/projects".to_owned(),
+                kind: crate::identity::SessionKind::Shell,
+                profile: None,
+            }),
         ];
         for payload in payloads {
             let envelope = RequestEnvelope::new(payload);
@@ -621,6 +644,19 @@ mod tests {
         );
         assert!(RequestPayload::ProjectForget(ProjectForget { id: project_id() }).is_mutation());
         assert!(!RequestPayload::ProjectList(ProjectList {}).is_mutation());
+
+        // `Start ->` makes a worktree and spawns a session. Adopting an existing worktree is
+        // what makes it safe to re-run, not what makes a lost reply safe to repeat: the
+        // second run opens a second session in the same worktree.
+        assert!(
+            RequestPayload::ProjectStart(ProjectStart {
+                project: project_id(),
+                branch: "feat/projects".to_owned(),
+                kind: crate::identity::SessionKind::Shell,
+                profile: None,
+            })
+            .is_mutation()
+        );
     }
 
     #[test]
@@ -679,6 +715,44 @@ mod tests {
         assert!(forgotten.answers(&forget));
         // A register answered by a forget is a routing bug, not a valid reply.
         assert!(!forgotten.answers(&register));
+
+        // `Start ->`. The request carries a project and a branch and **has no field for an
+        // issue number** — D-6 made unrepresentable rather than merely forbidden. The answer
+        // carries everything the window opens a tab from, so there is no second round trip.
+        let start = RequestEnvelope::new(RequestPayload::ProjectStart(ProjectStart {
+            project: project_id(),
+            branch: "feat/projects".to_owned(),
+            kind: crate::identity::SessionKind::Shell,
+            profile: Some(crate::session::ShellProfile::Pwsh),
+        }));
+        let json = serde_json::to_value(&start).unwrap();
+        assert_eq!(json["type"], "project_start");
+        assert_eq!(json["branch"], "feat/projects");
+        assert!(
+            json.get("issue").is_none() && json.get("task").is_none(),
+            "a worktree is keyed by branch and never by a task id (D-6): {json}"
+        );
+
+        let started = ResponseEnvelope::new(
+            start.request_id.clone(),
+            ResponsePayload::ProjectStart(ProjectStarted {
+                branch: "feat/projects".to_owned(),
+                adopted: true,
+                handle: handle(),
+                pane_key: PaneKey::new("tab_1", "leaf_1").unwrap(),
+            }),
+        );
+        let json = serde_json::to_value(&started).unwrap();
+        assert_eq!(json["type"], "project_start");
+        assert_eq!(json["adopted"], true);
+        assert_eq!(json["paneKey"], "tab_1:leaf_1");
+        assert_eq!(
+            serde_json::from_value::<ResponseEnvelope>(json).unwrap(),
+            started
+        );
+        assert!(started.answers(&start));
+        // And a start answered by a forget is the same routing bug as above.
+        assert!(!forgotten.answers(&start));
     }
 
     #[test]
