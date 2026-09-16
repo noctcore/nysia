@@ -22,13 +22,13 @@ use nysia_core::rpc::{
 };
 use nysia_proto::{
     AgentStatus, AgentStatusRow, ClientId, ClientRole, ErrorEnvelope, ExitStatus, LineCursor,
-    PaneKey, Project, ProjectId, ProjectRegistered, SessionCreate, SessionCreated, SessionHandle,
-    SessionKind, SessionSummary, TerminalRead, TerminalReadResult, TerminalResize, TerminalSend,
-    TerminalWait, TerminalWaitResult, UnixMillis, WaitOutcome,
+    PaneKey, Project, ProjectId, ProjectRegistered, ProjectStart, ProjectStarted, SessionCreate,
+    SessionCreated, SessionHandle, SessionKind, SessionSummary, TerminalRead, TerminalReadResult,
+    TerminalResize, TerminalSend, TerminalWait, TerminalWaitResult, UnixMillis, WaitOutcome,
 };
 
 use crate::cli::{
-    CreateArgs, ReadArgs, RegisterArgs, ResizeArgs, SendArgs, StatusArgs, Verb, WaitArgs,
+    CreateArgs, ReadArgs, RegisterArgs, ResizeArgs, SendArgs, StartArgs, StatusArgs, Verb, WaitArgs,
 };
 
 /// Why a verb could not be run.
@@ -216,6 +216,10 @@ pub async fn run(verb: Verb, no_spawn: bool) -> Result<(), VerbError> {
             client.project_forget(id).await?;
             print_done("forgotten", json);
         }
+        Prepared::ProjectStart(request) => {
+            let started = client.project_start(request).await?;
+            print_started(&started, json);
+        }
     }
     Ok(())
 }
@@ -237,6 +241,7 @@ enum Prepared {
     ProjectRegister(std::path::PathBuf),
     ProjectList,
     ProjectForget(ProjectId),
+    ProjectStart(ProjectStart),
 }
 
 /// Check a verb's arguments, without touching the socket.
@@ -253,6 +258,33 @@ fn prepare(verb: Verb) -> Result<Prepared, VerbError> {
         Verb::ProjectRegister(args) => Prepared::ProjectRegister(register_path(&args)?),
         Verb::ProjectList { .. } => Prepared::ProjectList,
         Verb::ProjectForget { id, .. } => Prepared::ProjectForget(parse_project_id(&id)?),
+        Verb::ProjectStart(args) => Prepared::ProjectStart(start_request(&args)?),
+    })
+}
+
+/// Turn `project start`'s flags into the wire request.
+///
+/// The branch is checked for emptiness and **passed through otherwise**. What a branch may
+/// be called is `git check-ref-format`'s answer, which the daemon asks git for — restating a
+/// subset of those rules here would refuse names git accepts, in the client, where the person
+/// cannot see why.
+fn start_request(args: &StartArgs) -> Result<ProjectStart, VerbError> {
+    if args.branch.trim().is_empty() {
+        return Err(VerbError::argument(
+            "a branch to start cannot be blank",
+            "pass the branch the worktree is keyed by, as in `--branch feat/projects`",
+        ));
+    }
+    Ok(ProjectStart {
+        project: parse_project_id(&args.id)?,
+        branch: args.branch.clone(),
+        // v0.1 serves shell sessions and the daemon refuses an agent one with next steps
+        // naming the version that serves it. Offering `--kind agent` here would be a flag
+        // this build cannot honour.
+        kind: SessionKind::Shell,
+        profile: args
+            .profile
+            .map(|profile| profile.to_wire(args.distro.clone())),
     })
 }
 
@@ -570,6 +602,30 @@ fn branches(project: &Project) -> String {
         .collect();
     named.sort_by_key(|branch| !branch.ends_with('*'));
     named.join(", ")
+}
+
+/// Print what `project start` opened.
+///
+/// The handle alone on stdout, so `nysia terminal read $(nysia project start …)` works — the
+/// same contract `session create` keeps. The branch, whether the worktree was adopted, and
+/// the pane go to stderr, where they inform a person without polluting a pipe.
+fn print_started(started: &ProjectStarted, json: bool) {
+    if json {
+        emit_json(started);
+        return;
+    }
+    println!("{}", started.handle);
+    let _ = writeln!(
+        std::io::stderr(),
+        "{} worktree on {}, pane {}",
+        if started.adopted {
+            "adopted the"
+        } else {
+            "created a"
+        },
+        started.branch,
+        started.pane_key
+    );
 }
 
 /// Print `agent status`.

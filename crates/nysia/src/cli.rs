@@ -102,6 +102,11 @@ enum ProjectAction {
         #[arg(long)]
         json: bool,
     },
+    /// Create or adopt a branch-keyed worktree and start a session in it.
+    ///
+    /// The worktree is keyed by its **branch** and never by a task id (D-6). One that
+    /// already exists for the branch is adopted rather than refused.
+    Start(StartArgs),
     /// Forget a project's registration. Nothing on disk is touched.
     Forget {
         /// The project id, `proj_<32 hex digits>`.
@@ -110,6 +115,25 @@ enum ProjectAction {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// `nysia project start …`
+#[derive(Debug, Args)]
+pub struct StartArgs {
+    /// The project id, `proj_<32 hex digits>`.
+    pub id: String,
+    /// The branch the worktree is keyed by. Created if it is not there yet.
+    #[arg(long)]
+    pub branch: String,
+    /// Which shell to run. Omit for the platform's default.
+    #[arg(long, value_enum)]
+    pub profile: Option<ProfileArg>,
+    /// Which WSL distribution, with `--profile wsl`. Omit for the default one.
+    #[arg(long)]
+    pub distro: Option<String>,
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// `nysia project register …`
@@ -424,6 +448,8 @@ pub enum Verb {
         /// Print the result as JSON.
         json: bool,
     },
+    /// `nysia project start`
+    ProjectStart(StartArgs),
     /// `nysia project forget`
     ProjectForget {
         /// The project id, as typed.
@@ -446,6 +472,7 @@ impl Verb {
             Self::TerminalWait(args) => args.json,
             Self::AgentStatus(args) => args.json,
             Self::ProjectRegister(args) => args.json,
+            Self::ProjectStart(args) => args.json,
             Self::ProjectList { json } | Self::ProjectForget { json, .. } => *json,
         }
     }
@@ -506,6 +533,7 @@ impl Cli {
             Some(Command::Project { action }) => Mode::Client(Box::new(match action {
                 ProjectAction::Register(args) => Verb::ProjectRegister(args),
                 ProjectAction::List { json } => Verb::ProjectList { json },
+                ProjectAction::Start(args) => Verb::ProjectStart(args),
                 ProjectAction::Forget { id, json } => Verb::ProjectForget { id, json },
             })),
             Some(Command::Hook(args)) => Mode::Hook(args),
@@ -566,7 +594,7 @@ mod tests {
     fn every_verb_takes_json() {
         // §6.2's contract only holds if it holds everywhere. A verb without --json is one an
         // agent has to scrape.
-        let cases: [&[&str]; 11] = [
+        let cases: [&[&str]; 12] = [
             &["nysia", "session", "create", "--json"],
             &["nysia", "session", "list", "--json"],
             &["nysia", "session", "close", "sess_x", "--json"],
@@ -582,6 +610,9 @@ mod tests {
             &["nysia", "project", "register", ".", "--json"],
             &["nysia", "project", "list", "--json"],
             &["nysia", "project", "forget", "proj_x", "--json"],
+            &[
+                "nysia", "project", "start", "proj_x", "--branch", "feat/x", "--json",
+            ],
         ];
         for argv in cases {
             match parse(argv).into_mode() {
@@ -703,6 +734,31 @@ mod tests {
             panic!("forgetting parses as itself");
         };
         assert_eq!(id, "proj_x");
+    }
+
+    #[test]
+    fn starting_takes_a_branch_and_has_no_way_to_name_an_issue() {
+        // **D-6 at the argv surface.** A worktree is keyed by its branch, never by a task id,
+        // and the CLI must not offer a second way to say it. `--issue` is the flag somebody
+        // would reach for; it does not exist, and a test that says so is what keeps it from
+        // being added as a convenience.
+        let Mode::Client(verb) =
+            parse(&["nysia", "project", "start", "proj_x", "--branch", "feat/x"]).into_mode()
+        else {
+            panic!("a start is a client verb");
+        };
+        let Verb::ProjectStart(args) = *verb else {
+            panic!("a start parses as one");
+        };
+        assert_eq!(args.branch, "feat/x");
+        assert_eq!(args.id, "proj_x");
+
+        assert!(
+            Cli::parse_from_argv(["nysia", "project", "start", "proj_x", "--issue", "42"]).is_err(),
+            "there is no way to key a worktree by an issue, and there must not be"
+        );
+        // And the branch is required rather than derived from anything.
+        assert!(Cli::parse_from_argv(["nysia", "project", "start", "proj_x"]).is_err());
     }
 
     #[test]
