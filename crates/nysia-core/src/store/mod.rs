@@ -202,6 +202,44 @@ impl Store {
     }
 }
 
+/// Open a write transaction that takes the write lock immediately.
+///
+/// `IMMEDIATE` on every writer in this module, and it is not a precaution. A deferred
+/// transaction starts as a reader and only takes the write lock at its first write, so a
+/// read-then-write — which every entry point here is — fails with `SQLITE_BUSY_SNAPSHOT` if
+/// another writer committed in between. The busy timeout does not retry that one, because no
+/// amount of waiting refreshes a snapshot that is already stale.
+///
+/// `action` is what the error says was being attempted. It is a parameter rather than one
+/// wording for every table because the path in the message names the **database**, and a
+/// message that stops there tells a reader which file failed and nothing about what was
+/// being written to it.
+pub(super) fn begin<'a>(
+    conn: &'a mut Connection,
+    path: &Path,
+    action: &'static str,
+) -> Result<rusqlite::Transaction<'a>, StoreError> {
+    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|source| StoreError::Sqlite {
+            action,
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// Commit, reporting the path if it fails.
+pub(super) fn commit(
+    tx: rusqlite::Transaction<'_>,
+    path: &Path,
+    action: &'static str,
+) -> Result<(), StoreError> {
+    tx.commit().map_err(|source| StoreError::Sqlite {
+        action,
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 /// Put the connection into the mode D-12 asks for, and verify it got there.
 fn configure(conn: &Connection, path: &Path) -> Result<(), StoreError> {
     let sqlite = |action: &'static str| {

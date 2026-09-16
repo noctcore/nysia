@@ -48,10 +48,10 @@ use std::path::Path;
 use nysia_proto::{
     AGENT_STATUS_HISTORY_CAP, AgentState, AgentStatus, AgentStatusRow, PaneKey, UnixMillis,
 };
-use rusqlite::{Transaction, TransactionBehavior};
+use rusqlite::Transaction;
 
-use super::Store;
 use super::error::StoreError;
+use super::{Store, begin, commit};
 
 /// The eight §2.2 columns, in §2.2's order, for every `SELECT` in this module.
 ///
@@ -115,10 +115,10 @@ impl Store {
     /// - [`StoreError::Sqlite`] if the write fails, in which case nothing was written.
     pub fn record_status(&self, row: &AgentStatusRow) -> Result<(), StoreError> {
         let mut conn = self.conn()?;
-        let tx = begin(&mut conn, &self.path)?;
+        let tx = begin(&mut conn, &self.path, "begin a status write")?;
         insert(&tx, row, Provenance::Live, &self.path)?;
         trim(&tx, row, &self.path)?;
-        commit(tx, &self.path)
+        commit(tx, &self.path, "commit a status write")
     }
 
     /// Persist a row the daemon drained from the disk spool.
@@ -148,13 +148,13 @@ impl Store {
         // as a reader and, if another writer committed in between, fail the write with
         // `SQLITE_BUSY_SNAPSHOT` — which the busy timeout does not retry, because there is no
         // waiting that can fix a snapshot that is already stale.
-        let tx = begin(&mut conn, &self.path)?;
+        let tx = begin(&mut conn, &self.path, "begin a status write")?;
         if live_row_at_least_as_recent(&tx, row, &self.path)? {
             return Ok(Restored::Superseded);
         }
         insert(&tx, row, Provenance::Spool, &self.path)?;
         trim(&tx, row, &self.path)?;
-        commit(tx, &self.path)?;
+        commit(tx, &self.path, "commit a status write")?;
         Ok(Restored::Applied)
     }
 
@@ -370,28 +370,6 @@ fn current_status_on(
         .map_err(sqlite("read the current status"))?
         .decode(path)
         .map(Some)
-}
-
-/// Open a write transaction that takes the write lock immediately.
-fn begin<'a>(
-    conn: &'a mut rusqlite::Connection,
-    path: &Path,
-) -> Result<Transaction<'a>, StoreError> {
-    conn.transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|source| StoreError::Sqlite {
-            action: "begin a status write",
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
-/// Commit, reporting the path if it fails.
-fn commit(tx: Transaction<'_>, path: &Path) -> Result<(), StoreError> {
-    tx.commit().map_err(|source| StoreError::Sqlite {
-        action: "commit a status write",
-        path: path.to_path_buf(),
-        source,
-    })
 }
 
 /// The one path to disk, shared by both entry points.
