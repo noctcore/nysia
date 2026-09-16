@@ -107,6 +107,15 @@ harness moved. It is also the release where an agent session first exists — th
   are built per variant from phrases chosen in the file; the wrapped error goes to the daemon's
   own log at `warn`. The same split covers a project refusal that carried the daemon's database
   path, and `portable_pty` is held down in the log for the same reason.
+- **A path confinement that held on one platform now holds on both.** The refusal that lists
+  the repositories found inside a folder cut each name with `Path::file_name`, which splits on
+  the separators of the platform it was compiled for — so on Unix a backslash is an ordinary
+  character and `C:\Users\someone\Projekty\nysia` came back whole. The macOS leg caught it, on
+  the test written to prove the confinement holds. Cutting at `/` and `\` on every platform is
+  the fix, with a name that reduces to nothing dropped rather than listed as an empty string;
+  the test carries both spellings, a trailing separator and a name that is only separators, so
+  the next platform-dependent split reds both runners. The cost is recorded: a Unix folder
+  genuinely named `my\dir` is written down as `dir`.
 - **`NYSIA_LOG` cannot be spelled so as to undo the log's confinement.** Folding the confined
   targets in after the user's filter stopped `NYSIA_LOG=debug`, but not a directive naming a
   module: `EnvFilter` resolves a callsite against its longest matching target, so
