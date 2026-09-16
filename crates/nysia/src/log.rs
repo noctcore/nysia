@@ -151,7 +151,8 @@ fn note(what: &str) {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::{Arc, Mutex, Once};
 
     use nysia_core::pty::{PtySession, SessionSpec};
@@ -592,6 +593,150 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// Names the directory a child plants its spawn in, and so carries the marker with it.
+    const PLANT_DIR: &str = "NYSIA_LOGRULE_PLANT_DIR";
+
+    /// Printed by a child that got all the way through, so "passed" and "never ran" differ.
+    const CHILD_OK: &str = "NYSIA-LOGRULE-CHILD-OK";
+
+    /// A child test's own libtest name, which is its module path minus the crate.
+    fn child_test_name(leaf: &str) -> String {
+        let path = module_path!();
+        let without_crate = path.split_once("::").map_or(path, |(_, rest)| rest);
+        format!("{without_crate}::{leaf}")
+    }
+
+    /// Run `leaf` in a fresh copy of this test binary, with the environment set on it alone.
+    ///
+    /// By re-exec, not by `std::env::set_var`. `cargo test` runs every test in this binary on
+    /// threads of one process, [`filter`] reads the environment on the call, and mutating it
+    /// while another thread reads it is a data race POSIX does not defend against — which is
+    /// why the 2024 edition made `set_var` `unsafe`. `nysia_core::agent::claude::launch`
+    /// arranges a `PATH` the same way, for the same reason.
+    ///
+    /// Both variables are set *or removed* explicitly rather than left to whatever the
+    /// harness inherited. A developer with `NYSIA_LOG_UNCONFINED` exported would otherwise
+    /// turn the confined leg into a second copy of the control, and it would pass.
+    fn drive_child(leaf: &str, dir: &Path, asked: Option<&str>, lifted: bool) -> (bool, String) {
+        let exe = std::env::current_exe().expect("the test binary");
+        let mut command = Command::new(exe);
+        command
+            .args([
+                "--exact",
+                &child_test_name(leaf),
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(PLANT_DIR, dir);
+        if let Some(value) = asked {
+            command.env(log_file::LOG_ENV, value);
+        } else {
+            command.env_remove(log_file::LOG_ENV);
+        }
+        if lifted {
+            command.env(log_file::UNCONFINED_ENV, "1");
+        } else {
+            command.env_remove(log_file::UNCONFINED_ENV);
+        }
+
+        let output = command.output().expect("the child test binary runs");
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        (output.status.success(), text)
+    }
+
+    #[test]
+    fn the_runtime_branch_confines_unless_the_way_out_is_named() {
+        // The line every other test in this module sits below. All of them call `confined`
+        // or `unconfined` directly, which is to say they have already decided which branch
+        // [`filter`] takes — so all of them stayed green when that branch was mutated to
+        // take the unconfined one unconditionally. This is the one that reddens.
+        //
+        // **Which leg exercises what.** Both legs run the same child, which installs the
+        // subscriber `main` installs — `filter()` for the filter, stderr for the writer —
+        // and then plants a spawn that cannot succeed, in a directory whose name is a
+        // marker. One variable differs between them. With `NYSIA_LOG_UNCONFINED` set, the
+        // marker is in what the child wrote and `LEAKING_TARGET` names the module that wrote
+        // it, which is a different module on each platform. With it removed, the same
+        // `NYSIA_LOG` in the same child produces none of it.
+        //
+        // Three values, because *which* `NYSIA_LOG` is the other half of the question.
+        // Removed is the shipped default and every ordinary run of this binary. `trace` is
+        // somebody raising the level to debug the spawn that just failed. The third names
+        // the module that actually wrote the line, which is the spelling the screen exists
+        // for — and the one that also has this process print a refusal, so the confined leg
+        // is not silent about what it would not honour.
+        let leaf = "a_child_that_logs_through_the_real_filter";
+        let module_qualified = format!("{LEAKING_TARGET}=trace");
+
+        for (nth, asked) in [None, Some("trace"), Some(module_qualified.as_str())]
+            .into_iter()
+            .enumerate()
+        {
+            let (marker, dir) = a_marked_directory(&format!("branch-{nth}"));
+
+            let (ok, lifted) = drive_child(leaf, &dir, asked, true);
+            assert!(
+                ok,
+                "NYSIA_LOG={asked:?}: the control child failed:\n{lifted}"
+            );
+            assert!(
+                lifted.contains(CHILD_OK),
+                "NYSIA_LOG={asked:?}: the control child was filtered out rather than run, so \
+                 nothing below it means anything:\n{lifted}"
+            );
+            assert!(
+                lifted.contains(&marker),
+                "NYSIA_LOG={asked:?}: nothing leaked even with the way out named, so the \
+                 confined leg would hold for the wrong reason:\n{lifted}"
+            );
+            assert!(
+                lifted.contains(LEAKING_TARGET),
+                "NYSIA_LOG={asked:?}: this leg's leak was expected from {LEAKING_TARGET} and \
+                 came from elsewhere; `portable_pty` may have moved the call site, which \
+                 `log_file`'s docs cite by file and line:\n{lifted}"
+            );
+
+            let (ok, held) = drive_child(leaf, &dir, asked, false);
+            assert!(
+                ok,
+                "NYSIA_LOG={asked:?}: the confined child failed:\n{held}"
+            );
+            assert!(
+                held.contains(CHILD_OK),
+                "NYSIA_LOG={asked:?}: the confined child was filtered out rather than run, so \
+                 the assertion below would hold for the wrong reason:\n{held}"
+            );
+            assert!(
+                !held.contains(&marker),
+                "NYSIA_LOG={asked:?}: a path the caller offered reached the log of a process \
+                 nobody told to lift the confinement:\n{held}"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    #[ignore = "driven by its outer test, which sets NYSIA_LOG and the way out on this child"]
+    fn a_child_that_logs_through_the_real_filter() {
+        let dir = std::env::var_os(PLANT_DIR)
+            .map(PathBuf::from)
+            .expect("the outer test names a directory to plant the spawn in");
+
+        // `main`'s subscriber, spelled the way `main` spells it. `.init()` installs a global
+        // one and can happen once per process, which is the whole reason this runs in a
+        // process of its own — and it is also what stands up the `log`-to-`tracing` bridge,
+        // without which nothing the terminal crates write reaches a subscriber at all.
+        tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .with_writer(std::io::stderr)
+            .init();
+
+        plant_a_failed_spawn(&dir);
+        println!("{CHILD_OK}");
     }
 
     #[test]
