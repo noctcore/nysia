@@ -87,9 +87,10 @@
 //! | `Store::forget_project`'s zero-row answer | `Forgotten::Removed` | `forgetting_an_unknown_project_says_so` |
 //! | migration 2's `UNIQUE` on `projects.id` | dropped | `the_projects_table_refuses_a_duplicate_id` |
 //! | migration 2's tables | given one with `REFERENCES projects(id) ON DELETE CASCADE` | `nothing_cascades_from_forgetting_a_project` |
-//! | migration 2's column list | given a sixth column | `the_table_has_the_three_stored_fields_of_the_contract_and_two_keys` |
+//! | migration 2's column list | given a sixth column | `the_table_holds_the_registration_and_the_key_that_orders_it` |
 //!
-//! Two rows earned their wording the hard way. The deferred-transaction mutation turned
+//! Two proofs earned their wording the hard way, and only one of them is a row above. The
+//! deferred-transaction mutation turned
 //! `two_daemons_racing_one_registration_create_one_project` red in **two runs of five**
 //! before a barrier was put between opening the stores and registering — four threads drift
 //! apart over `Store::open`'s WAL check and migration scan, so they were not racing at all.

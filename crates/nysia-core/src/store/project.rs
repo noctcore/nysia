@@ -98,7 +98,10 @@ use crate::git::CanonicalPath;
 use super::error::StoreError;
 use super::{Store, begin, commit};
 
-/// The four §3.1 columns, in one order, for every `SELECT` in this module.
+/// The registration's columns, in one order, for every `SELECT` in this module.
+///
+/// Not "§3.1's columns": `path` is not one of §3.1's fields — it is the column the wire
+/// deliberately does not carry — and §3.1's `worktrees` is not a column at all.
 ///
 /// One string rather than one per query, for the reason `status`'s own column list gives:
 /// the order is what the index positions in [`StoredProject::read`] mean. `group` is quoted
@@ -805,10 +808,16 @@ mod tests {
     }
 
     #[test]
-    fn the_table_has_the_three_stored_fields_of_the_contract_and_two_keys() {
-        // A stated total is a fact about the list beneath it. §3.1 names four fields; three
-        // of them are stored, `worktrees` is composed live, and `path` is the one column the
-        // wire does not carry. `seq` orders and `id` identifies.
+    fn the_table_holds_the_registration_and_the_key_that_orders_it() {
+        // The list itself is the claim, so there is no total beside it to drift from it. The
+        // name this test had until round two — "the three stored fields of the contract and
+        // two keys" — was arithmetic rather than a roster: it double-counted `id`, which is
+        // both a stored field and a key, and left out `path` altogether. Anyone adding the
+        // two numbers reached five for the wrong reasons.
+        //
+        // What the five are: `seq` orders, `id` identifies, `path` is the one column the wire
+        // does not carry, and `name` and `group` are §3.1's two labels. `worktrees` is not
+        // here because it is composed live.
         let (dir, path) = temp_db("project-columns");
         let store = Store::open(&path).expect("open");
         let conn = raw(&store);
@@ -828,7 +837,6 @@ mod tests {
             "the ordering key, the identity, the path, and §3.1's two labels — spelled as the \
              wire spells them"
         );
-        assert_eq!(columns.len(), 5, "five is the total, and this is the list");
         drop(statement);
         drop(conn);
         drop(store);
