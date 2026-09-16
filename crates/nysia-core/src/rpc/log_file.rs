@@ -118,28 +118,51 @@ use std::path::{Path, PathBuf};
 
 /// Targets whose own logging carries terminal bytes, and the level each is held to.
 ///
-/// `tracing_subscriber::EnvFilter` directives, applied **after** the user's `NYSIA_LOG` by
-/// every binary that installs a subscriber. A target-specific directive is more specific than
-/// a bare level, so these win over `NYSIA_LOG=debug`; adding one that names the same target
-/// replaces the user's, so they win over `NYSIA_LOG=vte=trace` as well. Both halves are held
-/// by `the_confinement_survives_a_user_who_asks_for_everything` in `nysia`'s `log` module.
+/// `tracing_subscriber::EnvFilter` directives, folded in by every binary that installs a
+/// subscriber *after* whatever `NYSIA_LOG` asked for — and folding them in is only half of
+/// it, because on its own it does not hold. `NYSIA_LOG` is put through
+/// [`screen_directives`] first and a directive that could reach one of these targets is
+/// refused rather than honoured. The two halves together are the guarantee; the next section
+/// is why neither is enough alone.
 ///
-/// That ordering is the whole point, and it is CLAUDE.md §6: *a security default that an
-/// ordinary caller can undo is not a default, it is a suggestion.* The previous arrangement
-/// let `NYSIA_LOG` replace the filter wholesale, so raising the level to debug something
-/// silently switched off a confinement the person did not know was there.
+/// That is CLAUDE.md §6: *a security default that an ordinary caller can undo is not a
+/// default, it is a suggestion.* Before the fold, `NYSIA_LOG` replaced the filter wholesale,
+/// so raising the level to debug something silently switched off a confinement the person did
+/// not know was there. Before the screen, naming a module did the same thing — which is
+/// worse, because the string that does it is the one somebody reaches for while debugging the
+/// very subsystem whose bytes leak.
 ///
-/// # What these do not beat, which is measured rather than assumed
+/// # Why the fold is not enough on its own
 ///
-/// `EnvFilter` resolves a callsite against its *most specific* matching directive, and a
-/// module path is more specific than the crate name a directive here uses. So
-/// `NYSIA_LOG=vte::ansi=trace` still reaches the file, and `alacritty_terminal::term=trace`
-/// and `portable_pty::cmdbuilder=trace` do too. That is a property of the mechanism and not
-/// of this list — it is identical for all three entries, and adding a fourth would inherit
-/// it. Closing it means filtering `NYSIA_LOG`'s own directives before they are parsed, which
-/// is a change to `confine` in the two binaries rather than to this constant. It is written
-/// down because the guarantee above is the one that was measured, and a reader is entitled to
-/// know where it stops.
+/// `EnvFilter` resolves a callsite against its **most specific** matching directive, and
+/// specific means *long*: in `tracing-subscriber` 0.3.23, `StaticDirective::cares_about_target`
+/// matches with a plain `metadata.target().starts_with(directive_target)` and `Ord for
+/// StaticDirective` orders on `target.len()` before anything else. Every entry here names a
+/// crate, so any longer string that begins with that crate's name out-specifies it and wins:
+///
+/// ```text
+/// NYSIA_LOG=vte::ansi=trace                     every unhandled OSC parameter, verbatim
+/// NYSIA_LOG=portable_pty::win::pseudocon=trace  a failed spawn's command line and its cwd
+/// NYSIA_LOG=vte:=trace                          the same as the first, and not even a path
+/// ```
+///
+/// The third is what decides the shape of the screen. `vte:` is four characters where `vte`
+/// is three, and `"vte::ansi".starts_with("vte:")` is true, so a target that is not a Rust
+/// module path at all still out-specifies this list. A `::`-boundary test would have let it
+/// through. So the screen refuses any target that *begins with* a confined crate's name,
+/// which is deliberately a little wider than the set that can actually reach one.
+///
+/// A span or field directive is refused whatever target it names, and it is a different hole
+/// rather than the same one. `EnvFilter::enabled` consults its *dynamic* directives first and
+/// returns `true` straight out of the span scope before a single target directive is looked
+/// at, so `NYSIA_LOG=[x]=trace` enables every event raised inside a span called `x`, on every
+/// target, however this list is spelled.
+///
+/// # The way out, which is named rather than stumbled into
+///
+/// [`UNCONFINED_ENV`] lifts all of it, and is the only thing that does. A developer who needs
+/// to watch the parser sets that as well, on purpose, and the binaries say so at startup. See
+/// its docs for why the escape hatch is a second variable and not a level.
 ///
 /// # Why these three, and why at the level each names
 ///
@@ -187,6 +210,119 @@ use std::path::{Path, PathBuf};
 /// perfectly and confines nothing, because an `EnvFilter` target is a Rust path and this
 /// crate's is spelled with an underscore.
 pub const CONFINED_TARGETS: &[&str] = &["vte=off", "alacritty_terminal=warn", "portable_pty=off"];
+
+/// The environment variable every Nysia binary takes its filter from.
+///
+/// Named here rather than spelled out in each binary because [`screen_directives`] is what
+/// refuses a directive and the caller is what reports the refusal, and a message naming a
+/// different variable than the one the person set would be worse than no message at all.
+pub const LOG_ENV: &str = "NYSIA_LOG";
+
+/// The separately named way to ask for a log that [`CONFINED_TARGETS`] does not hold.
+///
+/// Set it to anything non-empty and the confinement is not applied at all: `NYSIA_LOG` is
+/// honoured verbatim, `vte::ansi=trace` included, and the resulting file can contain terminal
+/// output, a window title, an environment block and the working directory of a spawn — all
+/// of which the module docs above say a Nysia log never contains. It is not a file to attach
+/// to an issue.
+///
+/// CLAUDE.md §6 asks for this shape: *where a deliberate override is genuinely needed, put it
+/// behind a separately named entry point whose name says so, so the call site is obvious in
+/// review and greppable — never on the path everyone already uses.* A second variable is what
+/// makes the two cases different in kind rather than in degree. Somebody debugging a spawn
+/// that failed raises the level and gets no terminal bytes; somebody who has decided they
+/// need the parser's own output types a word that says `UNCONFINED` and is told what that
+/// means. Neither can happen to the other by accident, and `rg NYSIA_LOG_UNCONFINED` finds
+/// every place it is honoured.
+pub const UNCONFINED_ENV: &str = "NYSIA_LOG_UNCONFINED";
+
+/// Whether this process was asked, by [`UNCONFINED_ENV`]'s own name, to drop the confinement.
+///
+/// Empty counts as unset. `NYSIA_LOG_UNCONFINED=` is what a shell is left holding when
+/// somebody clears it, and reading that as *yes* would make the override outlive the
+/// intention behind it.
+#[must_use]
+pub fn confinement_lifted() -> bool {
+    std::env::var_os(UNCONFINED_ENV).is_some_and(|value| !value.is_empty())
+}
+
+/// A `NYSIA_LOG` value, split in two by [`screen_directives`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Screened<'a> {
+    /// The directives that cannot reach a [`CONFINED_TARGETS`] target, in the order written.
+    pub honoured: Vec<&'a str>,
+    /// The directives that could have, and were dropped instead.
+    ///
+    /// Empty for every `NYSIA_LOG` anybody ordinarily sets. A caller is expected to say when
+    /// it is not, because a directive that is silently ignored is indistinguishable from one
+    /// that did not do anything, and the person is owed the name of the way round it.
+    pub refused: Vec<&'a str>,
+}
+
+/// Split a `NYSIA_LOG` value into the directives that can be honoured and the ones that would
+/// undo [`CONFINED_TARGETS`].
+///
+/// Splitting on `,` and dropping the empty pieces is exactly what `EnvFilter` does with the
+/// same string — `Builder::parse` in `tracing-subscriber` 0.3.23 — so a directive that
+/// survives this reaches the filter spelled the way it was written, and nothing here can
+/// change what a legitimate one means.
+///
+/// A directive is refused when either of these is true:
+///
+/// - its target begins with a confined crate's name, so it can out-specify the entry holding
+///   that crate down. Why that is `starts_with` and not a module-path test is above.
+/// - it carries a span or field selector, which is to say it contains a `[`. Those are
+///   resolved out of the span scope before any target directive is consulted, so one of them
+///   enables every target at its level. The harmless spelling — a field *name* with no value,
+///   which `EnvFilter` keeps among its static directives — is refused with the rest, because
+///   telling the two apart means reimplementing that crate's grammar to decide a safety
+///   question, and wider is the right direction to be wrong in here.
+///
+/// Everything else is honoured untouched, a bare level included: `NYSIA_LOG=trace` names no
+/// target, and a directive with no target is the least specific thing `EnvFilter` has, so
+/// every entry in [`CONFINED_TARGETS`] already beats it.
+///
+/// This screens rather than rewrites. A refused directive is dropped whole and never edited
+/// down to something safe, because a filter the person did not write is a filter they cannot
+/// reason about — and the caller can then name the string it would not honour.
+#[must_use]
+pub fn screen_directives(asked: &str) -> Screened<'_> {
+    let (refused, honoured): (Vec<&str>, Vec<&str>) = asked
+        .split(',')
+        .filter(|directive| !directive.is_empty())
+        .partition(|directive| reaches_a_confined_target(directive));
+    Screened { honoured, refused }
+}
+
+/// Whether `directive` could enable a callsite [`CONFINED_TARGETS`] is holding down.
+///
+/// Trimmed first, and that is not cosmetic: the check has to see at least as much of the
+/// target as `EnvFilter` will, and leading space is the one way a directive could otherwise
+/// look like it names something else.
+fn reaches_a_confined_target(directive: &str) -> bool {
+    let directive = directive.trim();
+    if directive.contains('[') {
+        return true;
+    }
+    let target = directive
+        .split_once('=')
+        .map_or(directive, |(target, _level)| target)
+        .trim();
+    confined_crates().any(|krate| target.starts_with(krate))
+}
+
+/// The crate each [`CONFINED_TARGETS`] entry names.
+///
+/// Derived from the list rather than written down beside it, so a fourth entry is screened on
+/// the day it is added and there is no second roster to keep in step with the first.
+/// `the_screen_refuses_a_directive_under_every_confined_crate` is what holds that.
+fn confined_crates() -> impl Iterator<Item = &'static str> {
+    CONFINED_TARGETS.iter().copied().map(|directive| {
+        directive
+            .split_once('=')
+            .map_or(directive, |(krate, _)| krate)
+    })
+}
 
 /// How large one log file may get before it is rotated: 8 MiB.
 ///
@@ -369,6 +505,139 @@ mod tests {
 
     fn read(path: &Path) -> String {
         std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    /// The targets `screen_directives` is there to keep reachable-but-quiet, one per entry.
+    ///
+    /// Built from [`CONFINED_TARGETS`] rather than typed out, so this roster cannot fall
+    /// behind the list the way a hand-written one would.
+    fn a_module_under_each_confined_crate() -> Vec<String> {
+        confined_crates()
+            .map(|krate| format!("{krate}::somewhere=trace"))
+            .collect()
+    }
+
+    #[test]
+    fn the_screen_refuses_a_directive_under_every_confined_crate() {
+        // The completeness check, and the reason no test below writes `vte` three times. A
+        // fourth entry added to `CONFINED_TARGETS` is screened on the day it arrives, and if
+        // `confined_crates` ever stopped deriving the crate name from the entry — by being
+        // handed `vte=off` whole, say — every one of these would redden at once.
+        let under = a_module_under_each_confined_crate();
+        assert!(!under.is_empty(), "there is nothing to confine");
+
+        for directive in &under {
+            let screened = screen_directives(directive);
+            assert_eq!(
+                screened.refused,
+                vec![directive.as_str()],
+                "a module of a confined crate was honoured"
+            );
+            assert!(screened.honoured.is_empty(), "{directive} survived");
+        }
+    }
+
+    #[test]
+    fn a_target_that_only_extends_a_confined_crate_is_refused() {
+        // The case that decides `starts_with` over a `::`-boundary test, and the one a
+        // boundary test would let through. `vte:` is not a module path and names nothing,
+        // but `"vte::ansi".starts_with("vte:")` is true and four characters out-specify
+        // three, so `EnvFilter` would resolve `vte::ansi`'s callsite against it and hand
+        // over every byte of an unhandled OSC.
+        //
+        // `a_module_qualified_nysia_log_does_not_reach_the_log` in `nysia`'s `log` module is
+        // the end of this one: it sets exactly this string and reads the file back.
+        for directive in ["vte:=trace", "vte::=trace", "portable_pty:=trace"] {
+            assert_eq!(
+                screen_directives(directive).refused,
+                vec![directive],
+                "{directive} out-specifies the entry that holds that crate down"
+            );
+        }
+    }
+
+    #[test]
+    fn a_span_or_field_directive_is_refused_whatever_target_it_names() {
+        // A different hole from the one above, not a wider version of it. `EnvFilter::enabled`
+        // asks its dynamic directives first and returns `true` out of the span scope before a
+        // single target directive is consulted — so one of these enables `vte::ansi` at trace
+        // no matter how `CONFINED_TARGETS` is spelled, and even when it names a target that
+        // has nothing to do with a confined crate.
+        //
+        // `a_span_directive_does_not_reach_the_log` in `nysia`'s `log` module is this one
+        // measured: it enters the span and reads the log back, with and without the screen.
+        for directive in [
+            "[x]=trace",
+            "nysia_core[x]=trace",
+            "[{message}]=trace",
+            "[serve{verb=session_create}]=trace",
+        ] {
+            assert_eq!(
+                screen_directives(directive).refused,
+                vec![directive],
+                "{directive} reaches every target through the span scope"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_level_and_an_unrelated_target_are_honoured() {
+        // The other way a confinement goes wrong: refusing so much that `NYSIA_LOG` stops
+        // being worth setting. None of these can reach a confined callsite — a directive with
+        // no target is the least specific thing `EnvFilter` has, and `vt` is shorter than
+        // `vte`, so `vte=off` out-specifies both — and all of them are ordinary things to want.
+        for directive in [
+            "trace",
+            "debug",
+            "off",
+            "nysia_core=debug",
+            "nysia_core::rpc::server=trace",
+            "vt=trace",
+        ] {
+            let screened = screen_directives(directive);
+            assert_eq!(
+                screened.honoured,
+                vec![directive],
+                "{directive} was refused and did not need to be"
+            );
+            assert!(screened.refused.is_empty(), "{directive} was refused");
+        }
+    }
+
+    #[test]
+    fn the_rest_of_a_value_survives_one_refusal() {
+        // A refusal is not a reason to throw the whole variable away. Somebody debugging the
+        // daemon wrote three directives and one of them cannot be honoured; the other two are
+        // what they were actually trying to do, and they reach the filter spelled exactly as
+        // they were written — `screen_directives` screens, it never rewrites.
+        let screened = screen_directives("nysia_core=debug,vte::ansi=trace,nysia=trace");
+
+        assert_eq!(screened.honoured, vec!["nysia_core=debug", "nysia=trace"]);
+        assert_eq!(screened.refused, vec!["vte::ansi=trace"]);
+    }
+
+    #[test]
+    fn an_empty_value_asks_for_nothing_and_is_refused_nothing() {
+        // The shipped default: no `NYSIA_LOG` at all. Worth pinning because the callers turn
+        // an empty `honoured` into `info`, and "empty because nothing was asked for" and
+        // "empty because everything was refused" have to arrive at the same place.
+        for asked in ["", ",", ",,"] {
+            let screened = screen_directives(asked);
+            assert!(screened.honoured.is_empty(), "{asked:?}");
+            assert!(screened.refused.is_empty(), "{asked:?}");
+        }
+    }
+
+    #[test]
+    fn the_confinement_is_not_lifted_unless_its_own_variable_is_set() {
+        // The escape hatch is off by default, which is the whole of what makes it a hatch
+        // rather than a second door. If this fails on your machine, `NYSIA_LOG_UNCONFINED` is
+        // exported in the shell that ran it — which is exactly what it claims to do, and the
+        // logs that process writes are not ones to hand anybody.
+        assert!(
+            !confinement_lifted(),
+            "{UNCONFINED_ENV} is set in this environment"
+        );
     }
 
     #[test]
