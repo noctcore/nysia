@@ -1118,8 +1118,10 @@ impl SessionRegistry {
 /// string can be a shallower path.
 ///
 /// Ties cannot arise: two entries containing `path` at equal depth would have to be the same
-/// directory, and `git worktree list` does not print one twice. If one ever did, the first is
-/// taken and the answer is still exactly one worktree.
+/// directory, and `git worktree list` does not print one twice. If one ever did, `max_by_key`
+/// takes the **last** of them and the answer is still exactly one worktree — which is what
+/// matters here, and is said the way the code actually behaves rather than the way a reader
+/// might assume.
 fn deepest_containing<'a>(
     folders: &'a [CanonicalPath],
     path: &CanonicalPath,
