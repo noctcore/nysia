@@ -96,9 +96,16 @@ pub(super) const SCHEMA_VERSION: u32 = 2;
 ///
 /// # 2 — `projects`
 ///
-/// v0.3 §3.1's registered folder. **Four columns and one key**, and the four are the
-/// registration: everything else §3.1 lists is queried rather than stored, which
-/// [`crate::store::project`] says why at length.
+/// v0.3 §3.1's registered folder. `id`, `path`, `name` and `"group"` are the registration;
+/// `seq` is the order it was made in. Everything else §3.1 lists is queried rather than
+/// stored, which [`crate::store::project`] says why at length.
+///
+/// **No total is written down here, and that is the point.** The DDL is a dozen lines below
+/// and `the_table_holds_the_registration_and_the_key_that_orders_it` asserts the column list
+/// exactly, so a number in this prose would be a second place to keep in step — which is what
+/// [`SCHEMA_VERSION`]'s doc twenty lines up warns about, and what the first draft of this
+/// paragraph then did: it said four columns and one key over a table with five and two, and
+/// left `name` out of the bullets below. Add a count back and it will drift again.
 ///
 /// - `id` is the identity, and it carries the `UNIQUE` because of it. §3.2's idempotency is
 ///   "registering the same path twice is one project", the path's identity is
@@ -112,9 +119,12 @@ pub(super) const SCHEMA_VERSION: u32 = 2;
 ///   all after a restart, and this table is the **only** place Nysia writes a repository
 ///   path down — which is why the database file is owner-only (trap 14) and why no error
 ///   variant in this module echoes one.
-/// - `"group"` is quoted because `GROUP` is a SQL keyword. Quoting it is cheaper than a
-///   second spelling: `Project::group` is the field name on the wire, and a column called
-///   `group_name` would be one more mapping for a reader to hold.
+/// - `name` and `"group"` are §3.1's two labels, held exactly as they were handed over: the
+///   store persists display text and does not validate it, because a folder's name is
+///   whatever the filesystem allowed. `"group"` is quoted because `GROUP` is a SQL keyword,
+///   and quoting is cheaper than a second spelling — `Project::group` is the field name on
+///   the wire, and a column called `group_name` would be one more mapping for a reader to
+///   hold.
 /// - `seq` is registration order, which is the order the sidebar lists in. Declared rather
 ///   than left as the implicit `rowid` for the reason migration 1 gives.
 pub(super) const MIGRATIONS: &[Migration] = &[
