@@ -275,6 +275,36 @@ that did not ship, and it lands in 0.3.0.
   failures the way `nysia_core::rpc::transport` does, so only `NotFound` — and, on Unix, a
   socket that refuses — leads it to start a daemon.
 
+### Security
+
+- **The log's "no PTY output" rule now binds the crates Nysia links, not only the code it
+  writes.** It was a convention with a hole under it: Nysia links a VT, and the VT's own
+  logging prints terminal bytes. `vte`'s `ansi.rs` prints every byte of an OSC parameter it
+  does not handle, verbatim; `alacritty_terminal` prints the window title, which for a shell
+  is routinely the working directory. Both reach the subscriber through `tracing-log` — silent
+  at `info`, so the shipped default never leaked, and loud at `debug` and `trace`, which are
+  the levels somebody sets *because* they are debugging and are about to send the file to
+  support. `CONFINED_TARGETS` holds them at `off` and `warn`, folded in **after** whatever
+  `NYSIA_LOG` asked for rather than before it (§6), in both binaries — including the window,
+  which runs no VT under D-7, because "this one does not call it today" is the premise that
+  stops being true quietly. Tested both ways round: that the confinement survives a user who
+  asks for everything, and — since every other assertion is a `!contains` a typo would also
+  satisfy — that those bytes do reach the file without it. What it did not cover is a
+  directive naming a module *inside* a confined crate; that is `[0.3.0]`'s to report.
+- **A handle-inheritance guarantee a test could not have caught being broken.** Windows
+  inherits *every* inheritable handle when any stdio is redirected, and the daemon spawn has
+  to redirect. Detaching the parent's three standard handles is what stopped the reported case
+  — a daemon spawned inside `H=$(nysia session create)` held the shell's own stdout pipe open
+  for its whole life — but the test behind it read back only this process's standard handles,
+  which Rust never sets the inherit flag on, so it passed against a deleted body and against a
+  windowed process that has no standard handles at all. `detach_parent_stdio` is now
+  `stop_inheriting(&[handle])` over a named list, and the proof plants an inheritable handle
+  of its own and reads it back through `GetHandleInformation`; gutting the loop reds it. The
+  handle no caller can name is **not** closed, and is recorded rather than claimed: the fix
+  for it is `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, which needs `CommandExt::raw_attribute` —
+  absent on the rustc this repo pins — and two obstacles that would outlive a bump are written
+  down beside the function.
+
 ### Deliberately not in this release
 
 Not missing — not built:
