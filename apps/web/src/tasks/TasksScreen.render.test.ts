@@ -248,6 +248,21 @@ describe('honesty', () => {
     expect(loaded.slice(loaded.lastIndexOf('<div', at), at)).toMatch(/title="[^"]+"/);
   });
 
+  it('says it to a screen reader too, which a title alone does not', () => {
+    // `title` is a hover tooltip. The sentence explaining that the box is inert reached a
+    // sighted user pointing at it and nobody else: a screen reader was handed `is:issue
+    // is:open` as two loose spans with nothing to say what they were, which is the one group
+    // for whom "it obviously is not an input, look at it" is not an answer. The disabled
+    // buttons beside it are at least announced as disabled.
+    //
+    // `role` and `aria-label` are what fix it, and both are asserted because neither works
+    // alone: `aria-label` on a bare `div` has no role to name, and a role with no label is a
+    // region announced as "note" with no idea what the note is about.
+    const box = loaded.slice(loaded.lastIndexOf('<div', loaded.indexOf('is:issue is:open')));
+    expect(box).toMatch(/^<div[^>]*\srole="note"/);
+    expect(box).toMatch(/^<div[^>]*\saria-label="[^"]+"/);
+  });
+
   it('leaves the refresh live, because it is the one the failure panel points at', () => {
     const refresh = tagContaining(loaded, 'aria-label="Refresh the issue list"');
     expect(refresh).not.toContain('disabled="');

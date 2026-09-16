@@ -193,8 +193,19 @@ function FilterRow({
        * Not an input. It is a statement of the query that was actually sent — `is:issue
        * is:open` is what `gh issue list` asks by default — and a text box that accepted
        * typing and ignored it would be worse than one that does not accept it.
+       *
+       * **Its explanation reaches a screen reader, and it did not.** `title` is a hover
+       * tooltip: a sighted user learns from it that the box is inert, and a user who is not
+       * hovering anything was handed `is:issue is:open` with nothing to say what it was or
+       * why it could not be typed in — which is the one group for whom "it is obviously not
+       * an input, look at it" is not an answer. The disabled buttons beside it are at least
+       * announced as disabled. `role="note"` makes this a named region rather than two loose
+       * spans, and `aria-label` is where the sentence goes; the query itself still reads as
+       * the region's content.
        */}
       <div
+        role="note"
+        aria-label="The query Nysia sends. It cannot be edited in this version."
         title="The query Nysia sends. Editing it arrives with a later version."
         className="border-line bg-bg0 text-term flex min-w-0 flex-1 items-center gap-2 rounded-control border px-3 py-1.5 font-mono"
       >
