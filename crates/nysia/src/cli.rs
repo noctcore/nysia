@@ -26,7 +26,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
-use nysia_proto::{ReadMode, ShellProfile, WaitFor};
+use nysia_proto::{ReadMode, SessionKind, ShellProfile, WaitFor};
 
 /// The Nysia daemon and CLI.
 #[derive(Debug, Parser)]
@@ -147,7 +147,16 @@ pub struct StartArgs {
     /// The branch the worktree is keyed by. Created if it is not there yet.
     #[arg(long)]
     pub branch: String,
-    /// Which shell to run. Omit for the platform's default.
+    /// Which session to start. A shell unless this says otherwise.
+    ///
+    /// Parsed as [`SessionKind`] itself — clap uses that type's `FromStr`, so the two
+    /// spellings live in `nysia-proto` (D-13) and a third one never becomes a request.
+    #[arg(long, default_value_t = SessionKind::Shell)]
+    pub kind: SessionKind,
+    /// Which shell to run, with `--kind shell`. Omit for the platform's default.
+    ///
+    /// Combined with `--kind agent` is refused rather than ignored: a profile names a
+    /// shell, and an agent is not one.
     #[arg(long, value_enum)]
     pub profile: Option<ProfileArg>,
     /// Which WSL distribution, with `--profile wsl`. Omit for the default one.
@@ -807,6 +816,11 @@ mod tests {
         };
         assert_eq!(args.branch, "feat/x");
         assert_eq!(args.id, "proj_x");
+        assert_eq!(
+            args.kind,
+            SessionKind::Shell,
+            "a start is a shell unless --kind says otherwise"
+        );
 
         assert!(
             Cli::parse_from_argv(["nysia", "project", "start", "proj_x", "--issue", "42"]).is_err(),
@@ -814,6 +828,39 @@ mod tests {
         );
         // And the branch is required rather than derived from anything.
         assert!(Cli::parse_from_argv(["nysia", "project", "start", "proj_x"]).is_err());
+    }
+
+    #[test]
+    fn starting_takes_a_kind_and_a_typo_never_leaves_the_parser() {
+        // clap parses `--kind` as SessionKind itself (FromStr in nysia-proto), so the two
+        // spellings cannot drift from the wire and a third one never becomes a request.
+        let Mode::Client(verb) = parse(&[
+            "nysia", "project", "start", "proj_x", "--branch", "feat/x", "--kind", "shell",
+        ])
+        .into_mode() else {
+            panic!("a start is a client verb");
+        };
+        let Verb::ProjectStart(args) = *verb else {
+            panic!("a start parses as one");
+        };
+        assert_eq!(args.kind, SessionKind::Shell);
+
+        let Mode::Client(verb) = parse(&[
+            "nysia", "project", "start", "proj_x", "--branch", "feat/x", "--kind", "agent",
+        ])
+        .into_mode() else {
+            panic!("a start is a client verb");
+        };
+        let Verb::ProjectStart(args) = *verb else {
+            panic!("a start parses as one");
+        };
+        assert_eq!(args.kind, SessionKind::Agent);
+
+        let err = Cli::parse_from_argv([
+            "nysia", "project", "start", "proj_x", "--branch", "e1-x", "--kind", "nonsense",
+        ])
+        .expect_err("a third kind is a clap error, not a daemon round trip");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

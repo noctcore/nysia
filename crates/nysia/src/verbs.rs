@@ -282,13 +282,31 @@ fn start_request(args: &StartArgs) -> Result<ProjectStart, VerbError> {
             "pass the branch the worktree is keyed by, as in `--branch feat/projects`",
         ));
     }
+    if args.kind == SessionKind::Agent {
+        // A profile (and its distro) name a shell. Passing either with `--kind agent`
+        // would travel to the daemon and be ignored — `program_for` only consults the
+        // profile on a shell — which is a flag silently doing nothing.
+        if args.profile.is_some() {
+            return Err(VerbError::argument(
+                "--profile names a shell, and --kind agent is not one",
+                "omit --profile, or pass --kind shell",
+            ));
+        }
+        if args.distro.is_some() {
+            return Err(VerbError::argument(
+                "--distro names a WSL distribution for a shell, and --kind agent is not one",
+                "omit --distro, or pass --kind shell",
+            ));
+        }
+    }
     Ok(ProjectStart {
         project: parse_project_id(&args.id)?,
         branch: args.branch.clone(),
-        // v0.1 serves shell sessions and the daemon refuses an agent one with next steps
-        // naming the version that serves it. Offering `--kind agent` here would be a flag
-        // this build cannot honour.
-        kind: SessionKind::Shell,
+        // The daemon serves both kinds: SessionRegistry::create takes the request's kind
+        // and program_for decides what is spawned. A shell is the default so every
+        // existing invocation stays a shell; `--kind agent` asks for the Claude CLI in
+        // the worktree.
+        kind: args.kind,
         profile: args
             .profile
             .map(|profile| profile.to_wire(args.distro.clone())),
@@ -817,6 +835,62 @@ mod tests {
             rows: 30,
             json: false,
         }
+    }
+
+    fn start_args() -> StartArgs {
+        StartArgs {
+            id: "proj_0123456789abcdef0123456789abcdef".to_owned(),
+            branch: "feat/x".to_owned(),
+            kind: SessionKind::Shell,
+            profile: None,
+            distro: None,
+            json: false,
+        }
+    }
+
+    #[test]
+    fn a_start_defaults_to_a_shell_and_can_ask_for_an_agent() {
+        let shell = start_request(&start_args()).expect("the defaults are valid");
+        assert_eq!(shell.kind, SessionKind::Shell);
+        assert!(shell.profile.is_none());
+
+        let agent = start_request(&StartArgs {
+            kind: SessionKind::Agent,
+            ..start_args()
+        })
+        .expect("an agent start with no profile is valid");
+        assert_eq!(agent.kind, SessionKind::Agent);
+        assert!(agent.profile.is_none());
+
+        let profiled = start_request(&StartArgs {
+            profile: Some(ProfileArg::Pwsh),
+            ..start_args()
+        })
+        .expect("a shell may name a profile");
+        assert_eq!(profiled.kind, SessionKind::Shell);
+        assert_eq!(profiled.profile, Some(nysia_proto::ShellProfile::Pwsh));
+    }
+
+    #[test]
+    fn a_shell_profile_is_refused_on_an_agent_start() {
+        // `--kind agent --profile pwsh` must not become a request whose profile is then
+        // ignored: a flag silently doing nothing is the thing this repository keeps finding
+        // in review.
+        let err = start_request(&StartArgs {
+            kind: SessionKind::Agent,
+            profile: Some(ProfileArg::Pwsh),
+            ..start_args()
+        })
+        .expect_err("a profile names a shell");
+        assert!(!err.envelope().next_steps().is_empty());
+
+        let err = start_request(&StartArgs {
+            kind: SessionKind::Agent,
+            distro: Some("Ubuntu-24.04".to_owned()),
+            ..start_args()
+        })
+        .expect_err("a distro names a shell");
+        assert!(!err.envelope().next_steps().is_empty());
     }
 
     #[test]
