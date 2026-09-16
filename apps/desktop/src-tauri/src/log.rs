@@ -73,8 +73,8 @@
 //! `NYSIA_LOG_UNCONFINED=1 NYSIA_LOG=nysia_core=debug` by a window that never said what its
 //! log had become. The announcement went through the one filter it is about.
 //!
-//! The daemon has neither problem, because its note is an `eprintln!` that no filter sees and
-//! its stderr *is* its log. This side needed the same property and the file handle is what
+//! The daemon has neither problem, because its note is a plain stderr write that no filter
+//! sees and its stderr *is* its log. This side needed the same property and the handle is what
 //! gives it: [`install`] holds it before `.init()` takes ownership, so the lines go in through
 //! the same tee the subscriber is about to use — the file, and the stderr `pnpm dev` shows —
 //! and they land ahead of everything else in it, including the window's own "logging here".
