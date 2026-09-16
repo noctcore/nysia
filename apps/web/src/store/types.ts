@@ -169,9 +169,9 @@ export interface StoreSnapshot {
    * this list, it is fetched on every connect, and a red *"addProject failed"* box on every
    * launch is how a user learns to dismiss the notice list unread.
    *
-   * There is one answer it is guaranteed to carry today. v0.3 wave C1 serves the project
-   * verbs; until it lands the daemon answers `unsupported`, with a sentence saying which
-   * build is which and how to compare them. That is the honest thing for the sidebar to say
+   * There is one answer it carries whenever the two halves are out of step. The project
+   * verbs landed in v0.3; a daemon that predates them answers `unsupported`, with a sentence
+   * saying which build is which and how to compare them. That is the honest thing to say
    * — and the reason the ten seeded project names had to go, because *"the daemon has never
    * heard of a project"* and a list of plausible names is the one thing that cannot be read
    * off the screen.

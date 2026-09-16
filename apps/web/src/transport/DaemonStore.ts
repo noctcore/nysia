@@ -886,9 +886,9 @@ export class DaemonStore implements Store {
 
     // Deliberately after the try, and deliberately unable to throw. The sessions are what
     // this connection is *for*; the project list is something the sidebar would like. A
-    // daemon that does not serve the verb yet is every daemon until wave C1, and putting
-    // this inside the sequence above turned that into an endless reconnect against a
-    // refusal that said, in the envelope, that waiting would not help.
+    // daemon too old to serve the verb refuses it outright, and putting this inside the
+    // sequence above turned that into an endless reconnect against a refusal that said, in
+    // the envelope, that waiting would not help.
     await this.#refreshProjects();
 
     this.#update((current) => ({ ...current, status: 'ready' }));
