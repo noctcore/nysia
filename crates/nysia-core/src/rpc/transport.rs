@@ -191,18 +191,7 @@ impl Listener {
         let inner = match endpoint.listening() {
             #[cfg(unix)]
             Listening::UnixSocket(path) => {
-                let listener = tokio::net::UnixListener::bind(path).map_err(|source| {
-                    if source.kind() == io::ErrorKind::AddrInUse {
-                        TransportError::AlreadyBound {
-                            endpoint: path.display().to_string(),
-                        }
-                    } else {
-                        TransportError::Bind {
-                            endpoint: path.display().to_string(),
-                            source,
-                        }
-                    }
-                })?;
+                let listener = bind_unix(path)?;
                 restrict_socket_to_owner(path);
                 Inner::Unix(listener)
             }
@@ -405,6 +394,115 @@ pub async fn connect(endpoint: &Endpoint) -> Result<Connection, TransportError> 
     }
 }
 
+/// Bind a Unix socket, binding past one a crashed daemon left behind.
+///
+/// # What `AddrInUse` actually means
+///
+/// On Unix the endpoint is a file, and `bind` refuses whenever that file exists. A daemon
+/// that was killed skips the [`Drop`] above, so the file outlives it — and the replacement
+/// then reads `AddrInUse` as "another daemon holds the endpoint", answers
+/// [`TransportError::AlreadyBound`], and `nysia --daemon` **exits zero having served
+/// nobody**. Every client that follows is told nothing is listening by a process that
+/// reported success. The Windows column of this module's table is why this has never been
+/// seen there: a pipe name *is* the object and stops existing with the last handle to it.
+///
+/// So `AddrInUse` is not the answer, it is the question. The answer is the one
+/// [`crate::rpc::discovery`] already gives for a stale lease: **decide by trying to reach
+/// what it names, never by the fact that it is there.** A socket that refuses a connection
+/// has nothing behind it.
+///
+/// # What is unlinked, and what is not
+///
+/// Only a **socket** whose `(dev, ino)` is still the one that was probed. Not a regular
+/// file, not a symlink, not a socket that has been replaced since — each of those leaves
+/// the file alone and reports `AlreadyBound`, which is the conservative answer and the one
+/// this function had before. A probe that fails for any reason other than "refused" is also
+/// `AlreadyBound`: an endpoint that cannot be reasoned about is not one to delete.
+///
+/// The identity check is what keeps a race between two starting daemons from costing one of
+/// them its socket. Both probe the stale file and find it refused; the first unlinks it and
+/// binds; the second sees an inode that is no longer the one it probed, declines to unlink,
+/// and its retry answers `AlreadyBound` — which is true, and was not true a moment earlier.
+/// Without the check the second would unlink the *first daemon's live socket* and bind over
+/// it, leaving a daemon listening on a path no client can name.
+///
+/// A window remains between the identity check and the unlink, in which another daemon
+/// could bind. It is a few instructions wide, it needs two daemons started in the same
+/// instant on one runtime directory, and the spawn lock in [`crate::rpc::discovery`] already
+/// serialises every daemon Nysia starts for itself — two at once means two people running
+/// `nysia --daemon` by hand. Closing it properly needs a lock this module does not own, and
+/// the failure it would prevent is one idle daemon exiting on its own timer.
+#[cfg(unix)]
+fn bind_unix(path: &std::path::Path) -> Result<tokio::net::UnixListener, TransportError> {
+    let already_bound = || TransportError::AlreadyBound {
+        endpoint: path.display().to_string(),
+    };
+    let bind = |source: io::Error| {
+        if source.kind() == io::ErrorKind::AddrInUse {
+            already_bound()
+        } else {
+            TransportError::Bind {
+                endpoint: path.display().to_string(),
+                source,
+            }
+        }
+    };
+
+    match tokio::net::UnixListener::bind(path) {
+        Ok(listener) => return Ok(listener),
+        Err(source) if source.kind() == io::ErrorKind::AddrInUse => {}
+        Err(source) => return Err(bind(source)),
+    }
+
+    // Sampled before the probe, so the comparison after it spans the whole of the window in
+    // which the file could have been replaced.
+    let probed = socket_identity(path);
+    match std::os::unix::net::UnixStream::connect(path) {
+        // Something answered. This is the case `AlreadyBound` was written for, and the only
+        // one in which it is true.
+        Ok(_) => return Err(already_bound()),
+        Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => {}
+        // The file went away between the bind and the probe — most likely the daemon that
+        // held it shutting down cleanly. There is nothing to unlink and the retry below is
+        // the whole of what is left to do.
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(already_bound()),
+    }
+
+    if let Some(probed) = probed {
+        if socket_identity(path) != Some(probed) {
+            return Err(already_bound());
+        }
+        tracing::info!(
+            endpoint = %path.display(),
+            "the endpoint was a socket with nothing behind it; removing it and binding"
+        );
+        if std::fs::remove_file(path).is_err() {
+            return Err(already_bound());
+        }
+    }
+
+    // A second `AddrInUse` here is somebody who won the race in the moment the unlink opened,
+    // and `AlreadyBound` is the true answer to it.
+    tokio::net::UnixListener::bind(path).map_err(bind)
+}
+
+/// A socket's `(device, inode)`, or `None` for anything that is not one.
+///
+/// [`std::fs::symlink_metadata`] rather than `metadata`, so a symlink is judged as itself
+/// rather than as whatever it points at. A symlink at the endpoint is not a socket this
+/// function will report, and so is never a file [`bind_unix`] will remove.
+#[cfg(unix)]
+fn socket_identity(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_socket() {
+        return None;
+    }
+    Some((metadata.dev(), metadata.ino()))
+}
+
 /// Narrow a bound socket to its owner.
 ///
 /// Best effort, and the directory is already 0700 — this is the second lock on the same
@@ -470,6 +568,115 @@ mod tests {
             Listener::bind(&endpoint),
             Err(TransportError::AlreadyBound { .. })
         ));
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// The crash-recovery path, which had never been exercised anywhere.
+    ///
+    /// A killed daemon skips [`Listener`]'s `Drop`, so its socket file outlives it. `bind`
+    /// refuses any path that exists, and before this the refusal was reported as
+    /// `AlreadyBound` — which `daemon.rs` turns into `Outcome::AlreadyRunning` and `main.rs`
+    /// into a **zero exit**, so `nysia --daemon` succeeded having served nobody.
+    ///
+    /// `std::os::unix::net::UnixListener` is the one that leaves the file behind: std does
+    /// not unlink on drop, which is exactly what a killed process does not get to do either.
+    /// The assertion that the file is still there is not decoration — without it a std that
+    /// started unlinking would leave this test binding a clean path and passing for nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_socket_a_killed_daemon_left_behind_does_not_stop_its_replacement() {
+        let endpoint = crate::rpc::endpoint::scratch("stale");
+        let Listening::UnixSocket(path) = endpoint.listening() else {
+            panic!("a unix endpoint is a socket");
+        };
+
+        let crashed = std::os::unix::net::UnixListener::bind(path).expect("the first binds");
+        drop(crashed);
+        assert!(
+            std::fs::symlink_metadata(path).is_ok(),
+            "std leaves the socket file behind, which is the whole premise of this test"
+        );
+
+        let mut listener = Listener::bind(&endpoint).expect("the replacement binds past it");
+
+        // Bound, and *serving*: a `bind` that returned `Ok` on a path no client can reach
+        // would be the same failure one layer down.
+        let dialling = tokio::spawn({
+            let endpoint = endpoint.clone();
+            async move { connect(&endpoint).await.map(|_| ()) }
+        });
+        listener.accept().await.expect("accepts");
+        dialling.await.expect("joins").expect("a client reaches it");
+
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// The mutation that proves the test above trips for its own reason (traps register #12).
+    ///
+    /// Unlinking whatever is in the way would pass that test perfectly and would also let a
+    /// second daemon displace a live one. This is the same path with something *behind* the
+    /// socket, and the answer has to be the opposite: `AlreadyBound`, with the live socket
+    /// still there afterwards. `a_second_daemon_cannot_bind_an_endpoint_that_is_already_held`
+    /// checks the error; this checks that the file survived, which is the half a careless
+    /// unlink would break while still returning the right error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_socket_with_a_daemon_behind_it_is_neither_taken_nor_unlinked() {
+        use std::os::unix::fs::MetadataExt;
+
+        let endpoint = crate::rpc::endpoint::scratch("live-socket");
+        let Listening::UnixSocket(path) = endpoint.listening() else {
+            panic!("a unix endpoint is a socket");
+        };
+        let held = Listener::bind(&endpoint).expect("the first binds");
+        let before = std::fs::symlink_metadata(path)
+            .expect("the socket is there")
+            .ino();
+
+        assert!(
+            matches!(
+                Listener::bind(&endpoint),
+                Err(TransportError::AlreadyBound { .. })
+            ),
+            "a daemon is answering there, so the endpoint is genuinely taken"
+        );
+        let after = std::fs::symlink_metadata(path)
+            .expect("the live socket must still be there")
+            .ino();
+        assert_eq!(
+            before, after,
+            "the loser of the race unlinked the winner's socket"
+        );
+
+        drop(held);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// The second half of the mutation: only a *socket* is ever removed.
+    ///
+    /// A regular file at the endpoint also makes `bind` answer `AddrInUse`, and an
+    /// implementation that unlinked on that answer would delete it. It is inside the daemon's
+    /// own 0700 runtime directory and it is still not this function's to remove — "it was in
+    /// the way" is the reasoning that turns a bind into a delete of something somebody meant
+    /// to keep.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_file_that_is_not_a_socket_is_left_where_it_is() {
+        let endpoint = crate::rpc::endpoint::scratch("not-a-socket");
+        let Listening::UnixSocket(path) = endpoint.listening() else {
+            panic!("a unix endpoint is a socket");
+        };
+        std::fs::write(path, b"not a socket").expect("writes the file");
+
+        assert!(matches!(
+            Listener::bind(&endpoint),
+            Err(TransportError::AlreadyBound { .. })
+        ));
+        assert_eq!(
+            std::fs::read(path).expect("the file must still be there"),
+            b"not a socket"
+        );
+
         let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
     }
 
