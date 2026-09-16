@@ -62,7 +62,7 @@ pub(super) struct Migration {
 /// Held equal to the last entry of [`MIGRATIONS`] by
 /// `the_schema_version_is_the_last_migration`, because a stated total that can drift from the
 /// list beneath it is a number nobody can trust.
-pub(super) const SCHEMA_VERSION: u32 = 1;
+pub(super) const SCHEMA_VERSION: u32 = 2;
 
 /// Every migration, in the order they apply.
 ///
@@ -93,10 +93,35 @@ pub(super) const SCHEMA_VERSION: u32 = 1;
 /// carries the interior NUL that truncates a C string.
 ///
 /// The index covers the one access path there is: newest-first within a `(pane, agent_id)`.
-pub(super) const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "agent_status",
-    sql: "
+///
+/// # 2 — `projects`
+///
+/// v0.3 §3.1's registered folder. **Four columns and one key**, and the four are the
+/// registration: everything else §3.1 lists is queried rather than stored, which
+/// [`crate::store::project`] says why at length.
+///
+/// - `id` is the identity, and it carries the `UNIQUE` because of it. §3.2's idempotency is
+///   "registering the same path twice is one project", the path's identity is
+///   [`nysia_proto::ProjectId`], and a constraint on `name` instead would refuse two real
+///   folders that happen to be called `nysia`. There is deliberately no `UNIQUE` on `path`:
+///   the id is a function of the path, so one already implies the other, and a second
+///   constraint would only differ from the first on a digest collision — where the useful
+///   report is the one naming the identity that collided.
+/// - `path` is the canonical path the id was derived from, spelled as
+///   [`crate::git::CanonicalPath`] resolved it. The daemon needs it to ask git anything at
+///   all after a restart, and this table is the **only** place Nysia writes a repository
+///   path down — which is why the database file is owner-only (trap 14) and why no error
+///   variant in this module echoes one.
+/// - `"group"` is quoted because `GROUP` is a SQL keyword. Quoting it is cheaper than a
+///   second spelling: `Project::group` is the field name on the wire, and a column called
+///   `group_name` would be one more mapping for a reader to hold.
+/// - `seq` is registration order, which is the order the sidebar lists in. Declared rather
+///   than left as the implicit `rowid` for the reason migration 1 gives.
+pub(super) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "agent_status",
+        sql: "
         CREATE TABLE agent_status (
             seq                  INTEGER PRIMARY KEY,
             pane                 TEXT    NOT NULL,
@@ -111,7 +136,21 @@ pub(super) const MIGRATIONS: &[Migration] = &[Migration {
         CREATE INDEX agent_status_by_agent
             ON agent_status (pane, agent_id, seq DESC);
     ",
-}];
+    },
+    Migration {
+        version: 2,
+        name: "projects",
+        sql: r#"
+        CREATE TABLE projects (
+            seq     INTEGER PRIMARY KEY,
+            id      TEXT    NOT NULL UNIQUE,
+            path    TEXT    NOT NULL,
+            name    TEXT    NOT NULL,
+            "group" TEXT    NOT NULL
+        );
+    "#,
+    },
+];
 
 /// Bring `conn` up to the newest version in `migrations`, and report where it landed.
 ///

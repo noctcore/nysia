@@ -77,12 +77,14 @@
 
 mod error;
 mod migrate;
+mod project;
 mod status;
 
 #[cfg(test)]
 mod tests_support;
 
 pub use error::StoreError;
+pub use project::{Forgotten, Registered, Registration, StoredProject};
 pub use status::Restored;
 
 use std::path::{Path, PathBuf};
