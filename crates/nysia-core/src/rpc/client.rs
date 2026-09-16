@@ -21,11 +21,12 @@
 use nysia_proto::{
     AgentHook, AgentStatus, AgentStatusGet, AgentStatusList, AgentStatusSubscribe,
     AgentStatusSubscribed, AgentStatusUnsubscribe, ClientId, ClientRole, DaemonIdentity, ErrorCode,
-    ErrorEnvelope, HelloRequest, HelloResponse, PROTOCOL_VERSION, PaneKey, RejectReason,
-    RequestEnvelope, RequestId, RequestPayload, ResponseEnvelope, ResponsePayload, SessionClose,
-    SessionCreate, SessionCreated, SessionHandle, SessionList, SessionSummary, StreamAttach,
-    StreamAttached, StreamDetach, StreamId, TerminalRead, TerminalReadResult, TerminalResize,
-    TerminalSend, TerminalWait, TerminalWaitResult,
+    ErrorEnvelope, HelloRequest, HelloResponse, PROTOCOL_VERSION, PaneKey, Project, ProjectForget,
+    ProjectId, ProjectList, ProjectRegister, ProjectRegistered, RejectReason, RequestEnvelope,
+    RequestId, RequestPayload, ResponseEnvelope, ResponsePayload, SessionClose, SessionCreate,
+    SessionCreated, SessionHandle, SessionList, SessionSummary, StreamAttach, StreamAttached,
+    StreamDetach, StreamId, TerminalRead, TerminalReadResult, TerminalResize, TerminalSend,
+    TerminalWait, TerminalWaitResult,
 };
 
 use crate::rpc::control::{ControlError, ControlReader, ControlWriter};
@@ -427,6 +428,61 @@ impl Client {
         {
             ResponsePayload::AgentStatusGet { status } => Ok(status),
             other => Err(mismatched("agent_status_get", &other)),
+        }
+    }
+
+    /// Register a folder as a project (v0.3 §3.2).
+    ///
+    /// The path travels unresolved: canonicalising is the daemon's job, and a client that
+    /// did it first would be one more spelling of the same folder to disagree about.
+    /// Idempotent by path — see [`ProjectRegistered::already_registered`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`], plus the three refusals §3.2 distinguishes: the folder is not
+    /// a repository, it contains several, or the path could not be read.
+    pub async fn project_register(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Result<ProjectRegistered, ClientError> {
+        match self
+            .request(RequestPayload::ProjectRegister(ProjectRegister { path }))
+            .await?
+        {
+            ResponsePayload::ProjectRegister(registered) => Ok(registered),
+            other => Err(mismatched("project_register", &other)),
+        }
+    }
+
+    /// Every registered project, with what git says about each.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`].
+    pub async fn project_list(&mut self) -> Result<Vec<Project>, ClientError> {
+        match self
+            .request(RequestPayload::ProjectList(ProjectList {}))
+            .await?
+        {
+            ResponsePayload::ProjectList { projects } => Ok(projects),
+            other => Err(mismatched("project_list", &other)),
+        }
+    }
+
+    /// Forget a project's registration, and nothing on disk.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`]. An id nothing is registered under is
+    /// [`ErrorCode::UnknownProject`] rather than a quiet success, mirroring `session_close`
+    /// on a stale handle.
+    pub async fn project_forget(&mut self, id: ProjectId) -> Result<(), ClientError> {
+        match self
+            .request(RequestPayload::ProjectForget(ProjectForget { id }))
+            .await?
+        {
+            ResponsePayload::ProjectForget => Ok(()),
+            other => Err(mismatched("project_forget", &other)),
         }
     }
 
