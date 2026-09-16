@@ -7,6 +7,7 @@ import type { Project, SessionSummary, Worktree } from '../store/types';
 import { GLYPH } from '../ui/glyphs';
 import { SectionLabel } from '../ui/SectionLabel';
 import { useNow } from '../ui/useNow';
+import { AddProjectButton, AddProjectResult, NoProjects } from './AddProject';
 
 /**
  * The 222px projects sidebar (design-spec.md §3).
@@ -20,7 +21,7 @@ import { useNow } from '../ui/useNow';
  * day be a daemon round-trip would make typing wait on a socket.
  */
 export function ProjectsSidebar() {
-  const { projects, activeProjectId } = useSnapshot();
+  const { projects, projectsUnavailable, activeProjectId, addProject, status } = useSnapshot();
   const commands = useCommands();
   const [query, setQuery] = useState('');
 
@@ -43,7 +44,19 @@ export function ProjectsSidebar() {
         />
       </label>
 
+      <AddProjectResult state={addProject} />
+
       <div className="min-h-0 flex-1 overflow-y-auto">
+        {/* The `+` lives on a group header (design-spec.md §3), and with no projects there
+            are no headers — so the empty state carries one of its own rather than leaving the
+            one affordance that fixes an empty sidebar off the empty sidebar. */}
+        {projects.length === 0 ? (
+          <NoProjects
+            connecting={status === 'connecting'}
+            unavailable={projectsUnavailable}
+            state={addProject}
+          />
+        ) : null}
         {groups.map(([group, members]) => (
           <div key={group}>
             <SectionLabel
@@ -51,17 +64,13 @@ export function ProjectsSidebar() {
               className="flex items-center px-2.5 py-1.5 font-medium"
             >
               {group}
-              {/* Registering a repository is daemon work that does not exist yet, so
-                  this says so rather than looking live and swallowing the click. */}
-              <button
-                type="button"
-                disabled
-                aria-label={`Add a project to ${group}`}
-                title="Adding a project arrives with the worktree manager in v0.4"
-                className="text-fg3 ml-auto cursor-not-allowed border-0 bg-transparent p-0 text-sm tracking-normal"
-              >
-                {GLYPH.add}
-              </button>
+              {/* Not `Add a project to ${group}`: the group a project lands in is the
+                  daemon's to say (`Project::DEFAULT_GROUP`), and a label promising this one
+                  would promise a verb that does not exist. */}
+              <AddProjectButton
+                state={addProject}
+                className="text-fg3 hover:text-fg ml-auto cursor-pointer border-0 bg-transparent p-0 text-sm tracking-normal disabled:cursor-wait focus-visible:shadow-focus focus-visible:outline-none"
+              />
             </SectionLabel>
             {members.map((project) => (
               <div key={project.id}>
