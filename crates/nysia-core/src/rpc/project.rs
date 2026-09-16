@@ -330,15 +330,7 @@ impl ProjectService {
         // finds out, and it must say which of the two it is rather than "could not start".
         let at = CanonicalPath::of(&stored.path).map_err(|err| {
             tracing::warn!(project = %stored.id, kind = path_kind(&err), "a registered folder could not be resolved");
-            envelope(
-                ErrorCode::PathUnreadable,
-                "that project's folder could not be opened",
-                "check the folder is still there and that you can open it",
-                &[
-                    "a project on a drive that is not plugged in lists but cannot be started",
-                    "`nysia project forget <id>` removes the registration and nothing on disk",
-                ],
-            )
+            unreadable_project()
         })?;
 
         // **Before `ensure`, which is the first step that writes.** `create` used to refuse
@@ -691,6 +683,27 @@ fn no_git_envelope() -> ErrorEnvelope {
         ],
     )
     .retryable(false)
+}
+
+/// A registered folder that is no longer there to be opened.
+///
+/// A project whose drive has been unplugged lists perfectly well — that is deliberate, see
+/// [`ProjectService::list`] — so a start is the first step that finds out, and it says which
+/// of the two it is rather than "could not start".
+///
+/// A free function rather than three lines inside `starting`, so that
+/// `nothing_this_module_says_carries_the_source_indentation_with_it` can reach it. An
+/// envelope built inline is an envelope the guard below cannot name.
+fn unreadable_project() -> ErrorEnvelope {
+    envelope(
+        ErrorCode::PathUnreadable,
+        "that project's folder could not be opened",
+        "check the folder is still there and that you can open it",
+        &[
+            "a project on a drive that is not plugged in lists but cannot be started",
+            "`nysia project forget <id>` removes the registration and nothing on disk",
+        ],
+    )
 }
 
 /// An id nothing is registered under.
@@ -2123,39 +2136,154 @@ mod tests {
     /// split across lines without a trailing `\` keeps every space of the continuation, so
     /// `` `git check-ref-format --branch <name>` is the              same question this
     /// asked `` is what a user saw. Nothing this module says has a reason to contain a run of
-    /// spaces, so the rule is simply that none does — and every envelope the module can build
-    /// is put through it, so a fourth one added later is covered without anybody remembering
-    /// to add it here.
+    /// spaces, so the rule is simply that none does.
+    ///
+    /// # The roster, and the check that it is one
+    ///
+    /// #96's third finding was not about the rule but about the claim made for it. This was
+    /// a hand-written list of seven that said it was every envelope the module could build,
+    /// and five were missing — including the `StartError::Git` arm carrying the `.nysia`
+    /// next step #94 had just added. Nothing was broken; the claim was.
+    ///
+    /// So the list is still written out below, because an envelope needs an input to be
+    /// built from and only a person can choose one. What is no longer taken on trust is that
+    /// it is complete: [`envelope_constructors`] reads this module's own source and answers
+    /// every function in it that builds an [`ErrorEnvelope`], and the assertion at the end is
+    /// that the roster names all of them. A constructor added later reds this test until it
+    /// is covered, which is what the previous wording promised and did not do.
+    ///
+    /// Its one limit, stated rather than left to be found: the scan matches a **single-line**
+    /// `fn … -> ErrorEnvelope` at column zero, under any of the visibilities this module
+    /// uses. A signature wrapped across lines would be missed, and an envelope built inline
+    /// inside a method has no function to find — which is why `unreadable_project` was
+    /// lifted out of [`ProjectService::starting`] to be rosterable at all.
     #[test]
     fn nothing_this_module_says_carries_the_source_indentation_with_it() {
-        let envelopes = vec![
-            start_refusal(StartError::BranchRefused {
-                branch: "feat/x".to_owned(),
-                reason: "git check-ref-format refused it",
-            }),
-            start_refusal(StartError::BranchPrunable {
-                branch: "feat/x".to_owned(),
-            }),
-            start_refusal(StartError::NoDirectory {
-                branch: "feat/x".to_owned(),
-            }),
-            no_git_envelope(),
-            internal_start("something"),
-            joining("something"),
-            unknown_project(
-                &ProjectId::from_canonical_path(std::path::Path::new("C:/x")).expect("an id"),
+        // Not `Path` and not `NotInstalled`, which are the two arms `git_refusal` answers
+        // somewhere else with; this is the one that builds an envelope of its own.
+        let ran_long = || GitError::TimedOut {
+            args: "worktree add".to_owned(),
+            at: std::path::PathBuf::from("C:/x"),
+            timeout: std::time::Duration::from_secs(2),
+        };
+        let unreadable = StoreError::Sqlite {
+            action: "read the id of a project",
+            path: std::path::PathBuf::from("C:/x/nysia.db"),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        };
+
+        let covered: Vec<(&str, ErrorEnvelope)> = vec![
+            ("start_refusal", start_refusal(StartError::Git(ran_long()))),
+            (
+                "start_refusal",
+                start_refusal(StartError::Git(GitError::NotInstalled {
+                    source: crate::pty::ResolveError::NotFound {
+                        program: "git".to_owned(),
+                    },
+                })),
+            ),
+            (
+                "start_refusal",
+                start_refusal(StartError::BranchRefused {
+                    branch: "feat/x".to_owned(),
+                    reason: "git check-ref-format refused it",
+                }),
+            ),
+            (
+                "start_refusal",
+                start_refusal(StartError::BranchPrunable {
+                    branch: "feat/x".to_owned(),
+                }),
+            ),
+            (
+                "start_refusal",
+                start_refusal(StartError::NoDirectory {
+                    branch: "feat/x".to_owned(),
+                }),
+            ),
+            ("git_refusal", git_refusal(&ran_long())),
+            (
+                "git_refusal",
+                git_refusal(&GitError::Path(PathError::Missing {
+                    path: std::path::PathBuf::from("C:/x"),
+                })),
+            ),
+            // Every arm of the refusal `refuse` delegates to, which is proto's text reached
+            // through this module's door.
+            ("refuse", refuse(&RegisterRefusal::Unreadable, &ran_long())),
+            (
+                "refuse",
+                refuse(&RegisterRefusal::NotARepository, &ran_long()),
+            ),
+            (
+                "refuse",
+                refuse(
+                    &RegisterRefusal::ManyRepositories {
+                        found: vec!["one".to_owned(), "two".to_owned()],
+                    },
+                    &ran_long(),
+                ),
+            ),
+            ("store_refusal", store_refusal(&unreadable)),
+            ("list_refusal", list_refusal(&unreadable)),
+            ("no_git_envelope", no_git_envelope()),
+            ("unreadable_project", unreadable_project()),
+            ("internal_start", internal_start("something")),
+            ("joining", joining("something")),
+            (
+                "unknown_project",
+                unknown_project(
+                    &ProjectId::from_canonical_path(std::path::Path::new("C:/x")).expect("an id"),
+                ),
             ),
         ];
-        for envelope in &envelopes {
+
+        for (name, envelope) in &covered {
             for text in std::iter::once(envelope.message())
                 .chain(envelope.next_steps().iter().map(String::as_str))
             {
                 assert!(
                     !text.contains("  "),
-                    "a wrapped literal kept its indentation: {text:?}"
+                    "a wrapped literal in {name} kept its indentation: {text:?}"
                 );
             }
         }
+
+        let named: std::collections::BTreeSet<&str> =
+            covered.iter().map(|(name, _)| *name).collect();
+        let built = envelope_constructors();
+        let missed: Vec<&String> = built
+            .iter()
+            .filter(|fun| !named.contains(fun.as_str()))
+            .collect();
+        assert!(
+            missed.is_empty(),
+            "these build an envelope this module can answer with and the roster does not \
+             reach them: {missed:?}"
+        );
+    }
+
+    /// Every function in this module that builds an [`ErrorEnvelope`], read out of the
+    /// module's own source.
+    ///
+    /// The completeness half of the guard above. Matching source text is a blunt instrument
+    /// and it is chosen because the alternative — a hand-written count beside a hand-written
+    /// list — is the thing that went stale. See that test for the limit this has.
+    fn envelope_constructors() -> Vec<String> {
+        // Visibility is stripped as well as `fn`, so making one of these `pub(crate)` for a
+        // caller in another module does not quietly drop it out of the guard.
+        const DECLARES: [&str; 4] = ["fn ", "pub fn ", "pub(crate) fn ", "pub(super) fn "];
+        include_str!("project.rs")
+            .lines()
+            .filter_map(|line| {
+                DECLARES
+                    .iter()
+                    .find_map(|declares| line.strip_prefix(declares))
+            })
+            .filter(|rest| rest.contains("-> ErrorEnvelope"))
+            .filter_map(|rest| rest.split('(').next())
+            .map(str::to_owned)
+            .collect()
     }
     /// Registering a worktree **Nysia** created is the project it belongs to, not a new one.
     ///
