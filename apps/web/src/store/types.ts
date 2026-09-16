@@ -43,8 +43,14 @@ export type { Worktree } from '../generated/Worktree';
 export type { AddProjectState } from './addProject';
 /**
  * The task shapes, re-exported beside the wire's for the same reason: one place to import
- * from. They are **not** generated, and that is temporary rather than a decision — see
- * `tasks/issue.ts` for why Rust does not export them yet and what replaces this when it does.
+ * from. They are **not** generated, and the line above is the whole of why that is worth
+ * saying — this export is the point at which a hand-written shape stops being a transport
+ * detail and becomes part of the store's public surface, which is a thing to know about it
+ * rather than a thing to hide.
+ *
+ * It stays hand-written after wave C1 too. The generated type is the answer `gh` gives,
+ * uppercase and carrying a colour per label; `tasks/issue.ts` is the shape the table draws,
+ * and that file says what the difference costs and who converts between them.
  */
 export type { Issue } from '../tasks/issue';
 export type { TaskStartState, TasksState } from '../tasks/tasks';

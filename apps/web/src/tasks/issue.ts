@@ -29,15 +29,22 @@
  * worktree by an issue number (D-6) — see `./branchName`, which is the one module that
  * touches a number at all and turns it into text inside a branch.
  *
- * # Why this is hand-written, and when it stops being
+ * # Why this is hand-written, and what happens when C1 lands
  *
  * D-13 makes Rust the sole authority on a wire shape and forbids hand-writing a type Rust
- * already exports. Rust does not export this one yet: wave C1 serves `tasks_list` and its
- * `nysia-proto` type lands with it. Until then this is the same arrangement `transport/
- * bridge.ts` already uses for `CommandFailure` — a mirror, named as one — and
- * `transport/tasks.ts` holds the runtime check that the answer really has this shape, so a
- * disagreement surfaces as a refusal rather than as `undefined` in a table cell. When C1's
- * type lands this file re-exports it and the parse becomes the only thing that changes.
+ * already exports. Rust does not export a task answer yet: wave C1 serves `tasks_list` and
+ * its `nysia-proto` type lands with it. Until then `transport/tasks.ts` holds the runtime
+ * check that the answer really has this shape, so a disagreement surfaces as a refusal
+ * rather than as `undefined` in a table cell.
+ *
+ * **This file does not then become a re-export of the generated type**, and the three
+ * differences at the top of this comment are the reason. C1 serves what `gh` gives it, so
+ * the generated `Issue` will carry `OPEN` and label objects with a hex on each — re-exporting
+ * it would push both into the table, which is the one outcome every decision here is for
+ * avoiding. What the generated type replaces is the *wire* half: `transport/tasks.ts` starts
+ * from it rather than from `unknown`, `tsc` takes over the work of noticing a missing field,
+ * and the conversion those functions already do is what stays. This stays too, and keeps
+ * saying what it says now — the shape the screen draws, which is nobody's wire format.
  */
 
 /** Whether an issue is open, as the `● Open` pill reads it. `gh` sends these uppercase. */

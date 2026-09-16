@@ -7,8 +7,14 @@ import type { Issue, IssueState } from '../tasks/issue';
  * D-13 makes Rust the sole authority on a wire shape and forbids hand-writing a type Rust
  * already exports. Rust does not export these yet — wave C1 serves `tasks_list` and
  * `task_start`, and their `nysia-proto` types land with them — so this is the same
- * arrangement `./bridge.ts` already uses for `CommandFailure`: a mirror, named as one, in
- * the transport module and nowhere else.
+ * arrangement `./bridge.ts` already uses for `CommandFailure`: a mirror, named as one.
+ *
+ * **Only {@link TaskStarted} is confined to this module**, the way `CommandFailure` is.
+ * `Issue` and `IssueState` are not, and saying they were would be describing a tidier file
+ * than this one: they are declared in `tasks/issue.ts` and re-exported from the store's
+ * public surface in `store/types.ts`, because the table, the row and the branch derivation
+ * all take one. What is confined here is the *parse* — nothing outside this module reads a
+ * task answer off the wire.
  *
  * **What makes that safe rather than merely temporary is that it is checked.** A
  * hand-written `as Issue[]` would turn a disagreement between the two halves into
@@ -18,9 +24,19 @@ import type { Issue, IssueState } from '../tasks/issue';
  * refusal carrying the daemon's own verb, which the Tasks screen shows as a failed query
  * with a sentence that says what went wrong.
  *
- * When C1's types land, `apps/web/src/generated` gains them, `tasks/issue.ts` re-exports the
- * generated `Issue`, and these two functions are the only things that change — the screen
- * and the store do not know they were ever written by hand.
+ * # What happens when C1's types land
+ *
+ * Not a re-export, which was the first answer here and does not survive reading what the
+ * generated type will carry. C1 serves what `gh` gives it: `state` as `OPEN`, labels as
+ * objects with a **hex colour** on each. Re-exporting that as the screen's `Issue` would
+ * push both into the table — a pill comparing against `'open'` and a wire colour the theme
+ * switcher cannot reach — so the screen would change, and that is precisely what this
+ * arrangement is for avoiding.
+ *
+ * So `apps/web/src/generated` gains the wire type, {@link readIssues} starts from it instead
+ * of from `unknown`, and `tasks/issue.ts` keeps declaring the shape the *screen* draws.
+ * These two functions stop guarding against a missing field — `tsc` does that then — and
+ * carry on doing the conversion they already do. The screen and the store do not move.
  */
 
 /** What `task_start` answers with: the worktree, the session, and which of the two happened. */
