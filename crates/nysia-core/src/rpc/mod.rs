@@ -23,6 +23,7 @@
 //! | [`lease`] | the pid record that says which daemon this is |
 //! | [`session`] | the sessions the daemon owns: PTY, terminal state, and the pump between |
 //! | [`project`] | v0.3's three project verbs, over [`crate::store`] and [`crate::git`] |
+//! | [`tasks`] | `tasks_list`: GitHub Issues queried live through `gh` (D-5) |
 //! | [`stream`] | length-prefixed binary output under a credit window (§7.3) |
 //! | [`server`] | the accept loop, the verb dispatch and idle retire |
 //! | [`client`] | the other half, which the CLI and the Tauri shell both use |
@@ -87,6 +88,7 @@ pub mod server;
 pub mod session;
 pub mod spool;
 pub mod stream;
+pub mod tasks;
 pub mod transport;
 
 #[cfg(test)]
@@ -117,4 +119,5 @@ pub use stream::{
     AttachedStream, BoundStream, ConnectionKey, CreditOutcome, SendOutcome, StreamRegistry,
     StreamSink,
 };
+pub use tasks::TasksService;
 pub use transport::{Connection, ConnectionReader, ConnectionWriter, Listener, TransportError};

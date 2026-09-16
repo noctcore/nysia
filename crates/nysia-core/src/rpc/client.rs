@@ -21,12 +21,12 @@
 use nysia_proto::{
     AgentHook, AgentStatus, AgentStatusGet, AgentStatusList, AgentStatusSubscribe,
     AgentStatusSubscribed, AgentStatusUnsubscribe, ClientId, ClientRole, DaemonIdentity, ErrorCode,
-    ErrorEnvelope, HelloRequest, HelloResponse, PROTOCOL_VERSION, PaneKey, Project, ProjectForget,
-    ProjectId, ProjectList, ProjectRegister, ProjectRegistered, ProjectStart, ProjectStarted,
-    RejectReason, RequestEnvelope, RequestId, RequestPayload, ResponseEnvelope, ResponsePayload,
-    SessionClose, SessionCreate, SessionCreated, SessionHandle, SessionList, SessionSummary,
-    StreamAttach, StreamAttached, StreamDetach, StreamId, TerminalRead, TerminalReadResult,
-    TerminalResize, TerminalSend, TerminalWait, TerminalWaitResult,
+    ErrorEnvelope, HelloRequest, HelloResponse, Issue, PROTOCOL_VERSION, PaneKey, Project,
+    ProjectForget, ProjectId, ProjectList, ProjectRegister, ProjectRegistered, ProjectStart,
+    ProjectStarted, RejectReason, RequestEnvelope, RequestId, RequestPayload, ResponseEnvelope,
+    ResponsePayload, SessionClose, SessionCreate, SessionCreated, SessionHandle, SessionList,
+    SessionSummary, StreamAttach, StreamAttached, StreamDetach, StreamId, TasksList, TerminalRead,
+    TerminalReadResult, TerminalResize, TerminalSend, TerminalWait, TerminalWaitResult,
 };
 
 use crate::rpc::control::{ControlError, ControlReader, ControlWriter};
@@ -504,6 +504,28 @@ impl Client {
         match self.request(RequestPayload::ProjectStart(request)).await? {
             ResponsePayload::ProjectStart(started) => Ok(started),
             other => Err(mismatched("project_start", &other)),
+        }
+    }
+
+    /// A project's open GitHub issues, queried live (D-5).
+    ///
+    /// The project and nothing else: the daemon resolves the registered folder and lets `gh`
+    /// read the repository out of it, so there is no slug or path to pass.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`], and the three the Tasks screen tells apart:
+    /// [`ErrorCode::GhMissing`], [`ErrorCode::GhUnauthenticated`] and
+    /// [`ErrorCode::QueryFailed`]. **An empty list is `Ok`**, not an error — a repository
+    /// with no open issues and a machine with no credentials are different answers, and
+    /// collapsing them is the one thing this verb exists not to do.
+    pub async fn tasks_list(&mut self, project: ProjectId) -> Result<Vec<Issue>, ClientError> {
+        match self
+            .request(RequestPayload::TasksList(TasksList { project }))
+            .await?
+        {
+            ResponsePayload::TasksList { issues } => Ok(issues),
+            other => Err(mismatched("tasks_list", &other)),
         }
     }
 

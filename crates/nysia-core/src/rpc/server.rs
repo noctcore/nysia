@@ -60,6 +60,7 @@ use crate::rpc::peer::{CallerSession, PeerCredentials};
 use crate::rpc::project::ProjectService;
 use crate::rpc::session::{OwnedSession, SessionRegistry};
 use crate::rpc::stream::{BoundStream, ConnectionKey, CreditOutcome, StreamRegistry, StreamSink};
+use crate::rpc::tasks::TasksService;
 use crate::rpc::transport::{Connection, Listener, TransportError};
 
 /// How long a connected peer has to send its `hello`.
@@ -170,6 +171,7 @@ pub struct Daemon {
     streams: Arc<StreamRegistry>,
     status: Arc<AgentStatusService>,
     projects: Arc<ProjectService>,
+    tasks: Arc<TasksService>,
     receipts: Mutex<Receipts>,
     clients: AtomicUsize,
     in_flight: AtomicUsize,
@@ -213,6 +215,9 @@ impl Daemon {
             Arc::clone(status.store()),
             Arc::clone(&sessions),
         ));
+        // The same store, and no session registry: listing issues reads a registered folder
+        // and spawns `gh` in it, and touches nothing this daemon owns.
+        let tasks = Arc::new(TasksService::new(Arc::clone(status.store())));
         let identity = DaemonIdentity {
             pid: std::process::id(),
             started_at_ms: SystemTime::now()
@@ -236,6 +241,7 @@ impl Daemon {
                 streams: Arc::new(StreamRegistry::with_window(config.credit_window)),
                 status,
                 projects,
+                tasks,
                 receipts: Mutex::new(Receipts::default()),
                 clients: AtomicUsize::new(0),
                 in_flight: AtomicUsize::new(0),
@@ -884,6 +890,16 @@ impl Daemon {
                 // chokepoint's ordinary deadline rather than `project_list`'s short one.
                 let projects = Arc::clone(&self.projects);
                 blocking(move || projects.start(&request)).await
+            }
+            RequestPayload::TasksList(request) => {
+                // Blocking, and the one verb here that reaches the network: it canonicalises
+                // a registered folder and spawns `gh`, which is a round trip to GitHub. On a
+                // runtime worker that is every session sharing it stalled behind one query.
+                //
+                // Not fanned out like `project_list`, because there is nothing to fan out —
+                // one project, one spawn — so `gh`'s own deadline is the whole bound.
+                let tasks = Arc::clone(&self.tasks);
+                blocking(move || tasks.list(&request)).await
             }
         }
     }
