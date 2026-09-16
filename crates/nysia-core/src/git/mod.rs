@@ -55,8 +55,8 @@
 //! An environment list belongs to its program and never to the runner. That is not tidiness:
 //! git's scrub list is safe for gh only by accident, and a shared one that grew toward
 //! "anything naming a credential" would take `GH_TOKEN` with it and leave every machine
-//! permanently unauthenticated. The program whose credentials are at stake names them in a
-//! list of its own, so that scrubbing one is a compile error rather than a convention.
+//! permanently unauthenticated. See [`gh::GH_CREDENTIAL_VARS`], which makes scrubbing one a
+//! compile error rather than a convention.
 //!
 //! # What this module needs from git
 //!
@@ -67,6 +67,7 @@
 
 pub(crate) mod command;
 mod error;
+pub mod gh;
 mod inspect;
 mod path;
 pub(crate) mod runner;
@@ -75,6 +76,7 @@ pub(crate) mod testing;
 
 pub use command::{DEFAULT_TIMEOUT, FORCED_VARS, Git, NEUTRALISED_CONFIG, SCRUBBED_VARS};
 pub use error::{GitError, PathError};
+pub use gh::{Gh, GhFailure};
 pub use inspect::{Folder, Repository, inspect, inspect_folder};
 pub use path::CanonicalPath;
 
