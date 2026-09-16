@@ -294,6 +294,40 @@ pub fn screen_directives(asked: &str) -> Screened<'_> {
     Screened { honoured, refused }
 }
 
+/// What to tell the reader about a directive [`screen_directives`] refused.
+///
+/// One wording, so that the daemon and the window cannot come to explain the same refusal
+/// differently — which is how a reader decides that one of them must have meant something
+/// else. Where each process says it is each process's own business: `filter` in `nysia`'s
+/// `log` module writes it to stderr, which is that process's log; `install` in
+/// `nysia-desktop`'s writes it through `tracing` once there is a subscriber, because a
+/// packaged window has no stderr to write it to.
+///
+/// It has to carry [`UNCONFINED_ENV`]'s name. A refusal with no way out in it leaves somebody
+/// holding a directive that silently does nothing, which is the state the screen is supposed
+/// to improve on rather than to create.
+#[must_use]
+pub fn refusal_note(directive: &str) -> String {
+    format!(
+        "{LOG_ENV}: `{directive}` was not applied. It could switch off the rule that keeps \
+         terminal bytes and a caller's paths out of this log. Set {UNCONFINED_ENV}=1 as well \
+         to have it anyway, and then do not share the file."
+    )
+}
+
+/// What to tell the reader when [`UNCONFINED_ENV`] is set.
+///
+/// Said into the log it is about, before anything else is written there, so the file states
+/// what it is rather than leaving that to whoever finds it later.
+#[must_use]
+pub fn unconfined_note() -> String {
+    format!(
+        "{UNCONFINED_ENV} is set. {LOG_ENV} is being honoured in full, so this log can carry \
+         terminal output, a window title, an environment block and a caller's paths. It is \
+         not a file to attach to an issue."
+    )
+}
+
 /// Whether `directive` could enable a callsite [`CONFINED_TARGETS`] is holding down.
 ///
 /// Trimmed first, and that is not cosmetic: the check has to see at least as much of the
@@ -626,6 +660,22 @@ mod tests {
             assert!(screened.honoured.is_empty(), "{asked:?}");
             assert!(screened.refused.is_empty(), "{asked:?}");
         }
+    }
+
+    #[test]
+    fn what_is_said_about_a_refusal_names_the_directive_and_the_way_round_it() {
+        // The half of a refusal that is not the refusal. Somebody set `NYSIA_LOG` and part of
+        // it did not happen; if the line that says so does not quote what was dropped and name
+        // `NYSIA_LOG_UNCONFINED`, they are left where they would have been with no line at all
+        // — except now convinced the log is broken.
+        let note = refusal_note("vte::ansi=trace");
+        assert!(note.contains("vte::ansi=trace"), "{note}");
+        assert!(note.contains(LOG_ENV), "{note}");
+        assert!(note.contains(UNCONFINED_ENV), "{note}");
+
+        let lifted = unconfined_note();
+        assert!(lifted.contains(UNCONFINED_ENV), "{lifted}");
+        assert!(lifted.contains(LOG_ENV), "{lifted}");
     }
 
     #[test]
