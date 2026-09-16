@@ -1901,6 +1901,222 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Set by the outer test; carries the directory holding a `claude` that will not launch.
+    const AGENT_DIR: &str = "NYSIA_START_AGENT_DIR";
+
+    /// Printed by the child test when it got all the way through, so the outer test can tell
+    /// "passed" from "was filtered out and never ran".
+    const CHILD_OK: &str = "NYSIA-START-AGENT-CHILD-OK";
+
+    /// The folder the fixture CLI sits in.
+    ///
+    /// Distinctive on purpose: an envelope that repeats any part of the path is repeating
+    /// this, and an assertion on it cannot pass merely because the path was short.
+    const AGENT_FOLDER: &str = "an-agents-private-toolchain";
+
+    /// The branch the agent start asks for, which must not exist afterwards.
+    const AGENT_BRANCH: &str = "feat/agent-with-no-cli";
+
+    /// This test's own libtest name, which is its module path minus the crate.
+    fn child_test_name(leaf: &str) -> String {
+        let path = module_path!();
+        let without_crate = path.split_once("::").map_or(path, |(_, rest)| rest);
+        format!("{without_crate}::{leaf}")
+    }
+
+    /// Run `leaf` in a fresh copy of this test binary, with `PATH` set to exactly two
+    /// directories: `agent_dir`, and the one `git` lives in.
+    ///
+    /// **Both, and only both.** `agent_dir` alone is what proves the agent CLI is the one the
+    /// fixture put there rather than the developer's own — `PATH` is replaced wholesale, so
+    /// nothing behind it is reachable. But `ProjectService::new` resolves git at
+    /// construction and a service with none refuses every verb before it reaches the thing
+    /// this is about, so git's directory has to come too.
+    fn drive_child(leaf: &str, agent_dir: &std::path::Path) -> (bool, String) {
+        let exe = std::env::current_exe().expect("the test binary");
+        let git = crate::pty::resolve("git").expect("git, which `git_or_skip` just found");
+        let beside_git = git
+            .program
+            .parent()
+            .expect("a resolved program is a file in a directory")
+            .to_path_buf();
+        let path = std::env::join_paths([agent_dir.to_path_buf(), beside_git])
+            .expect("a PATH without a separator in it");
+
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                &child_test_name(leaf),
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("PATH", path)
+            .env(AGENT_DIR, agent_dir)
+            .output()
+            .expect("the child test binary runs");
+
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        (output.status.success(), text)
+    }
+
+    /// `Start →` with `kind: agent` and no usable CLI: refused before anything is created.
+    ///
+    /// # Why this exists and what it is the only cover for
+    ///
+    /// #96's second finding, which is two gaps at once.
+    ///
+    /// `SessionRegistry::precheck` is the stated fix for "an agent whose CLI is not installed
+    /// reaches the same place" — the refusal that used to arrive *after* a branch and a
+    /// worktree had been made for a session that was never going to start. It had one call
+    /// site, [`ProjectService::starting`], and no test anywhere: deleting the call left the
+    /// workspace at eleven test binaries and zero failures.
+    ///
+    /// The gap behind it is wider. The only other test that drives `project_start` with
+    /// `kind: Agent` is `a_real_agent_starts_in_a_worktree_and_lights_its_dot`, which is
+    /// `#[ignore]`d for three preconditions no runner meets — so the wire path this milestone
+    /// added ran on **neither** CI leg. This is the test that puts it on both.
+    ///
+    /// # Why a child process, and why the fixture is a file rather than an empty directory
+    ///
+    /// `PATH` has to be replaced wholesale or "the CLI was not found" is a claim about the
+    /// developer's machine, and a test may not mutate the environment of a binary whose other
+    /// tests are reading it. So: re-exec, as `agent/claude/launch.rs` does.
+    ///
+    /// The fixture is a **file** named `claude` with no extension and no execute bit, not an
+    /// empty directory, and that is what makes the last assertion worth making. An empty
+    /// directory answers `ResolveError::NotFound`, which carries the program's bare name and
+    /// no path at all — so "the message names no path" would pass against the very code #96
+    /// found. A file that is found and refused answers `UnknownExtension` on Windows and
+    /// `NotExecutable` on Unix, each carrying the path it rejected, which is the envelope the
+    /// finding reproduced.
+    #[test]
+    fn starting_an_agent_with_no_usable_cli_refuses_before_it_creates_anything() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-start-agent");
+        let toolchain = scratch.folder(AGENT_FOLDER);
+        // Found by the `PATH` search — `search_in` falls back to the bare name — and refused
+        // by validation on both legs, for a different reason on each.
+        std::fs::write(toolchain.join("claude"), "not a program\n").expect("the fixture CLI");
+
+        let (ok, output) = drive_child("child_refuses_an_agent_start_with_no_cli", &toolchain);
+        assert!(ok, "the child test failed:\n{output}");
+        assert!(output.contains(CHILD_OK), "the child never ran:\n{output}");
+    }
+
+    #[tokio::test]
+    #[ignore = "driven by its outer test, which owns PATH: an unlaunchable claude, and git"]
+    async fn child_refuses_an_agent_start_with_no_cli() {
+        assert!(
+            git_or_skip().is_some(),
+            "the outer test must put git's directory on this child's PATH"
+        );
+        let toolchain = std::env::var_os(AGENT_DIR)
+            .map(std::path::PathBuf::from)
+            .expect("the outer test sets the toolchain directory");
+
+        // **The precondition, asserted rather than assumed.** The last assertion in this test
+        // is that the refusal names no path, and it only means something if resolution
+        // reached a variant that *has* one. A fixture that is not found at all answers
+        // `NotFound`, which carries the program's bare name — and against that every
+        // assertion below passes while proving nothing about the finding. A renamed fixture,
+        // a moved `PROGRAM`, or a runner that somehow made the file launchable would each
+        // produce exactly that, silently.
+        let Err(crate::agent::LaunchError::Unavailable { source, .. }) =
+            crate::agent::launch(std::iter::empty::<&std::ffi::OsStr>())
+        else {
+            panic!("the fixture CLI must be found and refused, not launchable");
+        };
+        assert!(
+            !matches!(source, crate::pty::ResolveError::NotFound { .. }),
+            "the fixture must be found and refused — `NotFound` carries no path, so the last \
+             assertion would pass for nothing: {source:?}"
+        );
+
+        let scratch = Scratch::new("project-start-agent-child");
+        let repo = scratch.repository("repo");
+        let (dir, service) = service("start-agent-child");
+        let registered = register(&service, &repo);
+        let nysia_dir = repo.join(crate::worktree::WORKTREE_BASE[0]);
+
+        let refusal = refused(service.start(&ProjectStart {
+            project: registered.project.id.clone(),
+            branch: AGENT_BRANCH.to_owned(),
+            kind: SessionKind::Agent,
+            profile: None,
+        }));
+
+        // 1. The refusal is the agent's, not a shell's wearing the same code. Both
+        //    `SessionError::Launch` and `::Spawn` answer `SpawnFailed`, so the code alone
+        //    would not tell them apart; the prefix and the recovery are the agent's own and
+        //    neither names an agent, which keeps the D-4 seam where it is.
+        assert_eq!(*refusal.code(), ErrorCode::SpawnFailed);
+        assert!(
+            refusal.message().starts_with("could not start the agent"),
+            "the refusal must be the launch one, got {:?}",
+            refusal.message()
+        );
+        assert!(
+            refusal
+                .next_steps()
+                .iter()
+                .any(|step| step.contains("install the agent's CLI")),
+            "and it must still say what to do, got {:?}",
+            refusal.next_steps()
+        );
+
+        // 2. Nothing was created in the repository. This is `precheck`'s whole job: it runs
+        //    before `worktree::ensure`, which is the first step that writes.
+        assert!(
+            !nysia_dir.exists(),
+            "an agent start refused for its CLI must leave the repository exactly as it \
+             found it"
+        );
+        let branches = std::process::Command::new("git")
+            .args(["branch", "--list", AGENT_BRANCH])
+            .current_dir(&repo)
+            .output()
+            .expect("git branch runs");
+        let branches = String::from_utf8_lossy(&branches.stdout);
+        assert!(
+            branches.trim().is_empty(),
+            "and no branch either, git lists {branches:?}"
+        );
+
+        // 3. And the project is as it was: its own checkout and nothing beside it.
+        let projects = listed(&service).await;
+        let [project] = projects.as_slice() else {
+            panic!("one repository is one project, got {projects:?}");
+        };
+        assert_eq!(
+            project.worktrees.len(),
+            1,
+            "no worktree was made, so the project still has only its checkout"
+        );
+
+        // 4. **And the refusal names no path**, which is #96's first finding measured on the
+        //    wire rather than on the error type. This is the envelope that reproduced it:
+        //    `the claude CLI is unavailable: <toolchain>\claude has no launchable extension`.
+        let said = format!("{} {:?}", refusal.message(), refusal.next_steps());
+        for secret in [
+            toolchain.join("claude").to_string_lossy().into_owned(),
+            toolchain.to_string_lossy().into_owned(),
+            AGENT_FOLDER.to_owned(),
+            whoami(),
+        ] {
+            assert!(
+                !said.contains(&secret),
+                "the refusal carried {secret:?}, which names the caller's disk: {said}"
+            );
+        }
+
+        println!("{CHILD_OK}");
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// No next step reaches a person with the source's own indentation in it.
     ///
     /// #94's finding, as a rule rather than as three fixed strings: a Rust string literal
