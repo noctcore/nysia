@@ -75,6 +75,16 @@ harness moved. It is also the release where an agent session first exists — th
 - **A killed daemon no longer blocks its own restart on Unix.** A socket file left behind by a
   process that never unlinked it was read as an endpoint in use, so the daemon that replaced it
   could not bind. Liveness is decided by reaching the socket, never by the file existing.
+- **A daemon that could not serve no longer reports success.** The fix above stops a stale
+  socket producing `AlreadyBound` at all; it left the mapping behind it alone, and `bind_unix`
+  still answers `AlreadyBound` for a regular file, a symlink, a liveness probe that failed with
+  anything other than `ConnectionRefused`, and a `remove_file` that was refused. Each of those
+  became *already running* and a success exit — which is the one thing a supervisor must not be
+  told wrongly, because it waits for a daemon nobody is going to start. `AlreadyBound` is the
+  transport's reading of a failed `bind` and not a claim about the world, so the claim is now
+  checked by dialling: anything that completes a connection is a daemon, including one too new
+  to answer this build's handshake, since D-11 lets the window and the daemon run different
+  versions. Only a transport failure is nobody, and that exits non-zero saying what to do.
 - **An endpoint whose every pipe instance is taken is no longer read as an empty one.** A dial
   re-opens a busy pipe on a bounded schedule — a race, not a queue, since the window is one
   `CreateNamedPipeW` long — and busy is now a third answer rather than *nothing is listening*,
