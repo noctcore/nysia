@@ -78,18 +78,36 @@
 //! ## The rule binds the crates Nysia links, not only the code it writes
 //!
 //! A rule that covered only our own `tracing::` calls would have been a convention with a
-//! hole under it, and the hole was real. Nysia links a VT, and the VT's own logging prints
-//! terminal bytes:
+//! hole under it, and the hole was real. Nysia links a VT and a pty, and each of them prints
+//! what passed through it:
 //!
 //! - `vte-0.15.0/src/ansi.rs:1341` — `debug!("[unhandled osc_dispatch]: [{}] …")`, which is
 //!   every byte of an OSC parameter the parser did not handle, verbatim.
 //! - `alacritty_terminal-0.26.0/src/term/mod.rs:2222` — `trace!("Setting title to '{title:?}'")`,
 //!   and a shell's window title is routinely the working directory.
+//! - `portable-pty@2afb836/pty/src/win/pseudocon.rs:160` —
+//!   `error!("CreateProcessW `{:?}` in cwd `{:?}` failed: {}")`: the command line and the
+//!   working directory of a spawn that failed. Both reached the daemon over the socket in a
+//!   `SessionCreate`, which is the class the rule above is about.
+//! - `portable-pty@2afb836/pty/src/cmdbuilder.rs:566` — `warn!("$SHELL -> {shell:?} which is
+//!   not executable …")`, which prints whatever a `SessionCreate` set `SHELL` to. `SHELL` is
+//!   not one of `crate::pty::SCRUBBED_VARS`, so an `envOverrides` entry reaches it intact.
+//! - `portable-pty@2afb836/pty/src/cmdbuilder.rs:147` and `:181` —
+//!   `trace!("adding SYS env: {:?} {:?}")` and the same line for `USER`: the whole
+//!   environment block the session is about to inherit, name and value, one line each.
 //!
-//! Both use the `log` crate, which reaches the subscriber through `tracing-log`. Both are
-//! silent at `info`, so the shipped default never leaked — but they are loud at `debug` and
-//! `trace`, which are the levels a person sets *because* they are debugging and are about to
-//! send somebody the file. That is the worst possible way round.
+//! All of them use the `log` crate, which reaches the subscriber through `tracing-log`. The
+//! two VT lines are silent at `info`, so the shipped default never leaked them — but they are
+//! loud at `debug` and `trace`, which are the levels a person sets *because* they are
+//! debugging and are about to send somebody the file. That is the worst possible way round.
+//!
+//! The pty is the worse case and was the later discovery. `pseudocon.rs:160` is an `ERROR`
+//! and `cmdbuilder.rs:566` a `WARN`, so both clear the shipped `info` default with no
+//! `NYSIA_LOG` set at all — and they are on opposite legs, the first `cfg(windows)` and the
+//! second `cfg(unix)`, so either one on its own looks like a platform quirk rather than a
+//! rule with a crate-shaped hole in it. Measured on both: see
+//! `a_failed_spawn_writes_a_caller_offered_path_without_the_confinement` in `nysia`'s `log`
+//! module, which plants a spawn that cannot succeed and reads the line back out.
 //!
 //! [`CONFINED_TARGETS`] is the answer, and it is why the sentence above is a rule rather than
 //! an aspiration.
@@ -111,19 +129,61 @@ use std::path::{Path, PathBuf};
 /// let `NYSIA_LOG` replace the filter wholesale, so raising the level to debug something
 /// silently switched off a confinement the person did not know was there.
 ///
-/// # Why these two, and why at these levels
+/// # What these do not beat, which is measured rather than assumed
 ///
-/// See the module docs for the two call sites and what they print. `vte` is `off` rather than
-/// `warn` because every line it emits at any level is parser diagnostics about bytes — there
-/// is nothing in it worth keeping. `alacritty_terminal` is `warn` rather than `off` because
-/// its errors are worth having and it is only `trace` that prints the title.
+/// `EnvFilter` resolves a callsite against its *most specific* matching directive, and a
+/// module path is more specific than the crate name a directive here uses. So
+/// `NYSIA_LOG=vte::ansi=trace` still reaches the file, and `alacritty_terminal::term=trace`
+/// and `portable_pty::cmdbuilder=trace` do too. That is a property of the mechanism and not
+/// of this list — it is identical for all three entries, and adding a fourth would inherit
+/// it. Closing it means filtering `NYSIA_LOG`'s own directives before they are parsed, which
+/// is a change to `confine` in the two binaries rather than to this constant. It is written
+/// down because the guarantee above is the one that was measured, and a reader is entitled to
+/// know where it stops.
+///
+/// # Why these three, and why at the level each names
+///
+/// See the module docs for the call sites and what each of them prints. `vte` is `off` rather
+/// than `warn` because every line it emits at any level is parser diagnostics about bytes —
+/// there is nothing in it worth keeping. `alacritty_terminal` is `warn` rather than `off`
+/// because its errors are worth having and it is only `trace` that prints the title.
+///
+/// `portable_pty` is `off`, and copying `alacritty_terminal`'s `warn` would have confined
+/// nothing: `warn` permits `ERROR`, and the Windows leak *is* an `ERROR` while the Unix one is
+/// a `WARN`. Naming the leaking module rather than the crate — `portable_pty::win::pseudocon`
+/// is a target in its own right — was the other candidate, and it was measured rather than
+/// argued: it silences the Windows `ERROR` and leaves both the Unix `WARN` and the Windows
+/// environment dump exactly where they were, because those are a different module of the same
+/// crate.
+///
+/// ## What `off` costs
+///
+/// A default that hides a real failure is not a safe default either, so this was measured at
+/// the pinned rev rather than reasoned about, and it costs less than it looks:
+///
+/// - `pseudocon.rs:160` logs the string that the `bail!` on the *next line* puts into
+///   [`crate::pty::SpawnError::Spawn`]'s `reason`, which `crate::rpc::session`'s
+///   `spawn_log_line` already writes. The diagnostic is not lost; it is re-routed through the
+///   one writer that applies this module's rule to it before it reaches the file.
+/// - Traps 6 and 11 are ConPTY teardown, and that is the failure someone would most want a
+///   line for — but the crate makes no `log::` call around `ClosePseudoConsole`, the reader
+///   drain or EOF, so there is no teardown line to give up. `rg 'log::' pty/src` at that rev
+///   is how that was established; it returns nine call sites, and the ones not listed in the
+///   module docs are `serial.rs`, which Nysia never reaches because it opens ptys through
+///   `native_pty_system` and never a serial port.
+/// - What is genuinely given up is `cmdbuilder.rs`'s Unix shell-resolution warnings, and
+///   those are the leak.
 ///
 /// # Adding to this list
 ///
-/// A crate belongs here when *its own* logging can print bytes that came off a PTY. That is a
-/// question about the dependency's source, not about how Nysia calls it, so the entry should
-/// arrive with a file and a line the way the two above did.
-pub const CONFINED_TARGETS: &[&str] = &["vte=off", "alacritty_terminal=warn"];
+/// A crate belongs here when *its own* logging can print bytes that came off a PTY, or a value
+/// that reached the runtime from a caller. That is a question about the dependency's source,
+/// not about how Nysia calls it, so the entry should arrive with a file and a line the way the
+/// ones above did — and with a plant that shows the line no longer reaches the file.
+/// `every_confined_directive_parses` cannot stand in for that plant: `portable-pty=off` parses
+/// perfectly and confines nothing, because an `EnvFilter` target is a Rust path and this
+/// crate's is spelled with an underscore.
+pub const CONFINED_TARGETS: &[&str] = &["vte=off", "alacritty_terminal=warn", "portable_pty=off"];
 
 /// How large one log file may get before it is rotated: 8 MiB.
 ///
