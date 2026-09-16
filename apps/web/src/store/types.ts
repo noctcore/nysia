@@ -4,6 +4,8 @@ import type { Project } from '../generated/Project';
 import type { ProjectId } from '../generated/ProjectId';
 import type { SessionHandle } from '../generated/SessionHandle';
 import type { SessionKind } from '../generated/SessionKind';
+import type { Issue } from '../tasks/issue';
+import type { TaskStartState, TasksState } from '../tasks/tasks';
 import type { AddProjectState } from './addProject';
 import type { StoreError } from './errors';
 
@@ -39,6 +41,13 @@ export type { Project, ProjectId };
 export type { SessionSummary } from '../generated/SessionSummary';
 export type { Worktree } from '../generated/Worktree';
 export type { AddProjectState } from './addProject';
+/**
+ * The task shapes, re-exported beside the wire's for the same reason: one place to import
+ * from. They are **not** generated, and that is temporary rather than a decision — see
+ * `tasks/issue.ts` for why Rust does not export them yet and what replaces this when it does.
+ */
+export type { Issue } from '../tasks/issue';
+export type { TaskStartState, TasksState } from '../tasks/tasks';
 
 /**
  * The one boundary between the chrome and whatever is behind it.
@@ -180,6 +189,31 @@ export interface StoreSnapshot {
   readonly agentStatus: readonly AgentStatus[];
   /** Where **Add a project** has got to. See `./addProject`. */
   readonly addProject: AddProjectState;
+  /**
+   * The active project's GitHub issues, or why there are none to show.
+   *
+   * **State, not a cache.** D-5 says tasks are GitHub Issues queried live with no local task
+   * domain model, and this is the narrowest thing that can be true of a list held long enough
+   * to paint it: one field, belonging to one project, thrown away the moment that project
+   * stops being the active one. Nothing persists it, nothing is keyed by it, and no component
+   * may read an issue out of it to identify anything — `tasks/branchName.ts` is the only
+   * module that touches an issue number and it turns one into text inside a branch (D-6).
+   *
+   * It is reset to `idle` whenever `activeProjectId` moves. A list that outlived the project
+   * it came from would put one repository's issues under another's name, and `Start →` would
+   * then create a branch in the wrong worktree — which is the same class of mistake as a
+   * stale `activeTab`, and is held the same way.
+   */
+  readonly tasks: TasksState;
+  /**
+   * Where the last `Start →` has got to, and what it did.
+   *
+   * Beside `tasks` rather than inside it: a refresh that landed while a worktree was being
+   * created would otherwise erase the answer to the thing the user actually pressed. Cleared
+   * when the screen's content moves under it — another start, another project, another query
+   * — and never by a clock.
+   */
+  readonly taskStart: TaskStartState;
 }
 
 /**
@@ -205,6 +239,8 @@ export function emptySnapshot(status: StoreStatus = 'connecting'): StoreSnapshot
     usage: [],
     agentStatus: [],
     addProject: { phase: 'idle' },
+    tasks: { phase: 'idle' },
+    taskStart: { phase: 'idle' },
   };
 }
 
@@ -259,6 +295,35 @@ export interface Store {
   addProject(): Promise<void>;
   /** Clear whatever `addProject` last said. Idempotent, like `dismissError`. */
   dismissAddProject(): Promise<void>;
+  /**
+   * Ask for the active project's GitHub issues.
+   *
+   * **It resolves on every answer**, including all three of the refusals wave C's contract
+   * requires a user to tell apart, writing the outcome into `snapshot.tasks` for the screen
+   * to render. Nothing here rejects, and that is the difference from every other command on
+   * this interface: a task query has no ending that belongs in the notice list. *"An empty
+   * list for any of those is a lie"* — so the refusals are the screen's content rather than
+   * a red box in the corner over a table that looks like a repository with no work in it.
+   *
+   * Calling it while a query is in flight does nothing; two answers racing would leave
+   * whichever lost on screen. With no active project it does nothing at all — there is
+   * nothing to ask GitHub about, and the screen says so for itself rather than being told by
+   * a refusal that was never sent.
+   */
+  refreshTasks(): Promise<void>;
+  /**
+   * Hand an issue to an agent: a branch-keyed worktree, a session in it, and a tab.
+   *
+   * The whole point of the Tasks screen. The branch comes from `tasks/branchName.ts` and is
+   * derived *here*, before the request exists, because the wire cannot carry an issue number
+   * (D-6) — so this takes an `Issue` and the daemon never sees one.
+   *
+   * Unlike {@link refreshTasks} this **rejects and records** when it fails, because somebody
+   * pressed a button: a branch that will not check out, a dirty worktree, a repository that
+   * moved. The daemon's own `nextSteps` are what reach the user, so the notice says what to
+   * do next rather than that something went wrong.
+   */
+  startTask(issue: Issue): Promise<void>;
   selectTab(paneKey: PaneKey): Promise<void>;
   closeTab(paneKey: PaneKey): Promise<void>;
   openTab(launcher: LauncherId): Promise<void>;

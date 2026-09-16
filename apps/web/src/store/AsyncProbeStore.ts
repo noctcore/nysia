@@ -1,4 +1,5 @@
 import type { PaneKey } from '../generated/PaneKey';
+import type { Issue } from '../tasks/issue';
 import { StoreCommandError, type StoreCommandName, type StoreError } from './errors';
 import { emptySnapshot } from './types';
 import type {
@@ -70,7 +71,11 @@ export class AsyncProbeStore implements Store {
     if (!this.#snapshot.projects.some((project) => project.id === id)) {
       throw this.#fail('selectProject', `No project ${id} is open.`);
     }
-    this.#emit((current) => ({ ...current, activeProjectId: id }));
+    this.#emit((current) => ({
+      ...current,
+      activeProjectId: id,
+      tasks: { phase: 'idle' },
+    }));
   };
 
   selectTab = async (paneKey: PaneKey): Promise<void> => {
@@ -144,6 +149,34 @@ export class AsyncProbeStore implements Store {
   dismissAddProject = async (): Promise<void> => {
     await this.#ack();
     this.#emit((current) => ({ ...current, addProject: { phase: 'idle' } }));
+  };
+
+  /**
+   * Resolves to a *refusal*, which is the hostile branch and the deliberate one.
+   *
+   * The contract says a task query resolves on every answer, so a probe that only ever
+   * reached a loaded list would let a suite pass that had quietly assumed a refusal rejects
+   * — which is the exact mistake `addProject` was written to catch, one screen over. The
+   * mock answers with a list, this answers with `gh` missing, and between them both branches
+   * are exercised.
+   */
+  refreshTasks = async (): Promise<void> => {
+    await this.#ack();
+    this.#emit((current) => ({
+      ...current,
+      tasks: {
+        phase: 'unavailable',
+        reason: 'gh_missing',
+        message: 'the GitHub CLI is not installed on this machine',
+        nextSteps: ['Install it from https://cli.github.com, then press ↻.'],
+      },
+    }));
+  };
+
+  /** Rejects a turn late and through two frames, like every other verb here. */
+  startTask = async (issue: Issue): Promise<void> => {
+    await this.#ack();
+    throw this.#fail('startTask', `No worktree could be created for #${issue.number}.`);
   };
 
   dismissError = async (id: string): Promise<void> => {

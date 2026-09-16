@@ -1,4 +1,5 @@
 import type { PaneKey } from '../generated/PaneKey';
+import type { Issue } from '../tasks/issue';
 import { StoreCommandError } from './errors';
 import type { StoreCommandName } from './errors';
 import { reportUnexpectedFailure } from './unexpectedFailures';
@@ -41,6 +42,8 @@ export interface StoreCommands {
   openTab(launcher: LauncherId, onSettled?: () => void): void;
   addProject(onSettled?: () => void): void;
   dismissAddProject(onSettled?: () => void): void;
+  refreshTasks(onSettled?: () => void): void;
+  startTask(issue: Issue, onSettled?: () => void): void;
   dismissError(id: string, onSettled?: () => void): void;
 
   readonly window: WindowCommands;
@@ -99,6 +102,16 @@ export function routeCommands(store: Store): StoreCommands {
     addProject: (onSettled) => runCommand('addProject', store.addProject(), onSettled),
     dismissAddProject: (onSettled) =>
       runCommand('dismissAddProject', store.dismissAddProject(), onSettled),
+    // `refreshTasks` is routed as `startTask` because `StoreCommandName` has no name for it,
+    // and it has none because it cannot fail — see `errors.ts`. The name is only ever used to
+    // label a notice, and the only way one appears here is `reportUnexpectedFailure`, which
+    // means a provider broke its contract and rejected something that was documented never
+    // to. Labelling that `startTask` is the closest true thing: it is the Tasks screen, and
+    // the alternative is a `StoreCommandName` member that exists for a notice nobody should
+    // ever see.
+    refreshTasks: (onSettled) => runCommand('startTask', store.refreshTasks(), onSettled),
+    startTask: (issue, onSettled) =>
+      runCommand('startTask', store.startTask(issue), onSettled),
     dismissError: (id, onSettled) =>
       runCommand('dismissError', store.dismissError(id), onSettled),
 
