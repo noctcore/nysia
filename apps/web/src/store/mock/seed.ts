@@ -3,6 +3,7 @@ import type { AgentStatus } from '../../generated/AgentStatus';
 import type { AgentStatusRow } from '../../generated/AgentStatusRow';
 import type { PaneKey } from '../../generated/PaneKey';
 import type { SessionHandle } from '../../generated/SessionHandle';
+import type { Issue } from '../../tasks/issue';
 import { emptySnapshot, type LauncherGroup, type Project, type StoreSnapshot, type Tab } from '../types';
 
 /**
@@ -26,6 +27,7 @@ import { emptySnapshot, type LauncherGroup, type Project, type StoreSnapshot, ty
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
 
 function pane(tab: number, leaf: number): PaneKey {
   return `tab_${tab}:leaf_${leaf}`;
@@ -220,6 +222,51 @@ export function seedAgentStatus(now: number): readonly AgentStatus[] {
     { lead: statusRow(CODEX_PANE, 'waiting', now - 40 * 1000), subagents: [] },
   ];
 }
+
+/**
+ * The mock's GitHub issues, transcribed from the `issues` array in the design HTML.
+ *
+ * Same rule as the project names and the session ages: what the mock shows comes from the
+ * design file rather than from somebody's imagination, so the screen this store drives is
+ * the screen the design draws. The mock's rows are pre-formatted — a hash-prefixed id string
+ * and `updated: '7 days ago'` — because it is a drawing; these are the fields `gh` sends, with
+ * the age as an offset from `now` so that `updatedPhrase` prints the mock's own words
+ * however long this repository sits there.
+ *
+ * Three fields the mock's array does not have, because the mock hardcodes them in its
+ * markup: the author and repository on every row's sub-line — `Shironex` and `Settly` —
+ * and the URL, which is where {@link issue.repositoryOf} recovers the repository from since
+ * `gh issue list --json` has no field for it. The URLs are built from the same pair.
+ *
+ * **Not a task model** (D-5). This is a fixture behind the mock provider; nothing persists
+ * it, and `MockStore.refreshTasks` hands it over as the answer to a query.
+ */
+export function createSeedIssues(now: number = Date.now()): readonly Issue[] {
+  return SEED_ISSUES.map(([number, title, labels, days]) => ({
+    number,
+    title,
+    state: 'open' as const,
+    updatedAt: new Date(now - days * DAY).toISOString(),
+    url: `https://github.com/Shironex/Settly/issues/${number}`,
+    author: 'Shironex',
+    labels,
+  }));
+}
+
+/** The mock's rows: number, title, labels, and how many days ago it was updated. */
+const SEED_ISSUES: readonly [number, string, readonly string[], number][] = [
+  [200, 'soft-deletable-tables-require-deleted-at: two unguarded singular-selector sites it cannot see', ['enhancement'], 7],
+  [199, 'data-slot="agenda-show-more" ships with no consumer: the pager lookup it was added for was replaced', ['bug'], 7],
+  [198, 'Sidebar biuro identity renders nothing while loading and disappears silently on error', ['bug', 'design-adoption'], 7],
+  [197, 'PortalAccountRepository.findAccountsForFirma outlived the offboarding path it fronted', ['bug'], 7],
+  [196, 'Contract.wymiarEtatu is unvalidated free text, so no working-time arithmetic can pro-rate a part-timer', ['enhancement'], 9],
+  [114, 'Wayfinder map: attendance and working time (Czas pracy)', ['wayfinder:map'], 9],
+  [161, 'HR export for PIP/ZUS inspections does not exist (part 1, the RODO account export, has shipped)', ['enhancement'], 9],
+  [154, 'SME: odpowiedzi rodzicow na 52 pytania (ankiety Google Forms) — watek zbiorczy', ['wayfinder:task'], 9],
+  [192, 'No vendor shell: nothing in the product can see across tenants', ['enhancement'], 15],
+  [93, 'Wayfinder map: leave and absence module (urlopy i nieobecnosci)', ['wayfinder:map'], 49],
+  [131, 'T17: SPEC-attendance assembly and sign-off', ['wayfinder:grilling'], 49],
+];
 
 export function createSeedSnapshot(now: number = Date.now()): StoreSnapshot {
   return {

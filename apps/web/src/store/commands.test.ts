@@ -95,9 +95,11 @@ describe('routeCommands', () => {
         'dismissAddProject',
         'dismissError',
         'openTab',
+        'refreshTasks',
         'selectNav',
         'selectProject',
         'selectTab',
+        'startTask',
         'window',
       ].sort(),
     );

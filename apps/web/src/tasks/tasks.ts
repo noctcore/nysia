@@ -1,3 +1,4 @@
+import type { PaneKey } from '../generated/PaneKey';
 import type { Issue } from './issue';
 
 /**
@@ -164,6 +165,55 @@ const UNAVAILABLE_NOTICES: Readonly<Record<TaskUnavailableReason, TasksNotice>> 
 /** Whether the daemon is mid-answer, so the `↻` cannot start a second query. */
 export function isTasksBusy(state: TasksState): boolean {
   return state.phase === 'loading';
+}
+
+/**
+ * Where `Start →` has got to, for the issue somebody pressed it on.
+ *
+ * Separate from {@link TasksState} because it answers a different question: that one is
+ * *"is there a list"*, this is *"did the thing I just asked for happen"*. Folding them would
+ * make a refresh that landed mid-start erase the answer.
+ *
+ * **There is no failure arm**, and that is the split `store/types.ts` describes: a query's
+ * refusals are the screen's content, a failed `Start →` is a notice, because somebody
+ * pressed a button and has to hear about it wherever they end up looking. A failure puts
+ * this back to `idle` and the sentence goes to the notice list with the daemon's own next
+ * steps.
+ */
+export type TaskStartState =
+  | { readonly phase: 'idle' }
+  /** The daemon is creating or adopting a worktree. The issue's own `Start →` reads busy. */
+  | { readonly phase: 'starting'; readonly issue: number }
+  /**
+   * It worked, and the screen says which of the two happened.
+   *
+   * `adopted` is the flag wave C's contract requires the answer to carry: a worktree for that
+   * branch may already have existed — made outside Nysia, or by an earlier `Start →` — and
+   * the verb takes it rather than failing. *"The user should be able to tell"*, because
+   * "created a worktree" and "moved into the one that was there, with whatever is in it" are
+   * different enough to act on.
+   */
+  | {
+      readonly phase: 'started';
+      readonly issue: number;
+      readonly branch: string;
+      readonly paneKey: PaneKey;
+      readonly adopted: boolean;
+    };
+
+/** What the confirmation line says, or `null` when there is nothing to confirm. */
+export function startedPhrase(state: TaskStartState): string | null {
+  if (state.phase !== 'started') {
+    return null;
+  }
+  return state.adopted
+    ? `#${state.issue} started in the worktree already on ${state.branch}`
+    : `#${state.issue} started in a new worktree on ${state.branch}`;
+}
+
+/** Whether `Start →` is in flight for `issue`, so its own button reads busy. */
+export function isStarting(state: TaskStartState, issue: number): boolean {
+  return state.phase === 'starting' && state.issue === issue;
 }
 
 /**

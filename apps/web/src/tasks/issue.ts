@@ -45,7 +45,18 @@ export type IssueState = 'open' | 'closed';
 
 /** One row of the table. */
 export interface Issue {
-  /** `#200`. Unique within a repository, which is what makes a branch name unique. */
+  /**
+   * The issue number, which the ID column prints after a hash.
+   *
+   * Unique within a repository, which is the whole of the argument that a derived branch
+   * name is unique too — see `./branchName`.
+   *
+   * **No comment in `apps/web/src` writes one out with its hash**, and that is not a style
+   * preference. `theme/colourGuard.ts` rule 1 reads whole files as text, and a hash followed
+   * by exactly 3, 4, 6 or 8 hex digits is a colour literal to it — so an issue numbered 200,
+   * or 4021, fails the colour gate when it appears in prose. It never appears in *code*,
+   * because the hash is a template literal and the number comes off the wire.
+   */
   readonly number: number;
   readonly title: string;
   readonly state: IssueState;

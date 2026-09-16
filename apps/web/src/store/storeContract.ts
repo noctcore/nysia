@@ -1,8 +1,27 @@
 import { describe, expect, it } from 'vitest';
 
+import type { Issue } from '../tasks/issue';
+import { isTasksBusy } from '../tasks/tasks';
 import { isAddProjectBusy } from './addProject';
 import { StoreCommandError, hasDistinctIds } from './errors';
 import type { Store, StoreSnapshot } from './types';
+
+/**
+ * The issue `Start →` is asked for, in the one case every provider can reach: failure.
+ *
+ * A literal rather than a row taken from the provider's own list, because two of the three
+ * providers have no list to take one from — and what is being asserted is the *shape of the
+ * rejection*, which does not depend on the issue being real.
+ */
+const A_TASK: Issue = {
+  number: 200,
+  title: 'Add the Tasks screen',
+  state: 'open',
+  updatedAt: '2026-09-09T12:00:00Z',
+  url: 'https://github.com/noctcore/nysia/issues/200',
+  author: 'Shironex',
+  labels: ['area:web'],
+};
 
 /**
  * The executable statement of the store contract.
@@ -384,6 +403,72 @@ export function describeStoreContract(name: string, create: StoreFactory): void 
       });
     });
 
+    describe('the task list', () => {
+      it('resolves whatever the answer was, and settles somewhere the screen can draw', async () => {
+        // The same rule `addProject` has, and it is not "it succeeds". D-5 queries GitHub
+        // live, so `gh` can be absent, unauthenticated or simply unable to reach the network
+        // — and wave C's contract is explicit that all three are *answers* the screen
+        // renders rather than failures. A provider that rejected would route them into the
+        // notice list and leave a table that looks like a repository with no work in it,
+        // which is the lie the whole screen exists to avoid.
+        //
+        // The three providers land in three different places on purpose: the mock answers
+        // with the design's issues, the probe refuses with `gh` missing, the daemon-backed
+        // one asks a daemon. All three have to satisfy this.
+        const store = await ready();
+        await expect(store.refreshTasks()).resolves.toBeUndefined();
+
+        const { tasks } = store.getSnapshot();
+        expect(isTasksBusy(tasks), 'the ↻ is held shut until this settles').toBe(false);
+        // Either there is a list or there is a reason. Never neither, which is what an
+        // untouched `idle` after a refresh would be.
+        expect(tasks.phase === 'loaded' || tasks.phase === 'unavailable').toBe(true);
+        if (tasks.phase === 'unavailable') {
+          expect(tasks.message.length, 'a refusal with no sentence says nothing').toBeGreaterThan(0);
+          expect(tasks.nextSteps.length, 'a refusal with no step is a dead end').toBeGreaterThan(0);
+        }
+      });
+
+      it('starts a snapshot with no list, so the screen has to ask', async () => {
+        // `idle` before anything is asked for. A provider that seeded a loaded list would
+        // hide a screen that never calls `refreshTasks` at all — it would look right against
+        // the mock and be blank in front of a daemon.
+        expect((await create()).getSnapshot().tasks).toEqual({ phase: 'idle' });
+      });
+
+      it('forgets one project’s issues when another becomes active', async () => {
+        // Not tidiness. The issues belong to the project that was showing, and `Start →`
+        // derives a branch to create a worktree *in the active project* — so a list that
+        // outlived its project is a worktree in the wrong repository, one click away.
+        const store = await ready();
+        await store.refreshTasks();
+
+        const { projects, activeProjectId } = store.getSnapshot();
+        const other = projects.find((project) => project.id !== activeProjectId);
+        expect(other, 'fixture needs a second project').toBeDefined();
+
+        await store.selectProject(other?.id ?? '');
+        expect(store.getSnapshot().tasks).toEqual({ phase: 'idle' });
+      });
+
+      it('rejects a start with a StoreCommandError, unlike a refresh', async () => {
+        // The other half of the split. Nobody asked for the list, so its refusals are
+        // content; somebody pressed `Start →`, so its failure is a notice — and it has to
+        // arrive as the type `runCommand` recognises or it lands in the unexpected-failure
+        // path instead of in front of the user.
+        //
+        // Asserted against a provider that cannot start anything, which is every provider
+        // here: the mock and the probe have no daemon, and the daemon-backed one has no
+        // worktree verb until wave C1 lands.
+        const store = await ready();
+        await expect(store.startTask(A_TASK)).rejects.toBeInstanceOf(StoreCommandError);
+
+        const recorded = store.getSnapshot().errors.at(-1);
+        expect(recorded?.command).toBe('startTask');
+        expect(recorded?.message.length).toBeGreaterThan(0);
+      });
+    });
+
     it('exposes window controls that resolve', async () => {
       const store = await ready();
       await expect(store.window.minimize()).resolves.toBeUndefined();
@@ -480,6 +565,12 @@ export function observable(snapshot: StoreSnapshot): Observable {
     // who touched something else.
     projectsUnavailable: snapshot.projectsUnavailable,
     addProject: snapshot.addProject,
+    // Watched, for the reason `addProject` is: nothing arrives in it on the provider's own
+    // schedule. A task list moves when somebody asks for one or changes project, so an
+    // unrelated command moving it is the screen changing under a user who touched something
+    // else — which is exactly what the exempt fields are exempt for *not* being.
+    tasks: snapshot.tasks,
+    taskStart: snapshot.taskStart,
     activeProjectId: snapshot.activeProjectId,
     tabs: snapshot.tabs,
     activeTab: snapshot.activeTab,

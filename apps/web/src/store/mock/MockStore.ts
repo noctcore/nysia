@@ -1,6 +1,8 @@
 import type { AgentStatusChange } from '../../generated/AgentStatusChange';
 import type { PaneKey } from '../../generated/PaneKey';
 import type { SessionHandle } from '../../generated/SessionHandle';
+import type { Issue } from '../../tasks/issue';
+import { isTasksBusy } from '../../tasks/tasks';
 import { agentNotifications, type AgentNotificationSink } from '../agentNotifications';
 import { applyAgentStatus, retainAgentStatus } from '../agentStatus';
 import { StoreCommandError, type StoreCommandName, type StoreError } from '../errors';
@@ -13,7 +15,7 @@ import type {
   Tab,
   WindowControls,
 } from '../types';
-import { createSeedSnapshot } from './seed';
+import { createSeedIssues, createSeedSnapshot } from './seed';
 
 /**
  * The wave-1 store: the design mock's seed data, plus the state transitions the chrome
@@ -32,6 +34,15 @@ export class MockStore implements Store {
   #snapshot: StoreSnapshot;
   readonly #listeners = new Set<() => void>();
   readonly #notifications: AgentNotificationSink;
+  /**
+   * What {@link refreshTasks} answers with.
+   *
+   * Held beside the snapshot rather than inside it because the snapshot starts `idle`: the
+   * screen has to *ask*, and a seed that arrived already loaded would hide a screen that
+   * never asks. Built once per store so the `7 days ago` on each row stays put while the
+   * window is open, for `seed.ts`'s reason — the ages are offsets from construction.
+   */
+  readonly #issues: readonly Issue[] = createSeedIssues();
   #nextTab: number;
   #nextError = 1;
 
@@ -67,7 +78,12 @@ export class MockStore implements Store {
       throw this.#fail('selectProject', `No project ${id} is open.`);
     }
     this.#update((current) =>
-      current.activeProjectId === id ? current : { ...current, activeProjectId: id },
+      current.activeProjectId === id
+        ? current
+        : // The issues belong to the project that was showing. Carrying them across would put
+          // one repository's work under another's name, and `Start →` would then derive a
+          // branch for the wrong worktree.
+          { ...current, activeProjectId: id, tasks: { phase: 'idle' } },
     );
   };
 
@@ -172,6 +188,44 @@ export class MockStore implements Store {
       current.addProject.phase === 'idle'
         ? current
         : { ...current, addProject: { phase: 'idle' } },
+    );
+  };
+
+  /**
+   * The mock has no daemon, so it answers with the design mock's own issues.
+   *
+   * The same stance `seed.ts` takes everywhere else: what the mock shows is transcribed from
+   * `docs/design/Nysia-ADE.dc.html` rather than invented, so the screen this store drives is
+   * the screen the design draws. A provider that refused instead would make the mock useless
+   * for exactly the thing it exists for.
+   *
+   * It goes through `loading` first, even though nothing is awaited between the two frames.
+   * A store that jumped straight to `loaded` would let a `↻` that is only disabled while
+   * busy pass every test here and stay live in front of a daemon.
+   */
+  refreshTasks = async (): Promise<void> => {
+    if (this.#snapshot.activeProjectId === null || isTasksBusy(this.#snapshot.tasks)) {
+      return;
+    }
+    this.#update((current) => ({ ...current, tasks: { phase: 'loading' } }));
+    this.#update((current) => ({
+      ...current,
+      tasks: { phase: 'loaded', issues: this.#issues },
+    }));
+  };
+
+  /**
+   * There is no worktree to create and no daemon to create it, so this refuses.
+   *
+   * Deliberately a refusal rather than a tab appearing out of nowhere: `Start →` creates a
+   * worktree on a real disk, and a mock that pretended to would be the one affordance in
+   * this store that looks live and does nothing. The message says which provider said so,
+   * because the alternative is somebody debugging a daemon that was never involved.
+   */
+  startTask = async (issue: Issue): Promise<void> => {
+    throw this.#fail(
+      'startTask',
+      `Nothing can be started from the mock store — #${issue.number} needs a daemon to create a worktree in.`,
     );
   };
 

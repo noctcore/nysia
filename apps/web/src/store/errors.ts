@@ -21,6 +21,12 @@ export type StoreCommandName =
   | 'openTab'
   | 'addProject'
   | 'dismissAddProject'
+  // `refreshTasks` is absent on purpose, and it is the one omission here worth a line.
+  // Every ending of a task query is an *answer* that belongs on the Tasks screen — including
+  // the three refusals, which are the whole point of that screen — so it has no failure a
+  // notice could name. `startTask` is the opposite: somebody pressed a button, and a worktree
+  // that could not be created has to reach them wherever they are looking.
+  | 'startTask'
   | 'dismissError'
   | 'window.minimize'
   | 'window.toggleMaximize'
