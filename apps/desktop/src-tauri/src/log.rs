@@ -63,19 +63,31 @@
 //!
 //! # Where a refused directive is announced
 //!
-//! Through `tracing`, after the subscriber is up, so that it reaches the window's log file and
-//! not only stderr. That is the whole reason this module exists: under
-//! `windows_subsystem = "windows"` a packaged window has no stderr, so the daemon's answer —
-//! print it before the subscriber and let the redirected stderr carry it — would put the one
-//! line that explains why `NYSIA_LOG` did nothing into the one stream this process does not
-//! have. The wording is `log_file`'s, so the two processes cannot come to say it differently.
+//! **Into the file, written directly, before the subscriber exists.** Not through `tracing`,
+//! which is the thing that cannot be trusted to carry it: the filter has just refused a
+//! directive, and any `NYSIA_LOG` that names targets rather than a level leaves nothing
+//! matching this module's own — so `NYSIA_LOG=nysia_core=debug,vte::ansi=trace` used to be
+//! answered by a refusal note the refusing filter then dropped, and
+//! `NYSIA_LOG_UNCONFINED=1 NYSIA_LOG=nysia_core=debug` by a window that never said what its
+//! log had become. The announcement went through the one filter it is about.
+//!
+//! The daemon has neither problem, because its note is an `eprintln!` that no filter sees and
+//! its stderr *is* its log. This side needed the same property and the file handle is what
+//! gives it: [`install`] holds it before `.init()` takes ownership, so the lines go in through
+//! the same tee the subscriber is about to use — the file, and the stderr `pnpm dev` shows —
+//! and they land ahead of everything else in it, including the window's own "logging here".
+//! That is what `unconfined_note`'s *said into the log it is about, before anything else is
+//! written there* asks for, and what this module did not do. The wording is `log_file`'s, so
+//! the two processes cannot come to say it differently.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use nysia_core::rpc::{Endpoint, log_file};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 /// What the window logs when `NYSIA_LOG` asks for nothing this filter can use.
@@ -125,18 +137,29 @@ pub fn install() -> Option<PathBuf> {
                 .map_err(|err| format!("the log could not be opened: {err}"))
         });
 
-    let opened = match opened {
+    match opened {
         Ok((path, file)) => {
+            // Through the writer rather than through `tracing`, and before `.init()` takes
+            // ownership of it. See the module docs: the filter about to be installed is the
+            // one that just refused a directive, and a target-scoped `NYSIA_LOG` leaves it
+            // matching nothing in this module — so an announcement made through it is an
+            // announcement the reader never gets. This also puts the lines ahead of the
+            // "logging here" below, which is the ordering `unconfined_note` asks for.
+            let writer = sink(file);
+            say(&mut writer.make_writer(), lifted, &screened);
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_ansi(false)
-                .with_writer(sink(file))
+                .with_writer(writer)
                 .init();
             spawn_trim(path.clone());
             tracing::info!(path = %path.display(), "the window is logging here");
             Some(path)
         }
         Err(why) => {
+            // Stderr is the whole of this window's diagnostics now, so that is where the
+            // notes go — still before `.init()`, for the same reason.
+            say(&mut std::io::stderr(), lifted, &screened);
             // The same filter, confinement included. A window that fell back to stderr is
             // still a window whose terminal crates must not print bytes — and on a dev machine
             // that stderr is a scrollback somebody may paste.
@@ -150,20 +173,22 @@ pub fn install() -> Option<PathBuf> {
             tracing::warn!(%why, "the window has no log file; diagnostics go to stderr only");
             None
         }
-    };
-
-    // Only now is there anywhere to put these. On a packaged Windows build this is the first
-    // moment in the process's life that anything it says can be read at all, which is why they
-    // are said here rather than from `confine` the way the daemon says them.
-    if lifted {
-        tracing::warn!("{}", log_file::unconfined_note());
-    } else {
-        for refused in &screened.refused {
-            tracing::warn!("{}", log_file::refusal_note(refused));
-        }
     }
+}
 
-    opened
+/// Say what this log is now allowed to contain, into the log itself.
+///
+/// Every write is discarded on failure. A window that died because its diagnostics file went
+/// away mid-sentence would have turned a nuisance into the outage [`install`] exists not to
+/// cause, and the daemon's `note` answers its own stderr the same way.
+fn say(out: &mut impl Write, lifted: bool, screened: &log_file::Screened<'_>) {
+    if lifted {
+        let _ = writeln!(out, "{}", log_file::unconfined_note());
+        return;
+    }
+    for refused in &screened.refused {
+        let _ = writeln!(out, "{}", log_file::refusal_note(refused));
+    }
 }
 
 /// Hold the linked crates down, whatever `NYSIA_LOG` asked for.
@@ -198,8 +223,8 @@ fn confine(screened: &log_file::Screened<'_>) -> EnvFilter {
 /// reviewer finds when they ask how the confinement can be off (CLAUDE.md §6). The window is
 /// not where anybody would go looking for `vte` output — it runs no VT — but the variable is
 /// one variable for the whole of Nysia, and a window that quietly ignored it while the daemon
-/// honoured it would be a second rule nobody wrote down. [`install`] says what it means, into
-/// the log, once there is a subscriber to say it through.
+/// honoured it would be a second rule nobody wrote down. [`install`] says what it means into
+/// the log, written to the file directly, ahead of everything else that file will hold.
 fn unconfined(asked: &str) -> EnvFilter {
     parsed(asked)
 }
@@ -220,10 +245,12 @@ fn parsed(asked: &str) -> EnvFilter {
 /// `Arc<File>` is a `MakeWriter` because `&File` is `io::Write`, and `.and` layers the two, so
 /// an event reaches both rather than one or the other depending on the build.
 ///
-/// Its own function so the test can build the writer [`install`] builds. `install` itself is
-/// unreachable from a test — it calls `.init()`, which installs a *global* subscriber and can
-/// only happen once in a process — and a composition nothing exercises is exactly where a
-/// silent "the file stayed empty" would live.
+/// Its own function so a test can build the writer [`install`] builds without calling
+/// `install`, and so `install` can write into it before `.init()` takes ownership.
+/// `.init()` installs a *global* subscriber and can happen once in a process, so `install`
+/// is reachable from one test and one process only — which is what `what_the_window_logged`
+/// re-execs this test binary for. A composition nothing exercises is exactly where a silent
+/// "the file stayed empty" would live.
 fn sink(file: std::fs::File) -> impl for<'a> tracing_subscriber::fmt::MakeWriter<'a> + 'static {
     Arc::new(file).and(std::io::stderr)
 }
@@ -267,6 +294,7 @@ fn spawn_trim(path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -478,6 +506,118 @@ mod tests {
             !written.contains("below the default"),
             "the fallback is `info`, not `debug`: {written}"
         );
+    }
+
+    /// Printed by a child that got all the way through, so "passed" and "never ran" differ.
+    const CHILD_OK: &str = "NYSIA-LOGRULE-WINDOW-OK";
+
+    /// What the child prefixes the path [`install`] returned with, so the parent can read it.
+    const NAMED_ITS_LOG: &str = "NYSIA-LOGRULE-WINDOW-LOG ";
+
+    /// A child test's own libtest name, which is its module path minus the crate.
+    fn child_test_name(leaf: &str) -> String {
+        let path = module_path!();
+        let without_crate = path.split_once("::").map_or(path, |(_, rest)| rest);
+        format!("{without_crate}::{leaf}")
+    }
+
+    /// Run the child window in a fresh copy of this test binary, and hand back its log file.
+    ///
+    /// By re-exec, not by `std::env::set_var`. Two reasons, and either alone would be enough.
+    /// [`install`] reads `NYSIA_LOG`, `NYSIA_LOG_UNCONFINED` and `NYSIA_RUNTIME_DIR` from the
+    /// process, and `cargo test` runs every test in this binary on threads of one process, so
+    /// mutating any of them is a data race the 2024 edition made `unsafe` to write. And
+    /// `install` ends in `.init()`, which installs a *global* subscriber and can happen once
+    /// in a process — so the function this whole module is about is callable exactly once,
+    /// and a process per call is the only way to ask it more than one question.
+    /// `nysia_core::agent::claude::launch` arranges a `PATH` the same way.
+    ///
+    /// The way out is set or **removed** explicitly rather than inherited: a developer with
+    /// `NYSIA_LOG_UNCONFINED` exported would otherwise turn the confined leg into a second
+    /// copy of the control, and it would pass.
+    fn what_the_window_logged(asked: &str, lifted: bool, tag: &str) -> String {
+        let runtime_dir =
+            std::env::temp_dir().join(format!("nysia-window-branch-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&runtime_dir);
+        std::fs::create_dir_all(&runtime_dir).expect("a scratch runtime directory");
+
+        let exe = std::env::current_exe().expect("the test binary");
+        let mut command = Command::new(exe);
+        command
+            .args([
+                "--exact",
+                &child_test_name("a_child_window_that_installs_the_real_filter"),
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(nysia_core::rpc::RUNTIME_DIR_VAR, &runtime_dir)
+            .env_remove(nysia_core::rpc::ENDPOINT_VAR)
+            .env(log_file::LOG_ENV, asked);
+        if lifted {
+            command.env(log_file::UNCONFINED_ENV, "1");
+        } else {
+            command.env_remove(log_file::UNCONFINED_ENV);
+        }
+
+        let output = command.output().expect("the child window runs");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success(),
+            "NYSIA_LOG={asked}: the child window failed:\n{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains(CHILD_OK),
+            "NYSIA_LOG={asked}: the child window was filtered out rather than run, so nothing \
+             read back from it would mean anything:\n{stdout}"
+        );
+
+        // The file, never the child's stderr. `sink` writes to both, and what is being asked
+        // is what reached the file that gets attached to an issue — reading the tee's other
+        // half would also print a deliberately leaked sentinel into this run.
+        let path = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(NAMED_ITS_LOG))
+            .unwrap_or_else(|| panic!("the child window never named its log:\n{stdout}"));
+        let written = std::fs::read_to_string(path).expect("the window's log");
+        let _ = std::fs::remove_dir_all(&runtime_dir);
+        written
+    }
+
+    #[test]
+    fn the_windows_refusal_lands_ahead_of_everything_else_in_the_file() {
+        // `unconfined_note`'s own words are *said into the log it is about, before anything
+        // else is written there*, and that was not true of this side: the notes were emitted
+        // after `.init()`, so `the window is logging here` reached the file first in every
+        // case. Writing them to the handle before the subscriber takes it fixes the ordering
+        // as well as the filtering, and this is the half a `contains` would not notice.
+        //
+        // A bare level, unlike the test above, because the line this has to come before is one
+        // of this crate's own — under a target-scoped value that line is not enabled at all
+        // and there would be nothing to be ahead of.
+        let written = what_the_window_logged("info,vte::ansi=trace", false, "ordering");
+        let note = log_file::refusal_note("vte::ansi=trace");
+        let here = "the window is logging here";
+
+        let note_at = written
+            .find(&note)
+            .unwrap_or_else(|| panic!("the refusal is not in the file at all: {written}"));
+        let here_at = written.find(here).unwrap_or_else(|| {
+            panic!("the window never said where it was logging, so there is nothing to order against: {written}")
+        });
+        assert!(
+            note_at < here_at,
+            "the window wrote into the file before saying what the file may contain: {written}"
+        );
+    }
+
+    #[test]
+    #[ignore = "driven by its outer tests, which set the environment on this child alone"]
+    fn a_child_window_that_installs_the_real_filter() {
+        let path = install().expect("the window opened its log");
+        as_the_terminal_crates_would(SENTINEL);
+        println!("{NAMED_ITS_LOG}{}", path.display());
+        println!("{CHILD_OK}");
     }
 
     #[test]
