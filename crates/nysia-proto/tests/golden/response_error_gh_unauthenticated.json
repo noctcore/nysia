@@ -1,0 +1,17 @@
+{
+  "code": "gh_unauthenticated",
+  "message": "the GitHub CLI has no credentials for this repository",
+  "nextCommandArgs": [
+    "gh",
+    "auth",
+    "login"
+  ],
+  "nextSteps": [
+    "Run `gh auth login` to sign in.",
+    "If you signed in before, the token may have expired; sign in again."
+  ],
+  "receipt": null,
+  "requestId": "req_11111111-1111-4111-8111-111111111111",
+  "retryable": false,
+  "type": "error"
+}

@@ -20,6 +20,7 @@ mod newtype;
 pub mod project;
 pub mod session;
 pub mod stream;
+pub mod tasks;
 pub mod terminal;
 pub mod version;
 
@@ -54,6 +55,7 @@ pub use session::{
     ShellProfile,
 };
 pub use stream::{StreamAttach, StreamAttached, StreamDetach, StreamId};
+pub use tasks::{Issue, IssueState, TasksList};
 pub use terminal::{
     LineCursor, ReadMode, TerminalError, TerminalRead, TerminalReadResult, TerminalResize,
     TerminalSend, TerminalWait, TerminalWaitResult, WaitFor, WaitOutcome,

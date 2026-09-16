@@ -9,4 +9,4 @@
  * [`ErrorCode::Other`] instead of failing the whole frame. An error that cannot be
  * parsed is the worst possible place to be strict.
  */
-export type ErrorCode = "unknown_session" | "invalid_request" | "unsupported" | "path_refused" | "spawn_failed" | "session_busy" | "unknown_project" | "not_a_repository" | "many_repositories" | "path_unreadable" | "internal" | (string & {});
+export type ErrorCode = "unknown_session" | "invalid_request" | "unsupported" | "path_refused" | "spawn_failed" | "session_busy" | "unknown_project" | "not_a_repository" | "many_repositories" | "path_unreadable" | "gh_missing" | "gh_unauthenticated" | "query_failed" | "internal" | (string & {});
