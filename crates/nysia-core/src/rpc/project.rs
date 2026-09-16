@@ -699,6 +699,8 @@ fn path_kind(err: &PathError) -> &'static str {
 mod tests {
     use super::*;
     use crate::git::testing::{Scratch, git_or_skip};
+    use crate::rpc::{Client, Daemon, DaemonConfig, Endpoint};
+    use nysia_proto::{ClientId, ClientRole, SessionKind};
 
     /// A service over a database of this test's own.
     ///
@@ -1175,5 +1177,347 @@ mod tests {
 
         drop(service);
         let _ = std::fs::remove_dir_all(dir);
+    }
+    // ---------------------------------------------------------------------------------
+    // The live drive: a real daemon, a real socket, and the real agent CLI.
+    // ---------------------------------------------------------------------------------
+
+    /// How long to wait for the agent to paint something and for a hook to arrive.
+    ///
+    /// Generous, because a first run of the CLI in a folder it has not seen asks about trust
+    /// before it draws anything, and because the whole point of the test is what a person
+    /// actually sees rather than what a fixture can be made to do quickly.
+    const LIVE_DEADLINE: Duration = Duration::from_secs(90);
+
+    /// What the CLI draws once it is past trust and has a session.
+    ///
+    /// # Why three strings out of the agent's screen are in `rpc/`
+    ///
+    /// D-4 keeps Claude's specifics in one module and this file is not it — but the rule is
+    /// about the **seam**, and the seam is `program_for`, which names no agent and must not.
+    /// These three are a test's knowledge of what it is typing at: driving a real CLI through
+    /// its trust prompt and reading its banner is not a seam, it is the CLI. They are grouped
+    /// here so that a release that moves them is one edit, and the assertion the proof rests
+    /// on is the neutral one below — the agent answered with a word this test chose.
+    const AGENT_BANNER: &str = "Claude Code v";
+
+    /// What it draws instead when the credentials it was left with are not enough.
+    const AGENT_NO_AUTH: &str = "Invalid API key";
+
+    /// The folder-trust question the CLI asks the first time it opens a worktree.
+    const AGENT_TRUST: &str = "trust this folder";
+
+    /// What this test asks the agent to say, so that "it answered" is something to look for.
+    const AGENT_WORD: &str = "pomegranate";
+
+    /// `Start ->` on a branch, with a real agent in the worktree, proved end to end.
+    ///
+    /// # Why this is `#[ignore]`d rather than skipped like the rest
+    ///
+    /// Everything else in this module skips on [`git_or_skip`] and runs everywhere. This one
+    /// cannot: it needs the agent CLI installed, a machine whose credentials that CLI will
+    /// accept, and `NYSIA_RUNTIME_DIR` pointing somewhere this test may bind a socket — and
+    /// `nysia hook`, which the agent spawns, finds this daemon through that same variable or
+    /// not at all. Three preconditions no CI runner meets. An `#[ignore]` says that once, in
+    /// the place somebody reads before running it; a silent skip would be `path.rs`'s
+    /// `a_short_name_expands_to_the_long_one` again — green on every machine and doing its
+    /// job on none.
+    ///
+    /// Run it with `NYSIA_RUNTIME_DIR` set to a directory you own:
+    ///
+    /// ```text
+    /// cargo test -p nysia-core --lib -- --ignored --nocapture a_real_agent
+    /// ```
+    ///
+    /// # What it is for
+    ///
+    /// The fixture tests next door prove the mechanism — `agent::claude::launch`'s session
+    /// tests spawn a CLI they wrote themselves and drive it to a prompt on both legs. Two
+    /// things they structurally cannot answer, and this is where they get answered:
+    ///
+    /// 1. **Authentication.** §7.1 scrubs `ANTHROPIC_API_KEY` and the three
+    ///    `CLAUDE_CODE_*SESSION*` markers from every session, which is correct and stays. On
+    ///    a machine authenticated by subscription rather than by key, whether what is left is
+    ///    enough is a question about that machine, and the only honest way to ask it is to
+    ///    start one and look.
+    /// 2. **Status.** §3.2 makes the pane-key variable a *hint* and the process tree the
+    ///    proof, and the tree an agent started by the daemon **in a worktree** sits in is a
+    ///    shape the ancestry walk had never met. The dot is v0.2's whole point.
+    #[tokio::test]
+    #[ignore = "needs the agent CLI, a machine it can authenticate on, and NYSIA_RUNTIME_DIR"]
+    async fn a_real_agent_starts_in_a_worktree_and_lights_its_dot() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let agent = crate::agent::launch(std::iter::empty::<&std::ffi::OsStr>())
+            .expect("this test needs the agent CLI on PATH; it is the thing being driven");
+        println!("[live] agent resolves to {}", agent.program().display());
+
+        let scratch = Scratch::new("live-agent");
+        let repo = scratch.repository("repo");
+
+        // A real daemon on the endpoint this process's environment names, which is the same
+        // endpoint the `nysia hook` the agent spawns will resolve.
+        let endpoint = Endpoint::from_env().expect("NYSIA_RUNTIME_DIR must name a usable dir");
+        println!("[live] daemon endpoint {}", endpoint.listening());
+        let (daemon, listener) = Daemon::bind(DaemonConfig {
+            idle_retire_after: None,
+            ..DaemonConfig::new(endpoint.clone())
+        })
+        .expect("a daemon binds on the endpoint the environment names");
+        let serving = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move {
+                let _ = daemon.serve(listener).await;
+            }
+        });
+
+        let client_id: ClientId = "nysia-live".parse().expect("a client id");
+        let mut client = Client::connect(&endpoint, &client_id, ClientRole::Control)
+            .await
+            .expect("the daemon accepts a control connection");
+
+        let project = client
+            .project_register(repo.clone())
+            .await
+            .expect("the fixture repository registers")
+            .project;
+
+        // Phase one: a shell, only to make the worktree so the agent's hooks can be written
+        // into it before the agent is started. `nysia agent hooks install` writes the user's
+        // own settings file; this writes the worktree's, so the machine running the test is
+        // left exactly as it was.
+        let branch = "feat/live-agent";
+        let shell = client
+            .project_start(ProjectStart {
+                project: project.id.clone(),
+                branch: branch.to_owned(),
+                kind: SessionKind::Shell,
+                profile: None,
+            })
+            .await
+            .expect("a shell starts the branch");
+        client
+            .session_close(shell.handle)
+            .await
+            .expect("the shell closes");
+
+        let worktree = repo
+            .join(crate::worktree::WORKTREE_BASE[0])
+            .join(crate::worktree::WORKTREE_BASE[1])
+            .join("feat-live-agent");
+        assert!(worktree.is_dir(), "{} is not there", worktree.display());
+        let settings = worktree.join(".claude").join("settings.json");
+        std::fs::create_dir_all(
+            settings
+                .parent()
+                .expect("the settings file has a directory"),
+        )
+        .expect("a project settings directory");
+        let nysia = built_nysia();
+        let change =
+            crate::agent::hooks::install(&settings, &nysia).expect("the worktree's hooks install");
+        println!(
+            "[live] installed {} hooks into {} pointing at {}",
+            change.installed,
+            settings.display(),
+            nysia.display()
+        );
+
+        // Phase two: the agent, in the worktree the shell made, adopted by branch (D-6).
+        let started = client
+            .project_start(ProjectStart {
+                project: project.id.clone(),
+                branch: branch.to_owned(),
+                kind: SessionKind::Agent,
+                profile: None,
+            })
+            .await
+            .expect("an agent session starts in the worktree");
+        assert!(started.adopted, "the worktree the shell made is adopted");
+        println!(
+            "[live] agent session {} in pane {}",
+            started.handle, started.pane_key
+        );
+
+        let sessions = client.session_list().await.expect("the session lists");
+        let agent_row = sessions
+            .iter()
+            .find(|summary| summary.handle == started.handle)
+            .expect("the agent session is listed");
+        assert_eq!(agent_row.kind, SessionKind::Agent);
+        println!("[live] tab title {:?}", agent_row.title);
+        assert!(
+            !agent_row.title.contains('/') && !agent_row.title.contains('\\'),
+            "a tab is labelled with a name, never a path: {:?}",
+            agent_row.title
+        );
+
+        // The CLI opens in a folder it has never seen, so the first thing on the screen is
+        // its trust prompt rather than a REPL. Answering it is part of driving the real
+        // thing: a test that stopped here would be reporting "it painted something".
+        let trust = live_until(&mut client, &started.handle, |text| {
+            text.contains(AGENT_TRUST)
+        })
+        .await;
+        println!("[live] ---- trust prompt ----\n{trust}\n[live] ----------------");
+        assert!(
+            trust.contains(
+                &worktree
+                    .file_name()
+                    .expect("the worktree has a name")
+                    .to_string_lossy()
+                    .into_owned()
+            ),
+            "the agent opened somewhere other than the worktree"
+        );
+        // Down, then return: the default is "No, exit".
+        live_send(&mut client, &started.handle, "\u{1b}[B", false).await;
+        live_send(&mut client, &started.handle, "", true).await;
+
+        // It reaches a prompt, and this is the **authentication** question: the session scrub
+        // takes `ANTHROPIC_API_KEY` with it deliberately, so whether what is left is enough
+        // on a subscription machine is not something to reason about. The banner is the
+        // signal rather than a string out of the CLI's chrome, which moves between releases:
+        // it is drawn once, after trust is answered and a session exists.
+        let screen = live_until(&mut client, &started.handle, |text| {
+            text.contains(AGENT_BANNER) || text.contains(AGENT_NO_AUTH)
+        })
+        .await;
+        println!("[live] ---- prompt ----\n{screen}\n[live] ----------------");
+        assert!(
+            !screen.contains(AGENT_NO_AUTH),
+            "the session scrub left the CLI unable to authenticate; widening the scrub is not \
+             the fix, and a security default a caller can undo is not a default"
+        );
+        assert!(
+            screen.contains(AGENT_BANNER),
+            "the CLI never reached its prompt; screen was:\n{screen}"
+        );
+
+        // And the dot lights. The hook the agent runs resolves its pane from the process
+        // tree, not from the hint in its environment, so this is the ancestry walk answering
+        // for a tree the daemon started inside a worktree.
+        // Typed, then submitted, in two writes. The CLI's input box reads a whole line
+        // arriving at once as a paste and keeps the trailing return with it, so a single
+        // `enter: true` send leaves the prompt sitting in the box unsent — which looks
+        // exactly like an agent that never answered.
+        live_send(
+            &mut client,
+            &started.handle,
+            &format!("reply with exactly the word {AGENT_WORD} and nothing else"),
+            false,
+        )
+        .await;
+        live_send(&mut client, &started.handle, "", true).await;
+        let statuses = live_status(&mut client, &started.pane_key).await;
+        println!("[live] statuses: {statuses:?}");
+        let [status] = statuses.as_slice() else {
+            panic!("the agent's pane has one status, got {statuses:?}");
+        };
+        assert_eq!(status.pane(), &started.pane_key);
+        assert!(
+            !status.lead.restored_unconfirmed,
+            "the pane must have been **proved** from the process tree; an unconfirmed row is \
+             the hint being taken on trust, which §3.2 forbids"
+        );
+
+        // **The neutral proof, and the one the rest rests on.** An agent that could not
+        // authenticate, or that was handed an environment marking it somebody's child
+        // session, never gets this far — whatever its banner said. Twice, because the word
+        // is on the screen once already as the line that was typed.
+        let after = live_until(&mut client, &started.handle, |text| {
+            text.matches(AGENT_WORD).count() > 1
+        })
+        .await;
+        println!("[live] ---- after ----\n{after}\n[live] ----------------");
+        assert!(
+            after.matches(AGENT_WORD).count() > 1,
+            "the agent never answered; the screen shows only what was typed:\n{after}"
+        );
+
+        let _ = client.session_close(started.handle).await;
+        daemon.shutdown();
+        serving.abort();
+    }
+
+    /// Where `cargo build -p nysia` leaves the binary the hooks point at.
+    fn built_nysia() -> std::path::PathBuf {
+        let exe = std::env::current_exe().expect("the test binary");
+        // `target/<profile>/deps/nysia_core-<hash>.exe` -> `target/<profile>/nysia`.
+        let profile_dir = exe
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the test binary is under target/<profile>/deps");
+        let nysia = profile_dir.join(if cfg!(windows) { "nysia.exe" } else { "nysia" });
+        assert!(
+            nysia.is_file(),
+            "{} is not there; run `cargo build -p nysia` first",
+            nysia.display()
+        );
+        nysia
+    }
+
+    /// Type at the session, the way a person at the tab would.
+    async fn live_send(
+        client: &mut Client,
+        handle: &nysia_proto::SessionHandle,
+        text: &str,
+        enter: bool,
+    ) {
+        client
+            .terminal_send(nysia_proto::TerminalSend {
+                handle: handle.clone(),
+                text: text.to_owned(),
+                enter,
+                interrupt: false,
+            })
+            .await
+            .expect("the session takes input");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    /// Read the session's screen until `predicate` holds, or give up at [`LIVE_DEADLINE`].
+    async fn live_until(
+        client: &mut Client,
+        handle: &nysia_proto::SessionHandle,
+        predicate: impl Fn(&str) -> bool,
+    ) -> String {
+        let deadline = std::time::Instant::now() + LIVE_DEADLINE;
+        loop {
+            let read = client
+                .terminal_read(nysia_proto::TerminalRead {
+                    handle: handle.clone(),
+                    mode: nysia_proto::ReadMode::Screen,
+                    cursor: None,
+                    limit: None,
+                })
+                .await
+                .expect("the screen reads");
+            let text = read.lines.join("\n");
+            if predicate(&text) || std::time::Instant::now() >= deadline {
+                return text;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    /// Poll for a status row against `pane`, returning whatever was there at the deadline.
+    async fn live_status(
+        client: &mut Client,
+        pane: &nysia_proto::PaneKey,
+    ) -> Vec<nysia_proto::AgentStatus> {
+        let deadline = std::time::Instant::now() + LIVE_DEADLINE;
+        loop {
+            let statuses = client.agent_status_list().await.expect("status lists");
+            let ours: Vec<_> = statuses
+                .into_iter()
+                .filter(|status| status.pane() == pane)
+                .collect();
+            if !ours.is_empty() || std::time::Instant::now() >= deadline {
+                return ours;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 }
