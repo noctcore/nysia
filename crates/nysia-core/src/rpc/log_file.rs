@@ -200,12 +200,11 @@ use std::path::{Path, PathBuf};
 ///   one writer that applies this module's rule to it before it reaches the file.
 /// - Traps 6 and 11 are ConPTY teardown, and that is the failure someone would most want a
 ///   line for — but the crate makes no `log::` call around `ClosePseudoConsole`, the reader
-///   drain or EOF, so there is no teardown line to give up. `rg 'log::' pty/src` at that rev
-///   is how that was established: every call site it returns is either one this module
-///   already names or one in `serial.rs`, which Nysia never reaches because it opens ptys
-///   through `native_pty_system` and never a serial port. How many there were is not
-///   quoted, because nothing in this repo runs that `rg` — and an unchecked count is what
-///   the rest of this module is careful not to write down.
+///   drain or EOF, so there is no teardown line to give up. That was read off
+///   `rg 'log::' pty/src` at the pinned rev. Neither a count of what it returned nor a
+///   roster of it is quoted here, because nothing in this repo runs that command, and a
+///   figure or a list somebody once read off a terminal is the kind of claim the rest of
+///   this module does not make. The bullet below says what `off` does cost.
 /// - What is genuinely given up is `cmdbuilder.rs`'s Unix shell resolution warnings: the
 ///   `$SHELL` one, and the passwd-lookup ones its `cfg(unix)` `get_shell` writes beside
 ///   it. Those are the leak.
@@ -247,8 +246,8 @@ pub const LOG_ENV: &str = "NYSIA_LOG";
 /// makes the two cases different in kind rather than in degree. Somebody debugging a spawn
 /// that failed raises the level and gets no terminal bytes; somebody who has decided they
 /// need the parser's own output types a word that says `UNCONFINED` and is told what that
-/// means. Neither can happen to the other by accident, and `rg NYSIA_LOG_UNCONFINED` finds
-/// every place it is honoured.
+/// means. Neither can happen to the other by accident. The code that branches on this reads
+/// it through [`confinement_lifted`] rather than by name, so that is the thing to grep for.
 pub const UNCONFINED_ENV: &str = "NYSIA_LOG_UNCONFINED";
 
 /// Whether this process was asked, by [`UNCONFINED_ENV`]'s own name, to drop the confinement.
