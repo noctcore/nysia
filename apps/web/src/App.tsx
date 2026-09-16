@@ -8,6 +8,7 @@ import { SessionPane } from './session/SessionPane';
 import { SettingsScreen } from './settings/SettingsScreen';
 import { ProjectsSidebar } from './sidebar/ProjectsSidebar';
 import { useSnapshot } from './store/hooks';
+import { TasksScreen } from './tasks/TasksScreen';
 import { ComingSoon } from './ui/ComingSoon';
 
 /**
@@ -46,13 +47,7 @@ function AppBody({ onOpenSettings }: { readonly onOpenSettings: () => void }) {
       <ProjectsSidebar />
       <main className="flex min-h-0 flex-col">
         {nav === 'session' ? <SessionPane /> : null}
-        {nav === 'tasks' ? (
-          <ComingSoon
-            title="Tasks"
-            version="v0.3"
-            detail="Tasks are GitHub Issues, queried live — there is no local task model to build first (D-5)."
-          />
-        ) : null}
+        {nav === 'tasks' ? <TasksScreen /> : null}
         {nav === 'history' ? (
           <ComingSoon
             title="History"
