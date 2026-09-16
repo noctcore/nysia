@@ -1,8 +1,44 @@
 import type { AgentStatus } from '../generated/AgentStatus';
 import type { PaneKey } from '../generated/PaneKey';
+import type { Project } from '../generated/Project';
+import type { ProjectId } from '../generated/ProjectId';
 import type { SessionHandle } from '../generated/SessionHandle';
 import type { SessionKind } from '../generated/SessionKind';
+import type { AddProjectState } from './addProject';
 import type { StoreError } from './errors';
+
+/**
+ * The wire's shapes, re-exported so a component imports them from one place.
+ *
+ * `Project`, `Worktree`, `ProjectId` and `SessionSummary` were hand-written here while
+ * `nysia-proto` had no word for a project. It has one now, so these are the generated types
+ * and nothing else — D-13 is one way only, and a second definition of a shape Rust already
+ * exports is a definition that drifts. The re-export exists so that `store/types.ts` stays
+ * the module the chrome reads, not so that anything here may alter them.
+ *
+ * # What happened to `SessionStatus` and `startedAt`
+ *
+ * The hand-written `SessionSummary` here had `status` and `startedAt`; proto's has
+ * `exitStatus` and `createdAtMs`. One of those pairs is a rename and one is a real
+ * difference, and **proto was right about both**.
+ *
+ * `createdAtMs` is the rename: the same epoch milliseconds under the name the wire uses,
+ * and the sidebar's `21h` was always derived from it rather than stored pre-formatted.
+ *
+ * `status` is the real difference, and it was already dead. Its own doc comment said so:
+ * *"nothing paints from this"*. v0.1 guessed that a five-state `SessionStatus` would become
+ * the sidebar's dot; it did not — agent lifecycle arrived on the wire in v0.2 as
+ * `AgentState`, the dots come from `StoreSnapshot.agentStatus`, and the only thing this
+ * side could ever fill `status` with was a guess derived from `exitStatus`. `DaemonStore`
+ * did exactly that, mapping a live session to `running` and an exited one to `failed` — so
+ * a shell that exited zero was reported as *failed*, because there was no honest value to
+ * give it. `exitStatus` answers the question the daemon can actually answer: how the child
+ * ended, or `null` while it is still running. The guess is gone with the field.
+ */
+export type { Project, ProjectId };
+export type { SessionSummary } from '../generated/SessionSummary';
+export type { Worktree } from '../generated/Worktree';
+export type { AddProjectState } from './addProject';
 
 /**
  * The one boundary between the chrome and whatever is behind it.
@@ -29,67 +65,11 @@ import type { StoreError } from './errors';
  *  - **A command that cannot be satisfied rejects *and* records.** See `./errors`.
  */
 
-/**
- * How a project is addressed.
- *
- * `nysia-proto` does not export a project identity yet (W1 owns the wire surface), so this
- * is a local alias rather than a hand-rolled duplicate of a generated type: the mock keys
- * projects by repository path, which is what the daemon will do too.
- */
-export type ProjectId = string;
-
 /** How a launcher in the `+` menu is addressed. */
 export type LauncherId = string;
 
 /** Which of the three rail destinations is showing. */
 export type NavSection = 'session' | 'tasks' | 'history';
-
-/**
- * Whether the **process** in a pane is alive, which is not agent lifecycle.
- *
- * v0.1 guessed that this would become the sidebar's dot. It did not. `DaemonStore` derives
- * it from `SessionSummary.exitStatus` — "has this pane's child exited" — and that question
- * is answered for shells too, where there is no agent and no lifecycle at all. Agent
- * lifecycle arrived in v0.2 on the wire instead, as `AgentState`, and the plan's §2 is
- * explicit that nobody defines a second one.
- *
- * So **nothing paints from this**. The dots come from `StoreSnapshot.agentStatus` through
- * `./agentStatus`, and this stays only because it is the daemon's honest answer about a
- * process. If a surface ever wants "did this shell exit non-zero", it is already here; if
- * one wants "what is the agent doing", this is the wrong field.
- */
-export type SessionStatus = 'idle' | 'running' | 'needsInput' | 'queued' | 'failed';
-
-/** One agent or shell, as the sidebar and the tab strip see it. */
-export interface SessionSummary {
-  readonly paneKey: PaneKey;
-  readonly handle: SessionHandle;
-  readonly kind: SessionKind;
-  readonly title: string;
-  readonly status: SessionStatus;
-  /** Epoch milliseconds. The sidebar's `21h` is derived, never stored pre-formatted. */
-  readonly startedAt: number;
-}
-
-/**
- * The sessions on one branch.
- *
- * Keyed by branch, never by task id (D-6): a worktree outlives the task that created it,
- * and two tasks on one branch share it.
- */
-export interface Worktree {
-  readonly branch: string;
-  readonly isPrimary: boolean;
-  readonly sessions: readonly SessionSummary[];
-}
-
-export interface Project {
-  readonly id: ProjectId;
-  readonly name: string;
-  /** The sidebar group header — `Dev` in the design mock. */
-  readonly group: string;
-  readonly worktrees: readonly Worktree[];
-}
 
 /** One tab in the strip. A tab is a session, and a session is an agent or a shell. */
 export interface Tab {
@@ -162,6 +142,22 @@ export interface StoreSnapshot {
   readonly errors: readonly StoreError[];
   readonly nav: NavSection;
   readonly projects: readonly Project[];
+  /**
+   * Why the project list is not what the daemon holds, or `null` when it is.
+   *
+   * The sentence comes off the daemon's own error envelope and is shown as the sidebar's
+   * empty state rather than as a failed command. It is **not** a notice: nobody asked for
+   * this list, it is fetched on every connect, and a red *"addProject failed"* box on every
+   * launch is how a user learns to dismiss the notice list unread.
+   *
+   * There is one answer it is guaranteed to carry today. v0.3 wave C1 serves the project
+   * verbs; until it lands the daemon answers `unsupported`, with a sentence saying which
+   * build is which and how to compare them. That is the honest thing for the sidebar to say
+   * — and the reason the ten seeded project names had to go, because *"the daemon has never
+   * heard of a project"* and a list of plausible names is the one thing that cannot be read
+   * off the screen.
+   */
+  readonly projectsUnavailable: string | null;
   readonly activeProjectId: ProjectId | null;
   readonly tabs: readonly Tab[];
   readonly activeTab: PaneKey | null;
@@ -182,6 +178,8 @@ export interface StoreSnapshot {
    * and a pane with no row is painted as *unknown* rather than as idle.
    */
   readonly agentStatus: readonly AgentStatus[];
+  /** Where **Add a project** has got to. See `./addProject`. */
+  readonly addProject: AddProjectState;
 }
 
 /**
@@ -198,6 +196,7 @@ export function emptySnapshot(status: StoreStatus = 'connecting'): StoreSnapshot
     errors: [],
     nav: 'session',
     projects: [],
+    projectsUnavailable: null,
     activeProjectId: null,
     tabs: [],
     activeTab: null,
@@ -205,6 +204,7 @@ export function emptySnapshot(status: StoreStatus = 'connecting'): StoreSnapshot
     daemon: { memoryBytes: 0, terminalCount: 0, worktreeCount: 0 },
     usage: [],
     agentStatus: [],
+    addProject: { phase: 'idle' },
   };
 }
 
@@ -238,6 +238,27 @@ export interface Store {
 
   selectNav(section: NavSection): Promise<void>;
   selectProject(id: ProjectId): Promise<void>;
+  /**
+   * Browse for a folder and register it.
+   *
+   * **It resolves on every answer the daemon can give**, including the three refusals in
+   * v0.3 §3.2 and a path that was already registered, writing the outcome into
+   * `snapshot.addProject` for the dialog to render. Only a failure that is not an answer —
+   * a dropped socket, a daemon that does not serve the verb — rejects and records.
+   *
+   * That split is the whole contract, and getting it wrong is visible to a user: a refusal
+   * that rejected would be routed through `runCommand` into the notice list as *"addProject
+   * failed"*, and §3.2 is explicit that registering a folder twice **is not an error and
+   * must not look like one**. A folder holding several repositories is a choice to make,
+   * not a fault either.
+   *
+   * Cancelling the picker is an answer too, and the quietest one: the state returns to
+   * `idle` and nothing is said. Calling this while a picker is already open does nothing —
+   * two pickers is two registrations racing.
+   */
+  addProject(): Promise<void>;
+  /** Clear whatever `addProject` last said. Idempotent, like `dismissError`. */
+  dismissAddProject(): Promise<void>;
   selectTab(paneKey: PaneKey): Promise<void>;
   closeTab(paneKey: PaneKey): Promise<void>;
   openTab(launcher: LauncherId): Promise<void>;

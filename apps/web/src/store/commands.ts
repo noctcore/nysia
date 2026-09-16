@@ -39,6 +39,8 @@ export interface StoreCommands {
   selectTab(paneKey: PaneKey, onSettled?: () => void): void;
   closeTab(paneKey: PaneKey, onSettled?: () => void): void;
   openTab(launcher: LauncherId, onSettled?: () => void): void;
+  addProject(onSettled?: () => void): void;
+  dismissAddProject(onSettled?: () => void): void;
   dismissError(id: string, onSettled?: () => void): void;
 
   readonly window: WindowCommands;
@@ -94,6 +96,9 @@ export function routeCommands(store: Store): StoreCommands {
       runCommand('closeTab', store.closeTab(paneKey), onSettled),
     openTab: (launcher, onSettled) =>
       runCommand('openTab', store.openTab(launcher), onSettled),
+    addProject: (onSettled) => runCommand('addProject', store.addProject(), onSettled),
+    dismissAddProject: (onSettled) =>
+      runCommand('dismissAddProject', store.dismissAddProject(), onSettled),
     dismissError: (id, onSettled) =>
       runCommand('dismissError', store.dismissError(id), onSettled),
 

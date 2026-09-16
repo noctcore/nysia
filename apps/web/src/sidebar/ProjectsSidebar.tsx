@@ -156,7 +156,7 @@ function SessionRow({
       )}
       <span className="truncate">{session.title}</span>
       <span className="text-fg3 ml-auto text-[11px]">
-        {formatAge(now, session.startedAt)}
+        {formatAge(now, session.createdAtMs)}
       </span>
     </button>
   );

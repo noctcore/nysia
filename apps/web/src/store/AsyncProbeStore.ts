@@ -119,6 +119,33 @@ export class AsyncProbeStore implements Store {
     });
   };
 
+  /**
+   * Settles a turn late and through two frames, like every other verb here.
+   *
+   * It resolves to a *refusal* rather than to idle, which is the hostile choice and the
+   * deliberate one: the contract says `addProject` resolves on every answer the daemon can
+   * give, so a probe that only ever reached `idle` would let a suite pass that had quietly
+   * assumed a refusal rejects. The mock takes the other branch, so between them both are
+   * exercised.
+   */
+  addProject = async (): Promise<void> => {
+    await this.#ack();
+    this.#emit((current) => ({
+      ...current,
+      addProject: {
+        phase: 'refused',
+        code: 'many_repositories',
+        message: 'that folder is not a git repository, but 3 of the folders in it are',
+        nextSteps: ['Pick one of these and register that folder instead: nysia, orca, valve.'],
+      },
+    }));
+  };
+
+  dismissAddProject = async (): Promise<void> => {
+    await this.#ack();
+    this.#emit((current) => ({ ...current, addProject: { phase: 'idle' } }));
+  };
+
   dismissError = async (id: string): Promise<void> => {
     await this.#ack();
     this.#emit((current) => ({

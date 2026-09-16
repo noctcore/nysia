@@ -34,6 +34,21 @@ export interface DaemonBridge {
 
 /** How a Tauri command reports a failure, mirroring `daemon::CommandFailure` in Rust. */
 export interface CommandFailure {
+  /**
+   * What went wrong, as one word from a closed set — `DaemonError::kind` in Rust.
+   *
+   * The machine-readable half of the pair. `message` and `nextSteps` are for a person;
+   * this is for the code that has to do something different depending on which failure
+   * arrived, which registering a folder is the first thing to genuinely need: §3.2 has
+   * four answers a user must be able to tell apart, and matching on English to find them
+   * is the coupling a wire `ErrorCode` exists to remove.
+   *
+   * It is not exhaustive and must not be switched on as though it were. Rust renders a
+   * code from a newer daemon as `other` rather than passing it through, so an unknown
+   * kind is a real possibility — and one that is survivable, because the sentence and the
+   * next steps arrive either way.
+   */
+  readonly kind: string;
   readonly message: string;
   readonly nextSteps: readonly string[];
   readonly retryable: boolean;
@@ -69,12 +84,29 @@ export function isRetryable(cause: unknown): boolean {
   return isCommandFailure(cause) ? cause.retryable : true;
 }
 
+/**
+ * The daemon's own answer behind a rejection, or `null` when there is not one.
+ *
+ * Exported because a caller that has to branch needs the *parts* — the code to branch on,
+ * and the message and steps to render separately rather than joined into one sentence.
+ * {@link describeFailure} is the right thing for a notice; this is the right thing for a
+ * dialog that puts each part somewhere different.
+ *
+ * `null` for a rejection that never reached the daemon: a Tauri-level failure before the
+ * command ran, a plain string, a `TypeError`. That distinction is load-bearing for the
+ * register dialog, which treats a refusal as an answer and everything else as a failure.
+ */
+export function asCommandFailure(cause: unknown): CommandFailure | null {
+  return isCommandFailure(cause) ? cause : null;
+}
+
 function isCommandFailure(cause: unknown): cause is CommandFailure {
   if (typeof cause !== 'object' || cause === null) {
     return false;
   }
   const candidate = cause as Partial<CommandFailure>;
   return (
+    typeof candidate.kind === 'string' &&
     typeof candidate.message === 'string' &&
     Array.isArray(candidate.nextSteps) &&
     typeof candidate.retryable === 'boolean'

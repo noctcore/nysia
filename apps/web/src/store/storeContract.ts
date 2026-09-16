@@ -441,6 +441,13 @@ export function observable(snapshot: StoreSnapshot): Observable {
   return {
     nav: snapshot.nav,
     projects: snapshot.projects,
+    // Both are watched rather than exempt, and for the reason the exempt fields are exempt:
+    // nothing arrives in either on the provider's own schedule. `projectsUnavailable` moves
+    // when the project list is re-read, `addProject` moves when somebody presses `+`, and a
+    // failed `selectProject` doing either would be the panel on screen changing under a user
+    // who touched something else.
+    projectsUnavailable: snapshot.projectsUnavailable,
+    addProject: snapshot.addProject,
     activeProjectId: snapshot.activeProjectId,
     tabs: snapshot.tabs,
     activeTab: snapshot.activeTab,
