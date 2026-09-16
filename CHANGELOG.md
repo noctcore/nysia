@@ -76,16 +76,16 @@ harness moved. It is also the release where an agent session first exists — th
   process that never unlinked it was read as an endpoint in use, so the daemon that replaced it
   could not bind. Liveness is decided by reaching the socket, never by the file existing.
 - **A daemon that could not serve no longer reports success.** The fix above stops a stale
-  socket producing `AlreadyBound` at all; it left the mapping behind it alone, and `bind_unix`
-  still answers `AlreadyBound` for a regular file, a symlink, a liveness probe that failed with
-  anything other than `ConnectionRefused`, and a `remove_file` that was refused. Each of those
-  became *already running* and a success exit — which is the one thing a supervisor must not be
-  told wrongly, because it waits for a daemon nobody is going to start. `AlreadyBound` is the
-  transport's reading of a failed `bind` and not a claim about the world, so the claim is now
-  checked by dialling: a daemon that refuses this build's handshake still counts, since D-11
-  lets the window and the daemon run different versions and one too new to talk to this build
-  is still listening. Only a transport failure is nobody, and that exits non-zero saying what
-  to do about it.
+  socket *nothing answers on* from producing `AlreadyBound`; the mapping behind it was left
+  alone, and `bind_unix` still answers `AlreadyBound` for a regular file, a symlink, a liveness
+  probe that failed with anything other than `ConnectionRefused`, and a `remove_file` that was
+  refused. Each of those became *already running* and a success exit — the one thing a
+  supervisor must not be told wrongly, because it then waits for a daemon nobody is going to
+  start. `AlreadyBound` is the transport's reading of a failed `bind` and not a claim about the
+  world, so the claim is now checked by dialling: a daemon that refuses this build's handshake
+  still counts, since D-11 lets the window and the daemon run different versions and one too
+  new to talk to this build is still listening. Only a transport failure is nobody, and that
+  exits non-zero saying what to do about it.
 - **An endpoint whose every pipe instance is taken is no longer read as an empty one.** A dial
   re-opens a busy pipe on a bounded schedule — a race, not a queue, since the window is one
   `CreateNamedPipeW` long — and busy is now a third answer rather than *nothing is listening*,
@@ -306,16 +306,17 @@ that did not ship, and it lands in 0.3.0.
 - **The handle-inheritance guarantee is provable now, and its hole is written down.** Windows
   inherits *every* inheritable handle when any stdio is redirected, and the daemon spawn has
   to redirect. Detaching the parent's three standard handles is what stopped the reported case
-  — a daemon spawned inside `H=$(nysia session create)` held the shell's own stdout pipe open
-  for its whole life — but the test behind it read back only this process's standard handles,
-  which Rust never sets the inherit flag on, so it passed against a deleted body and against a
-  windowed process that has no standard handles at all. `detach_parent_stdio` is now
-  `stop_inheriting(&[handle])` over a named list, and the proof plants an inheritable handle
-  of its own and reads it back through `GetHandleInformation`; gutting the loop reds it. The
-  handle no caller can name is **not** closed, and is recorded rather than claimed: the fix
-  for it is `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, which needs `CommandExt::raw_attribute` —
-  absent on the rustc this repo pins — and two obstacles that would outlive a bump are written
-  down beside the function.
+  — a daemon spawned inside `H=$(nysia session create)` held the *spawner's* own stdout pipe
+  open for its whole life, so the shell waited for an answer it already had — but the test
+  behind it read back only this process's standard handles, which Rust never sets the inherit
+  flag on, so it passed against a deleted body and against a windowed process that has no
+  standard handles at all. `detach_parent_stdio` is now `stop_inheriting(&[handle])` over a
+  named list, and the proof plants an inheritable handle of its own and reads it back through
+  `GetHandleInformation`; gutting the loop reds it. The handle no caller can name is **not**
+  closed, and is recorded rather than claimed: the fix for it is
+  `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, which needs `CommandExt::raw_attribute` — absent on the
+  rustc this repo pins — and two obstacles that would outlive a bump are written down beside
+  the function.
 
 ### Deliberately not in this release
 
