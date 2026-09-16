@@ -9,9 +9,25 @@
 //! `apps/web` has been reading this shape since the Tasks screen shipped, out of a
 //! hand-written mirror that said so in its own documentation: *"Rust does not export these
 //! yet — wave C1 serves `tasks_list`, and their `nysia-proto` types land with them."* This is
-//! that landing. D-13 makes Rust the sole authority on a wire shape the moment Rust spells
-//! it, so the mirror and the runtime check that guarded it are now redundant and the window
-//! re-exports the generated type instead.
+//! that landing: D-13 makes Rust the sole authority on a wire shape the moment Rust spells
+//! it, and this is Rust spelling it.
+//!
+//! **The window has not moved onto it, and this module does not get to say that it has.**
+//! `apps/web/src/tasks/issue.ts` is still hand-written, still what the store and the screen
+//! import, and still guarded at runtime by `transport/tasks.ts`; nothing imports the
+//! generated type yet. Moving it is a change in `apps/web` and it is not in this one.
+//!
+//! It will not be a deletion when it happens, either. `issue.ts` says so itself — *"this file
+//! does not then become a re-export of the generated type"* — because it describes the shape
+//! the **screen** draws rather than the shape the wire carries. What the generated type
+//! replaces is the wire half: `transport/tasks.ts` starts from this instead of from
+//! `unknown`, `tsc` takes over the work of noticing a missing field, and the conversion those
+//! functions already do is what stays.
+//!
+//! One thing for whoever does it to re-read rather than trust: two of the three differences
+//! `issue.ts` lists are differences from *gh*, and the daemon now flattens both before they
+//! reach this type. What that leaves worth converting is a question for that change, with
+//! both files open.
 //!
 //! The shape is taken from what the window already parses, not invented beside it. Four
 //! fields are non-optional because its reader refuses a row without them — `number`, `title`,
