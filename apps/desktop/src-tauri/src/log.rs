@@ -105,10 +105,15 @@ const TRIM_INTERVAL: Duration = Duration::from_secs(30);
 pub fn install() -> Option<PathBuf> {
     let asked = std::env::var(log_file::LOG_ENV).unwrap_or_default();
     let lifted = log_file::confinement_lifted();
+    // Screened once and handed on, rather than screened again inside [`confine`]. The two
+    // calls cannot disagree — it is a pure function of the same string — but a reader had to
+    // establish that before they could be sure the line being announced was the line being
+    // dropped.
+    let screened = log_file::screen_directives(&asked);
     let filter = if lifted {
         unconfined(&asked)
     } else {
-        confine(&asked)
+        confine(&screened)
     };
 
     let opened = Endpoint::from_env()
@@ -153,7 +158,7 @@ pub fn install() -> Option<PathBuf> {
     if lifted {
         tracing::warn!("{}", log_file::unconfined_note());
     } else {
-        for refused in log_file::screen_directives(&asked).refused {
+        for refused in &screened.refused {
             tracing::warn!("{}", log_file::refusal_note(refused));
         }
     }
@@ -169,14 +174,15 @@ pub fn install() -> Option<PathBuf> {
 /// applied *after* the user's filter, so raising the level to debug something does not switch
 /// the rule off either (CLAUDE.md §6).
 ///
+/// Takes what [`log_file::screen_directives`] already answered, because [`install`] screens
+/// once and announces the refusals out of the same answer it filters by.
+///
 /// A directive that does not parse is skipped rather than panicking a window at startup, and
 /// `every_confined_directive_parses` in `nysia`'s `log` module is what stops one shipping —
 /// though a parse is only half of it, because a directive can also parse and match nothing.
 /// `a_failed_spawns_path_does_not_reach_a_confined_log`, beside it, is the half that plants a
 /// real spawn. Neither of those can speak for this copy, which is what the tests below are for.
-fn confine(asked: &str) -> EnvFilter {
-    let screened = log_file::screen_directives(asked);
-
+fn confine(screened: &log_file::Screened<'_>) -> EnvFilter {
     log_file::CONFINED_TARGETS
         .iter()
         .filter_map(|directive| directive.parse().ok())
@@ -315,6 +321,15 @@ mod tests {
             .fold(EnvFilter::new(asked), EnvFilter::add_directive)
     }
 
+    /// The whole of what [`install`] does to a `NYSIA_LOG` value, from the value.
+    ///
+    /// [`confine`] takes what [`log_file::screen_directives`] already answered, because
+    /// `install` screens once and announces the refusals out of that same answer. Every test
+    /// below writes the string rather than the split, so the screen is done here.
+    fn confined(asked: &str) -> EnvFilter {
+        confine(&log_file::screen_directives(asked))
+    }
+
     /// One line on each target [`log_file::CONFINED_TARGETS`] holds down, at its real level.
     ///
     /// Raised rather than provoked, and that is the honest limit of what this file can do:
@@ -355,7 +370,7 @@ mod tests {
                  would hold for the wrong reason: {leaked}"
             );
 
-            let written = through(confine(asked), || as_the_terminal_crates_would(SENTINEL));
+            let written = through(confined(asked), || as_the_terminal_crates_would(SENTINEL));
             assert!(
                 !written.contains(SENTINEL),
                 "NYSIA_LOG={asked} out-specified the window's confinement: {written}"
@@ -384,7 +399,7 @@ mod tests {
                  would hold for the wrong reason: {leaked}"
             );
 
-            let written = through(confine(asked), || {
+            let written = through(confined(asked), || {
                 tracing::info_span!("serving").in_scope(|| as_the_terminal_crates_would(SENTINEL));
             });
             assert!(
@@ -410,7 +425,7 @@ mod tests {
              {leaked}"
         );
 
-        let written = through(confine("trace"), || {
+        let written = through(confined("trace"), || {
             as_the_terminal_crates_would(SENTINEL);
             tracing::trace!(target: "nysia_desktop::commands", verb = "stream_attach", "served");
         });
@@ -438,7 +453,7 @@ mod tests {
             "the window's way out does not let anything out: {lifted}"
         );
 
-        let held = through(confine(asked), || as_the_terminal_crates_would(SENTINEL));
+        let held = through(confined(asked), || as_the_terminal_crates_would(SENTINEL));
         assert!(
             !held.contains(SENTINEL),
             "the same string was honoured without anybody naming the way out: {held}"
@@ -450,7 +465,7 @@ mod tests {
         // A screen that answered `NYSIA_LOG=vte::ansi=trace` with a window that logged nothing
         // would have traded one bug for a worse one, and this module's whole reason for
         // existing is that a silent window is unreadable in a release build.
-        let written = through(confine("vte::ansi=trace"), || {
+        let written = through(confined("vte::ansi=trace"), || {
             tracing::info!(target: "nysia_desktop::commands", verb = "stream_attach", "served");
             tracing::debug!(target: "nysia_desktop::commands", "below the default");
         });
