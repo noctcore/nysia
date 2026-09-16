@@ -39,18 +39,21 @@
 //! which is the representable-but-wrong state D-6 exists to prevent. Each omission is logged
 //! with its reason, so a repository that lists nothing is diagnosable rather than mysterious.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use nysia_proto::{
     ErrorCode, ErrorEnvelope, Project, ProjectForget, ProjectId, ProjectRegister,
-    ProjectRegistered, RegisterRefusal, ResponsePayload, Worktree,
+    ProjectRegistered, ProjectStart, ProjectStarted, RegisterRefusal, ResponsePayload,
+    SessionCreate, Worktree,
 };
 
 use crate::git::{CanonicalPath, Folder, Git, GitError, PathError, Repository};
-use crate::rpc::errors::envelope;
+use crate::rpc::errors::{IntoEnvelope, envelope};
 use crate::rpc::session::SessionRegistry;
 use crate::store::{Forgotten, Registration, Store, StoreError, StoredProject};
+use crate::worktree::StartError;
 
 /// The deadline one project's git invocation gets while a list is being composed.
 ///
@@ -65,6 +68,16 @@ use crate::store::{Forgotten, Registration, Store, StoreError, StoredProject};
 /// Two seconds is far longer than `git worktree list` takes on a local repository and short
 /// enough that a folder on a disconnected share degrades rather than stalls the window.
 const LIST_DEADLINE: Duration = Duration::from_secs(2);
+
+/// The size a `Start →` session opens at.
+///
+/// The window resizes it as soon as the tab is laid out, so this only has to be a sane
+/// terminal rather than the right one — and it is the same pair `nysia session create`
+/// defaults to, because two different defaults for the same question is one of them being
+/// wrong somewhere.
+const START_COLS: u16 = 120;
+/// See [`START_COLS`].
+const START_ROWS: u16 = 30;
 
 /// The projects this daemon has registered, and the live half of each.
 #[derive(Debug)]
@@ -203,8 +216,9 @@ impl ProjectService {
     /// Composing costs one `git worktree list` per project. Run in sequence, ten projects is
     /// ten spawns end to end on a path the sidebar waits on, and the window's control
     /// connection is drained in order — so it is also ten spawns that `terminal_send` waits
-    /// behind. Run concurrently, ten projects cost roughly one spawn of wall time, and the
-    /// worst case is [`LIST_DEADLINE`] rather than ten of them.
+    /// behind. Run concurrently under **one absolute deadline**, ten projects cost roughly one
+    /// spawn of wall time and the whole verb is bounded by [`LIST_DEADLINE`] — not by ten of
+    /// them, which is what a per-project timeout awaited in a loop would have cost.
     ///
     /// # A project that cannot be reached is still a project
     ///
@@ -237,12 +251,17 @@ impl ProjectService {
             ));
         }
 
+        // **One deadline for the whole list, fixed before the first await.** The tasks are
+        // already running concurrently, so they all started at the same instant and an
+        // absolute deadline treats every one of them alike. A fresh `timeout(LIST_DEADLINE,
+        // …)` per project would not: its clock starts when it is *awaited*, and these are
+        // awaited in a loop, so ten unreachable projects would cost ten deadlines end to end
+        // — the very stall the fan-out exists to prevent, hidden behind code that looks
+        // bounded.
+        let deadline = tokio::time::Instant::now() + LIST_DEADLINE;
         let mut projects = Vec::with_capacity(running.len());
         for (unreachable, task) in running {
-            // Each project gets its own deadline rather than sharing one across the list.
-            // A shared deadline would have the last project in a long list punished for the
-            // time the first one took, which is the sidebar reordering its own failures.
-            projects.push(match tokio::time::timeout(LIST_DEADLINE, task).await {
+            projects.push(match tokio::time::timeout_at(deadline, task).await {
                 Ok(Ok(Some(project))) => project,
                 Ok(Ok(None)) => unreachable,
                 Ok(Err(err)) => {
@@ -252,14 +271,102 @@ impl ProjectService {
                 Err(_) => {
                     tracing::warn!(
                         project = %unreachable.id,
-                        "git did not answer for a project within {LIST_DEADLINE:?}; \
-                         listing it with no worktrees"
+                        "the project list passed its {LIST_DEADLINE:?} deadline; listing this \
+                         project with no worktrees"
                     );
                     unreachable
                 }
             });
         }
         ResponsePayload::ProjectList { projects }
+    }
+
+    /// `Start →`: a branch-keyed worktree, a session in it, and what opens a tab.
+    ///
+    /// Blocking, and more so than the others: it canonicalises, runs git up to four times and
+    /// spawns a pty. Every caller runs it on the blocking pool.
+    ///
+    /// # The order, and what is left behind when a step fails
+    ///
+    /// The worktree first, then the session in it. A worktree that was created and whose
+    /// session then failed to spawn is **left where it is**: removing worktrees is v0.4's
+    /// verb and the destructive one, and a retry adopts this worktree rather than making a
+    /// second — so the cost of leaving it is one directory, and the cost of removing it is a
+    /// delete on a path a person may already have opened.
+    #[must_use]
+    pub fn start(&self, request: &ProjectStart) -> ResponsePayload {
+        match self.starting(request) {
+            Ok(started) => ResponsePayload::ProjectStart(started),
+            Err(envelope) => ResponsePayload::Error(envelope),
+        }
+    }
+
+    /// The body of [`ProjectService::start`], in the shape `?` can be used in.
+    fn starting(&self, request: &ProjectStart) -> Result<ProjectStarted, ErrorEnvelope> {
+        let git = self.git()?;
+        let stored = self
+            .store
+            .project(&request.project)
+            .map_err(|err| store_refusal(&err))?
+            .ok_or_else(|| unknown_project(&request.project))?;
+
+        // The registered folder, re-resolved. A project whose drive has been unplugged lists
+        // perfectly well — that is deliberate, see `list` — so this is the first step that
+        // finds out, and it must say which of the two it is rather than "could not start".
+        let at = CanonicalPath::of(&stored.path).map_err(|err| {
+            tracing::warn!(project = %stored.id, kind = path_kind(&err), "a registered folder could not be resolved");
+            envelope(
+                ErrorCode::PathUnreadable,
+                "that project's folder could not be opened",
+                "check the folder is still there and that you can open it",
+                &[
+                    "a project on a drive that is not plugged in lists but cannot be started",
+                    "`nysia project forget <id>` removes the registration and nothing on disk",
+                ],
+            )
+        })?;
+
+        let started = crate::worktree::ensure(git, &at, &request.branch).map_err(start_refusal)?;
+        // `canonical` is `Some` for every worktree `ensure` answers with: it adopts only one
+        // that has a directory and refuses the registered-but-deleted case by name.
+        let worktree = started.worktree();
+        let cwd = worktree.canonical.as_ref().ok_or_else(|| {
+            internal_start("the worktree that was started has no directory on disk")
+        })?;
+        let branch = worktree.head.branch().unwrap_or(&request.branch).to_owned();
+
+        let created = self
+            .sessions
+            .create(&SessionCreate {
+                kind: request.kind,
+                // **Minted by the daemon**, because `Start →` creates the session before any
+                // window has a leaf to name — the tab is opened *from* this answer. That is
+                // the rule `SessionCreate::pane_key` already states for a null key, reached
+                // by a different route.
+                pane_key: None,
+                profile: request.profile.clone(),
+                cwd: Some(cwd.as_path().to_path_buf()),
+                env_overrides: BTreeMap::new(),
+                cols: START_COLS,
+                rows: START_ROWS,
+            })
+            .map_err(IntoEnvelope::into_envelope)?;
+
+        tracing::info!(
+            project = %stored.id,
+            branch,
+            adopted = started.adopted(),
+            handle = %created.handle,
+            pane_key = %created.pane_key,
+            "started a branch"
+        );
+
+        Ok(ProjectStarted {
+            branch,
+            adopted: started.adopted(),
+            handle: created.handle,
+            pane_key: created.pane_key,
+        })
     }
 
     /// Forget a project's registration, and nothing else.
@@ -389,7 +496,12 @@ fn git_refusal(err: &GitError) -> ErrorEnvelope {
         // output this build could not parse. None of them says the folder is not a
         // repository, so none of them may answer as though it did.
         _ => {
-            tracing::warn!(kind = git_kind(err), %err, "git would not describe a folder offered for registration");
+            // `kind` and never `%err`: every `GitError` variant's `Display` names the working
+            // directory git ran in, which here is the folder the caller offered.
+            tracing::warn!(
+                kind = git_kind(err),
+                "git would not describe a folder offered for registration"
+            );
             envelope(
                 ErrorCode::Internal,
                 format!("git could not describe that folder: {}", git_kind(err)),
@@ -481,6 +593,69 @@ fn unknown_project(id: &ProjectId) -> ErrorEnvelope {
         &["forgetting a project that was already forgotten is not something to retry"],
     )
     .with_next_command_args(["nysia", "project", "list"])
+}
+
+/// What a worktree that could not be started becomes.
+///
+/// # Why none of these mints a new [`ErrorCode`]
+///
+/// A code is a wire commitment and clients branch on it; three of these are "this request
+/// cannot be served as asked" and the thing a caller can act on is the *step*, not the code.
+/// §6.2 makes next steps non-optional precisely so that the interesting part of an error does
+/// not have to be encoded in an enum. A branch with a stale worktree is one command away from
+/// working, and that command is in the answer.
+///
+/// [`StartError`] carries no path and neither does anything built here — a worktree's
+/// directory is under the person's project (traps register #13/#14).
+fn start_refusal(err: StartError) -> ErrorEnvelope {
+    match err {
+        StartError::Git(err) => match err {
+            GitError::NotInstalled { .. } => no_git_envelope(),
+            other => {
+                tracing::warn!(kind = git_kind(&other), "git would not start a branch");
+                envelope(
+                    ErrorCode::Internal,
+                    format!("git could not open a worktree for that branch: {}", git_kind(&other)),
+                    "check that `git worktree list` answers in that project",
+                    &["a worktree cannot be created while another git command holds the index lock"],
+                )
+                .retryable(true)
+            }
+        },
+        StartError::BranchRefused { branch, reason } => envelope(
+            ErrorCode::InvalidRequest,
+            format!("{branch:?} cannot be used as a branch: {reason}"),
+            "choose a branch name git accepts — `git check-ref-format --branch <name>` is the              same question this asked",
+            &[
+                "a name beginning with `-` is refused whatever git thinks of it, because it                would reach git's option parser",
+            ],
+        ),
+        StartError::BranchPrunable { branch } => envelope(
+            ErrorCode::InvalidRequest,
+            format!("{branch:?} already has a worktree whose directory is gone"),
+            "run `git worktree prune` in that project, then start the branch again",
+            &[
+                "git will not check one branch out twice, and the registration it is refusing                  over no longer has a directory behind it",
+            ],
+        ),
+        StartError::NoDirectory { branch } => envelope(
+            ErrorCode::InvalidRequest,
+            format!("there is no free directory left for {branch:?}"),
+            "remove or rename the unused worktree directories under `.nysia/worktrees`",
+            &["worktree directory names are a location, never a key: the branch is the key"],
+        ),
+    }
+}
+
+/// A `Start →` that reached a state this module believes impossible.
+fn internal_start(detail: &str) -> ErrorEnvelope {
+    envelope(
+        ErrorCode::Internal,
+        format!("the daemon could not start that branch: {detail}"),
+        "retry the verb; a worktree that was created is adopted rather than duplicated",
+        &["`git worktree list` in the project shows what is there"],
+    )
+    .retryable(true)
 }
 
 /// A blocking task that did not finish.
@@ -851,6 +1026,118 @@ mod tests {
 
         let again = refused(service.forget(&ProjectForget { id }));
         assert_eq!(*again.code(), ErrorCode::UnknownProject);
+
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `Start →` end to end in the daemon: a worktree, a session in it, and the tab's three
+    /// values in one answer.
+    ///
+    /// The second start is the contract the coordinator wrote into both wave C specs: an
+    /// existing worktree is **adopted** rather than refused, and the answer says which
+    /// happened. It also proves the session lands *in the worktree* rather than in the
+    /// project root, which is the difference between a branch-keyed workspace and a tab that
+    /// merely says a branch name.
+    #[tokio::test]
+    async fn starting_a_branch_opens_a_worktree_and_a_session_in_it_and_adopts_it_next_time() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let scratch = Scratch::new("project-start");
+        let repo = scratch.repository("repo");
+        let (dir, service) = service("start");
+        let registered = register(&service, &repo);
+
+        let first = match service.start(&ProjectStart {
+            project: registered.project.id.clone(),
+            branch: "feat/projects".to_owned(),
+            kind: nysia_proto::SessionKind::Shell,
+            profile: None,
+        }) {
+            ResponsePayload::ProjectStart(started) => started,
+            other => panic!("the branch should have started, got {other:?}"),
+        };
+        assert_eq!(first.branch, "feat/projects");
+        assert!(!first.adopted, "nothing was there to adopt");
+
+        // The session is in the worktree, not in the project root. `summaries_under` is what
+        // the sidebar lists a worktree's sessions with, so asking it is asking the same
+        // question the window asks.
+        let worktree =
+            CanonicalPath::of(repo.join(".nysia").join("worktrees").join("feat-projects"))
+                .expect("the worktree is on disk");
+        let inside = service.sessions.summaries_under(&worktree);
+        assert_eq!(
+            inside.iter().map(|s| &s.handle).collect::<Vec<_>>(),
+            vec![&first.handle],
+            "the session it opened is the session that worktree holds"
+        );
+
+        let second = match service.start(&ProjectStart {
+            project: registered.project.id.clone(),
+            branch: "feat/projects".to_owned(),
+            kind: nysia_proto::SessionKind::Shell,
+            profile: None,
+        }) {
+            ResponsePayload::ProjectStart(started) => started,
+            other => panic!("the branch should have started again, got {other:?}"),
+        };
+        assert!(
+            second.adopted,
+            "a worktree that is already there is adopted, never refused"
+        );
+        assert_ne!(
+            second.handle, first.handle,
+            "adopting the worktree still opens a second session in it"
+        );
+        assert_ne!(second.pane_key, first.pane_key, "and its own pane");
+
+        // The project now lists the branch beside its primary checkout, with the sessions
+        // under it — which is the whole §3.1 shape, composed live.
+        let projects = listed(&service).await;
+        let [project] = projects.as_slice() else {
+            panic!("one repository is one project, got {projects:?}");
+        };
+        let started = project
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.branch == "feat/projects")
+            .expect("the started branch is one of the project's worktrees");
+        assert!(
+            !started.is_primary,
+            "the checkout it was registered from is"
+        );
+        assert_eq!(
+            started.sessions.len(),
+            2,
+            "both sessions are listed under it"
+        );
+
+        for handle in [first.handle, second.handle] {
+            let _ = service.sessions.close(&handle);
+        }
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Starting a project nothing is registered under is refused by id.
+    #[tokio::test]
+    async fn starting_a_project_that_is_not_registered_says_so() {
+        let Some(_git) = git_or_skip() else {
+            return;
+        };
+        let (dir, service) = service("start-unknown");
+        let envelope = refused(
+            service.start(&ProjectStart {
+                project: ProjectId::from_canonical_path(std::path::Path::new("/nowhere/at/all"))
+                    .expect("a unicode path"),
+                branch: "feat/projects".to_owned(),
+                kind: nysia_proto::SessionKind::Shell,
+                profile: None,
+            }),
+        );
+        assert_eq!(*envelope.code(), ErrorCode::UnknownProject);
 
         drop(service);
         let _ = std::fs::remove_dir_all(dir);

@@ -454,22 +454,30 @@ fn bind_unix(path: &std::path::Path) -> Result<tokio::net::UnixListener, Transpo
         Err(source) => return Err(bind(source)),
     }
 
-    // Sampled before the probe, so the comparison after it spans the whole of the window in
-    // which the file could have been replaced.
+    // Sampled **before** the probe, so the comparison after it spans the probe itself and not
+    // merely the moment after it. A stale socket swapped for a live one while the probe was
+    // in flight still refuses — the probe reached the old inode — so a sample taken
+    // afterwards would compare the live inode against itself and agree to remove it.
     let probed = socket_identity(path);
-    match std::os::unix::net::UnixStream::connect(path) {
+
+    let stale = match std::os::unix::net::UnixStream::connect(path) {
         // Something answered. This is the case `AlreadyBound` was written for, and the only
         // one in which it is true.
         Ok(_) => return Err(already_bound()),
-        Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => {}
+        Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => true,
         // The file went away between the bind and the probe — most likely the daemon that
-        // held it shutting down cleanly. There is nothing to unlink and the retry below is
-        // the whole of what is left to do.
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        // held it shutting down cleanly and unlinking as it went. Nothing to remove, and the
+        // retry below is the whole of what is left to do.
+        Err(err) if err.kind() == io::ErrorKind::NotFound => false,
         Err(_) => return Err(already_bound()),
-    }
+    };
 
-    if let Some(probed) = probed {
+    if stale {
+        // `AddrInUse` from something this function will not remove: a regular file, a
+        // symlink, or a directory sitting on the endpoint.
+        let Some(probed) = probed else {
+            return Err(already_bound());
+        };
         if socket_identity(path) != Some(probed) {
             return Err(already_bound());
         }
