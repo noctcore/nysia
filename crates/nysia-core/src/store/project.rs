@@ -495,8 +495,18 @@ mod tests {
         let (dir, path) = temp_db("project-spellings");
         let store = Store::open(&path).expect("open");
         let plain = folder(&dir, "nysia");
-        let roundabout =
-            CanonicalPath::of(dir.join("nysia").join(".").join("")).expect("resolve the folder");
+        let typed = dir.join("nysia").join(".").join("");
+        let roundabout = CanonicalPath::of(&typed).expect("resolve the folder");
+
+        // This test would pass on two spellings that were never different, which is a proof
+        // that trips for nobody. So the two are shown to be different **before** resolving:
+        // the `CanonicalPath` in the signature is what merges them, and this is what says the
+        // merge had something to do.
+        assert_ne!(
+            ProjectId::from_canonical_path(&typed).expect("a temp path is Unicode"),
+            ProjectId::from_canonical_path(plain.as_path()).expect("a temp path is Unicode"),
+            "the two spellings must genuinely differ before they are resolved"
+        );
 
         let first = store
             .register_project(&registration(&plain, "nysia", "Dev"))
@@ -522,21 +532,30 @@ mod tests {
         //
         // Exactly one `Created` is the assertion, not "all four succeeded". A check-then-write
         // under a *deferred* transaction also succeeds four times on a good day and fails with
-        // a constraint violation on a bad one; counting the creations is what tells the write
+        // a constraint violation on a bad one; counting the creations is what says the write
         // lock was held across both halves.
+        //
+        // The barrier is why that is a fact rather than a coin toss. `Store::open` does enough
+        // work — the WAL check, the mode, the migration scan — that four threads calling it
+        // drift apart and register one after another, and this test passed on a deferred
+        // transaction two runs in five before the rendezvous was added. Opening is outside it;
+        // only the registration is raced.
+        const RACERS: usize = 4;
         let (dir, path) = temp_db("project-race");
         Store::open(&path).expect("create the schema first");
         let at = folder(&dir, "nysia");
+        let line = std::sync::Barrier::new(RACERS);
 
         let created = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..4)
+            let handles: Vec<_> = (0..RACERS)
                 .map(|_| {
-                    let path = &path;
-                    let at = &at;
+                    let (path, at, line) = (&path, &at, &line);
                     scope.spawn(move || {
                         let store = Store::open(path).expect("open");
+                        let registration = registration(at, "nysia", "Dev");
+                        line.wait();
                         store
-                            .register_project(&registration(at, "nysia", "Dev"))
+                            .register_project(&registration)
                             .expect("a contended registration must not fail")
                             .already_registered()
                     })
