@@ -1,5 +1,5 @@
 import { GLYPH } from '../ui/glyphs';
-import { tasksNotice, type TasksState } from './tasks';
+import { isTasksBusy, tasksNotice, type TasksState } from './tasks';
 
 /**
  * What the screen shows instead of a table.
@@ -68,8 +68,10 @@ export function TasksPanel({
               {detail.message}
             </p>
             <ul className="text-fg2 text-term mt-3 flex list-none flex-col gap-1.5 p-0 leading-normal">
-              {detail.nextSteps.map((step) => (
-                <li key={step} className="wrap-anywhere">
+              {/* Keyed by position, not by the text: the steps come off the wire, two can
+                  legitimately read the same, and the list never reorders within a render. */}
+              {detail.nextSteps.map((step, index) => (
+                <li key={index} className="wrap-anywhere">
                   <span aria-hidden="true" className="text-fg3 mr-2">
                     {GLYPH.chevron}
                   </span>
@@ -79,18 +81,21 @@ export function TasksPanel({
             </ul>
           </>
         )}
-        <button
-          type="button"
-          onClick={onRetry}
-          className="border-line2 bg-bg3 text-fg text-term rounded-control mt-4 cursor-pointer border px-3 py-1 focus-visible:shadow-focus focus-visible:outline-none"
-        >
-          {/*
-           * Offered for every ending, the empty list included. A repository with no open
-           * issues today has one tomorrow, and D-5 says the list is live — so "ask again" is
-           * the honest affordance rather than a reload of the window.
-           */}
-          Ask again
-        </button>
+        {/*
+         * Offered for every ending except the one that is still running. A repository with no
+         * open issues today has one tomorrow, and D-5 says the list is live — so "ask again"
+         * is the honest affordance for the empty list too, rather than a reload of the
+         * window. While a query is in flight there is nothing to ask again.
+         */}
+        {isTasksBusy(state) ? null : (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="border-line2 bg-bg3 text-fg text-term rounded-control mt-4 cursor-pointer border px-3 py-1 focus-visible:shadow-focus focus-visible:outline-none"
+          >
+            Ask again
+          </button>
+        )}
       </div>
     </div>
   );
