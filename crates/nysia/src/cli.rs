@@ -74,19 +74,22 @@ enum Command {
         #[command(subcommand)]
         action: TerminalAction,
     },
-    /// Forward a Claude hook payload from stdin to the daemon (D-16).
+    // D-16: Claude hooks ingest status over stdin to the daemon socket.
+    /// Forward a Claude hook payload from stdin to the daemon.
     Hook(HookArgs),
     /// Read what the agents in this daemon's panes are doing.
     Agent {
         #[command(subcommand)]
         action: AgentAction,
     },
-    /// Register folders as projects, list them, and forget them (v0.3 §3).
+    // v0.3 §3: projects are registered folders, listed and forgotten here.
+    /// Register folders as projects, list them, and forget them.
     Project {
         #[command(subcommand)]
         action: ProjectAction,
     },
-    /// List a project's GitHub issues (D-5).
+    // D-5: tasks are GitHub Issues, queried live, no local task domain model.
+    /// List a project's GitHub issues.
     Tasks {
         #[command(subcommand)]
         action: TasksAction,
@@ -96,11 +99,12 @@ enum Command {
 /// `nysia tasks …`
 #[derive(Debug, Subcommand)]
 enum TasksAction {
+    // D-5: tasks are GitHub Issues and nothing is stored, so this is a live query
+    // every time.
     /// List a registered project's open GitHub issues, queried live.
     ///
-    /// Tasks are GitHub Issues and nothing is stored (D-5), so this is a live query every
-    /// time. It needs the GitHub CLI installed and signed in; when either is missing the
-    /// refusal says which, because "no issues" and "no credentials" are different answers.
+    /// Needs the GitHub CLI installed and signed in. When either is missing the refusal
+    /// says which, because "no issues" and "no credentials" are different answers.
     List {
         /// The project id, `proj_<32 hex digits>`.
         id: String,
@@ -124,10 +128,11 @@ enum ProjectAction {
         #[arg(long)]
         json: bool,
     },
+    // D-6: the worktree is keyed by its branch and never by a task id.
     /// Create or adopt a branch-keyed worktree and start a session in it.
     ///
-    /// The worktree is keyed by its **branch** and never by a task id (D-6). One that
-    /// already exists for the branch is adopted rather than refused.
+    /// The worktree is keyed by its branch, never by a task id. One that already exists
+    /// for the branch is adopted rather than refused.
     Start(StartArgs),
     /// Forget a project's registration. Nothing on disk is touched.
     Forget {
@@ -171,12 +176,12 @@ pub struct StartArgs {
 /// `nysia project register …`
 #[derive(Debug, Args)]
 pub struct RegisterArgs {
+    // The daemon canonicalises it, because the id is derived from the canonical path
+    // and a client that resolved it first would be one more spelling to disagree about.
     /// The folder to register. Relative and unresolved spellings are fine.
     ///
-    /// The **daemon** canonicalises it, because the id is derived from the canonical path
-    /// and a client that resolved it first would be one more spelling to disagree about.
-    /// That is also why registering the same folder twice is one project however it is
-    /// spelled.
+    /// The daemon canonicalises it. Registering the same folder twice is one project
+    /// however it is spelled.
     pub path: PathBuf,
     /// Print the result as JSON.
     #[arg(long)]
@@ -186,16 +191,19 @@ pub struct RegisterArgs {
 /// `nysia hook …`
 #[derive(Debug, Args)]
 pub struct HookArgs {
+    // See `crate::hook`, which is the only place the two values exist at the same
+    // instant.
     /// The hook event name, as Claude spells it.
     ///
-    /// Fills in a payload that does not name one, and is **refused** when the payload names a
-    /// different one — see `crate::hook`, which is the only place the two values exist at the
-    /// same instant.
+    /// Fills in a payload that does not name one, and is refused when the payload names a
+    /// different one.
     #[arg(long)]
     pub event: Option<String>,
+    // §5.2: stdout is Claude's hook decision, so a second document after `{}` is a
+    // parse error for whoever reads one.
     /// Print the error envelope as JSON.
     ///
-    /// Only the error. Stdout is Claude's hook decision (§5.2) and carries `{}` whatever this
+    /// Only the error. Stdout is Claude's hook decision and carries `{}` whatever this
     /// says, because a second document after it is a parse error for whoever reads one.
     #[arg(long)]
     pub json: bool,
@@ -944,6 +952,100 @@ mod tests {
             return block.join("\n");
         }
         panic!("{flag} was not in the help:\n{help}");
+    }
+
+    /// Artefacts a `--help` string must not contain. A user reading the terminal is not
+    /// the next maintainer of `docs/design`.
+    fn maintainer_artefacts(help: &str) -> Vec<&'static str> {
+        let mut found = Vec::new();
+        if help.contains("**") {
+            found.push("markdown emphasis (**)");
+        }
+        if help.contains("[`") {
+            found.push("rustdoc link ([`)");
+        }
+        if contains_decision_id(help) {
+            found.push("decision id (D-n)");
+        }
+        if help.contains('§') {
+            found.push("section mark (§)");
+        }
+        if help.contains("ts-rs") {
+            found.push("ts-rs");
+        }
+        if help.contains("trap") {
+            found.push("trap");
+        }
+        found
+    }
+
+    fn contains_decision_id(help: &str) -> bool {
+        help.as_bytes()
+            .windows(3)
+            .any(|w| w[0] == b'D' && w[1] == b'-' && w[2].is_ascii_digit())
+    }
+
+    fn rendered_long_help(cmd: &clap::Command) -> String {
+        cmd.clone()
+            .color(clap::ColorChoice::Never)
+            .render_long_help()
+            .to_string()
+    }
+
+    /// Every command clap knows about, including ones this test does not name.
+    fn rendered_help_tree(
+        cmd: &clap::Command,
+        path: &str,
+        hits: &mut Vec<(String, Vec<&'static str>)>,
+    ) {
+        let found = maintainer_artefacts(&rendered_long_help(cmd));
+        if !found.is_empty() {
+            hits.push((path.to_owned(), found));
+        }
+        for sub in cmd.get_subcommands() {
+            rendered_help_tree(sub, &format!("{path} {}", sub.get_name()), hits);
+        }
+    }
+
+    #[test]
+    fn rendered_help_has_no_maintainer_artefacts() {
+        // Walk clap's own tree rather than listing verbs: a roster you type is one a
+        // new subcommand can drop out of, and that is how these leaks shipped.
+        let cmd = Cli::command();
+        let mut hits = Vec::new();
+        rendered_help_tree(&cmd, cmd.get_name(), &mut hits);
+        assert!(
+            hits.is_empty(),
+            "rendered --help must not talk to a maintainer, got {hits:?}"
+        );
+    }
+
+    #[test]
+    fn the_help_artefact_check_trips_on_a_subcommand_it_was_not_named() {
+        // Trap 12: a walker handed a list of verbs is one a new verb can drop out of.
+        // This plants each artefact on `orchestration`, which Cli does not have, so the
+        // tree walk has to find a command it was never told about. Emptying any one
+        // probe goes red here rather than on a real verb.
+        let cases: &[(&str, &str)] = &[
+            ("Forward a payload (D-16)", "decision id (D-n)"),
+            ("keyed by its **branch**", "markdown emphasis (**)"),
+            ("see [`Verb`]", "rustdoc link ([`)"),
+            ("described in v0.3 §3", "section mark (§)"),
+            ("bindings from ts-rs", "ts-rs"),
+            ("the trap this avoids", "trap"),
+        ];
+        for (about, artefact) in cases {
+            let cmd = Cli::command().subcommand(clap::Command::new("orchestration").about(*about));
+            let mut hits = Vec::new();
+            rendered_help_tree(&cmd, cmd.get_name(), &mut hits);
+            assert!(
+                hits.iter().any(|(path, found)| {
+                    path.split_whitespace().last() == Some("orchestration")
+                        && found.iter().any(|hit| hit == artefact)
+                }),
+                "planted {artefact:?} on `orchestration` must redden the check, got {hits:?}"
+            );
+        }
     }
 
     #[test]
