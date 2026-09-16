@@ -338,6 +338,12 @@ export interface Store {
    * pressed a button: a branch that will not check out, a dirty worktree, a repository that
    * moved. The daemon's own `nextSteps` are what reach the user, so the notice says what to
    * do next rather than that something went wrong.
+   *
+   * **A provider may require the issue to be one the current `tasks` list is holding**, and a
+   * daemon-backed one does. A React tree renders from one snapshot and re-renders on the
+   * next, and the list is thrown away synchronously when the project moves — so a click
+   * dispatched in between carries a row from a repository that is no longer active, and the
+   * branch derived from it would be created in the wrong one.
    */
   startTask(issue: Issue): Promise<void>;
   selectTab(paneKey: PaneKey): Promise<void>;

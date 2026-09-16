@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import type { Issue } from '../generated/Issue';
 import type { Project as WireProject } from '../generated/Project';
 import type { SessionSummary as WireSession } from '../generated/SessionSummary';
 import { CREDIT_WINDOW_DEFAULT } from '../generated/wireConstants';
@@ -1254,9 +1255,7 @@ describe('starting an issue', () => {
     // the branch is chosen before it exists — and the daemon never learns which issue it was.
     const { store, daemon } = build();
     await ready(store);
-    await store.refreshTasks();
-    const issue = store.getSnapshot().tasks;
-    await store.startTask(issue.phase === 'loaded' ? issue.issues[0] ?? A_ROW : A_ROW);
+    await store.startTask(await aLoadedRow(store));
 
     const request = daemon.calls.find((call) => call.command === 'project_start')?.args?.request;
     expect(request).toEqual({
@@ -1276,6 +1275,7 @@ describe('starting an issue', () => {
     // it, with nothing to change here.
     const { store, daemon } = build();
     await ready(store);
+    const row = await aLoadedRow(store);
     daemon.failures.set('project_start', {
       kind: 'unsupported',
       message: 'this daemon cannot start an agent session yet',
@@ -1283,7 +1283,7 @@ describe('starting an issue', () => {
       retryable: false,
     });
 
-    await expect(store.startTask(A_ROW)).rejects.toBeInstanceOf(StoreCommandError);
+    await expect(store.startTask(row)).rejects.toBeInstanceOf(StoreCommandError);
     const request = daemon.calls.find((call) => call.command === 'project_start')?.args?.request;
     expect((request as { kind?: string } | undefined)?.kind).toBe('agent');
     expect(store.getSnapshot().errors.at(-1)?.message).toContain('cannot start an agent');
@@ -1297,7 +1297,7 @@ describe('starting an issue', () => {
         daemon.adoptedBranches.add('issue/200-add-the-tasks-screen');
       }
 
-      await store.startTask(A_ROW);
+      await store.startTask(await aLoadedRow(store));
       const { taskStart } = store.getSnapshot();
       expect(taskStart.phase).toBe('started');
       expect(taskStart.phase === 'started' ? taskStart.adopted : null).toBe(adopted);
@@ -1312,7 +1312,7 @@ describe('starting an issue', () => {
     await ready(store);
     const before = store.getSnapshot().tabs.length;
 
-    await store.startTask(A_ROW);
+    await store.startTask(await aLoadedRow(store));
     const { tabs, taskStart } = store.getSnapshot();
     expect(tabs).toHaveLength(before + 1);
     expect(tabs.some((tab) => tab.paneKey === (taskStart.phase === 'started' ? taskStart.paneKey : ''))).toBe(true);
@@ -1323,6 +1323,7 @@ describe('starting an issue', () => {
     // somebody pressed this, so its failure is a notice with the daemon's own next steps.
     const { store, daemon } = build();
     await ready(store);
+    const row = await aLoadedRow(store);
     daemon.failures.set('project_start', {
       kind: 'invalid_request',
       message: 'that branch is checked out in another worktree',
@@ -1330,12 +1331,48 @@ describe('starting an issue', () => {
       retryable: false,
     });
 
-    await expect(store.startTask(A_ROW)).rejects.toBeInstanceOf(StoreCommandError);
+    await expect(store.startTask(row)).rejects.toBeInstanceOf(StoreCommandError);
 
     const { taskStart, errors } = store.getSnapshot();
     expect(taskStart).toEqual({ phase: 'idle' });
     expect(errors.at(-1)?.command).toBe('startTask');
     expect(errors.at(-1)?.message).toContain('Close the other worktree');
+  });
+
+  it('refuses a row the list on screen no longer holds', async () => {
+    // A one-frame React race, and the reason it is worth a guard rather than a comment: a tree
+    // renders from one snapshot and re-renders on the next, and `selectProject` throws the list
+    // away *synchronously* in between. A click already dispatched then hands over a row from a
+    // repository that is no longer active — and the branch derived from it would be created in
+    // the new one, which is the exact hazard the reset exists to prevent, walked around.
+    const { store, daemon } = build();
+    await ready(store);
+    const row = await aLoadedRow(store);
+    const other = store.getSnapshot().projects[1];
+    await store.selectProject(other?.id ?? '');
+
+    await expect(store.startTask(row)).rejects.toBeInstanceOf(StoreCommandError);
+    // Nothing was asked of the daemon, which is the point: refusing after the worktree exists
+    // would be an apology rather than a guard.
+    expect(daemon.calls.some((call) => call.command === 'project_start')).toBe(false);
+    expect(store.getSnapshot().taskStart).toEqual({ phase: 'idle' });
+    expect(store.getSnapshot().errors.at(-1)?.message).toContain('not in the list on screen');
+  });
+
+  it('holds the list by identity, so a row a refresh replaced is refused too', async () => {
+    // The same guard, narrowed to why it is identity and not an issue number. These two rows
+    // are equal in every field; only one of them is in the list the screen is drawing. A
+    // number would accept both — and a refresh is exactly when a title changes, which is what
+    // the branch name is derived from.
+    const { store } = build();
+    await ready(store);
+    const stale = await aLoadedRow(store);
+    const fresh = await aLoadedRow(store);
+    expect(fresh).toEqual(stale);
+    expect(fresh).not.toBe(stale);
+
+    await expect(store.startTask(stale)).rejects.toBeInstanceOf(StoreCommandError);
+    await expect(store.startTask(fresh)).resolves.toBeUndefined();
   });
 
   it('refuses a second start rather than resolving with the row still spinning', async () => {
@@ -1347,11 +1384,12 @@ describe('starting an issue', () => {
     // exactly the caller with no other way to find out.
     const { store, daemon } = build();
     await ready(store);
+    const row = await aLoadedRow(store);
     const held = hold(daemon, 'project_start');
 
-    const first = store.startTask(A_ROW);
+    const first = store.startTask(row);
     await until(() => store.getSnapshot().taskStart.phase === 'starting');
-    await expect(store.startTask(A_ROW)).rejects.toBeInstanceOf(StoreCommandError);
+    await expect(store.startTask(row)).rejects.toBeInstanceOf(StoreCommandError);
     expect(store.getSnapshot().errors.at(-1)?.message).toContain('already starting');
 
     held.release(0);
@@ -1367,9 +1405,10 @@ describe('starting an issue', () => {
     // somebody else's, with a correct table above it and nothing to contradict it.
     const { store, daemon } = build();
     await ready(store);
+    const row = await aLoadedRow(store);
     const held = hold(daemon, 'project_start');
 
-    const starting = store.startTask(A_ROW);
+    const starting = store.startTask(row);
     await until(() => store.getSnapshot().taskStart.phase === 'starting');
     const other = store.getSnapshot().projects[1];
     await store.selectProject(other?.id ?? '');
@@ -1395,14 +1434,16 @@ describe('starting an issue', () => {
     await ready(store);
     const held = hold(daemon, 'project_start');
 
-    const abandoned = store.startTask(A_ROW);
+    const abandoned = store.startTask(await aLoadedRow(store));
     await until(() => store.getSnapshot().taskStart.phase === 'starting');
     const other = store.getSnapshot().projects[1];
     const first = store.getSnapshot().projects[0];
     await store.selectProject(other?.id ?? '');
     await store.selectProject(first?.id ?? '');
 
-    const current = store.startTask(A_ROW);
+    // The list went with the project and has to come back before the row can be pressed again
+    // — which is the guard above doing its job, not a detour around it.
+    const current = store.startTask(await aLoadedRow(store));
     await until(() => store.getSnapshot().taskStart.phase === 'starting');
 
     // Only the abandoned one. The live start stays outstanding, which is the whole point:
@@ -1450,16 +1491,28 @@ function hold(daemon: FakeDaemon, command: string): { release: (call: number) =>
   };
 }
 
-/** The issue every start test presses, whose branch is `issue/200-add-the-tasks-screen`. */
-const A_ROW = {
-  number: 200,
-  title: 'Add the Tasks screen',
-  state: 'open' as const,
-  updatedAt: '2026-09-09T12:00:00Z',
-  url: 'https://github.com/noctcore/nysia/issues/200',
-  author: 'Shironex',
-  labels: ['area:web'],
-};
+/**
+ * The row every start test presses, whose branch is `issue/200-add-the-tasks-screen`.
+ *
+ * **Fetched rather than written out**, which the start tests did not used to do. `startTask`
+ * now requires the row to be one the loaded list is holding, by identity, so a literal
+ * declared here is refused before the daemon is reached — and a test that handed one over
+ * would be exercising the guard instead of the verb. Going through `refreshTasks` also means
+ * every start test runs the real reader against the fake's real answer, so a row shape the
+ * window could not parse fails these as well as `tasks.test.ts`.
+ *
+ * Throws rather than returning a fallback: a fixture that silently substituted a row of its
+ * own is how the assertions above would go on passing against a list that never loaded.
+ */
+async function aLoadedRow(store: DaemonStore): Promise<Issue> {
+  await store.refreshTasks();
+  const { tasks } = store.getSnapshot();
+  const row = tasks.phase === 'loaded' ? tasks.issues[0] : undefined;
+  if (row === undefined) {
+    throw new Error(`the fake daemon's issue list did not load: ${tasks.phase}`);
+  }
+  return row;
+}
 
 async function ready(store: DaemonStore): Promise<void> {
   await until(() => store.getSnapshot().status === 'ready');
