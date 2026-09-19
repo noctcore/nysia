@@ -51,8 +51,8 @@ pub use project::{
     ProjectRegister, ProjectRegistered, ProjectStart, ProjectStarted, RegisterRefusal, Worktree,
 };
 pub use session::{
-    ExitStatus, SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary,
-    ShellProfile, WorkingDirectory,
+    ExitStatus, ProfileAvailability, ProfileList, SessionClose, SessionCreate, SessionCreated,
+    SessionList, SessionSummary, ShellProfile, WorkingDirectory,
 };
 pub use stream::{StreamAttach, StreamAttached, StreamDetach, StreamId};
 pub use tasks::{Issue, IssueState, TasksList};

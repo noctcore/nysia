@@ -44,9 +44,9 @@ use nysia_proto::{
     AgentStatusList, AgentStatusSubscribe, AgentStatusSubscribed, ClientId, ClientRole,
     CreditFrame, CreditWindow, DaemonIdentity, ErrorCode, ErrorEnvelope, FrameDecoder, FrameKind,
     HelloAccepted, HelloRejected, HelloRequest, HelloResponse, LaunchNonce, MutationReceipt,
-    PROTOCOL_VERSION, PaneKey, ProjectList, ProtocolRange, RejectReason, RequestEnvelope,
-    RequestId, RequestPayload, ResponseEnvelope, ResponsePayload, SessionList, StreamAttached,
-    StreamId,
+    PROTOCOL_VERSION, PaneKey, ProfileList, ProjectList, ProtocolRange, RejectReason,
+    RequestEnvelope, RequestId, RequestPayload, ResponseEnvelope, ResponsePayload, SessionList,
+    StreamAttached, StreamId,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -907,6 +907,15 @@ impl Daemon {
                 // one project, one spawn — so `gh`'s own deadline is the whole bound.
                 let tasks = Arc::clone(&self.tasks);
                 blocking(move || tasks.list(&request)).await
+            }
+            RequestPayload::ProfileList(ProfileList {}) => {
+                // Blocking and lock-free: every profile walks `PATH`, which is filesystem
+                // probes per directory and a slow share makes slow. Nothing here holds the
+                // registry, so a slow walk delays this answer and no other verb.
+                blocking(|| ResponsePayload::ProfileList {
+                    profiles: crate::rpc::session::profile_availability(),
+                })
+                .await
             }
         }
     }

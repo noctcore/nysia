@@ -33,9 +33,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nysia_proto::{
     ErrorCode, ErrorEnvelope, ExitStatus, Frame, FrameKind, Incarnation, LineCursor, PaneKey,
-    ReadMode, SessionCreate, SessionCreated, SessionHandle, SessionKind, SessionSummary,
-    ShellProfile as WireProfile, TerminalReadResult, TerminalSend, WaitFor, WaitOutcome,
-    WorkingDirectory,
+    ProfileAvailability, ReadMode, SessionCreate, SessionCreated, SessionHandle, SessionKind,
+    SessionSummary, ShellProfile as WireProfile, TerminalReadResult, TerminalSend, WaitFor,
+    WaitOutcome, WorkingDirectory,
 };
 
 use crate::agent::LaunchError;
@@ -804,6 +804,45 @@ fn core_profile(profile: Option<&WireProfile>) -> ShellProfile {
             distro: distro.clone(),
         },
     }
+}
+
+/// The shells a menu offers, in [`WireProfile`]'s order: WSL once, as the distribution a
+/// bare `wsl.exe` opens, because that is the one WSL entry a menu has.
+const MENU_PROFILES: [WireProfile; 4] = [
+    WireProfile::Pwsh,
+    WireProfile::Cmd,
+    WireProfile::GitBash,
+    WireProfile::Wsl { distro: None },
+];
+
+/// Which of the menu's shells this daemon can launch now, and why not for the rest.
+///
+/// Each profile is asked [`ShellProfile::launchable`] — the question a spawn asks before it
+/// starts anything, answered by the same code, against this daemon's `PATH` **at the moment
+/// of the call**. Nothing is cached, so the answer is never older than the request: a shell
+/// that appears in or vanishes from a directory already on that `PATH` is reflected the next
+/// time a window asks. A directory an installer *adds* to `PATH` is not — this process keeps
+/// the `PATH` it started with — so that shell is offered once the daemon is restarted from an
+/// environment that has it.
+///
+/// The reason is [`profile_kind`]'s phrase — the same one a refused launch carries in its
+/// envelope — which names the shell and what resolution found, and never the file a
+/// resolution rejected.
+///
+/// Blocking: filesystem probes, several per profile. The caller runs it on the blocking pool
+/// and holds no lock across it.
+#[must_use]
+pub fn profile_availability() -> Vec<ProfileAvailability> {
+    MENU_PROFILES
+        .iter()
+        .map(|profile| ProfileAvailability {
+            profile: profile.clone(),
+            unavailable: core_profile(Some(profile))
+                .launchable()
+                .err()
+                .map(|err| profile_kind(&err)),
+        })
+        .collect()
 }
 
 /// What a request asks to be run, as a spec with nothing else filled in yet.
@@ -1860,6 +1899,153 @@ mod tests {
         );
         registry.close(&created.handle).expect("closes");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Printed by the child before its answer, so the outer test can find the line.
+    const PROFILES_LINE: &str = "NYSIA-PROFILES=";
+
+    /// Printed by a child that got all the way through, so the outer test can tell "passed"
+    /// from "was filtered out and never ran".
+    const PROFILES_CHILD_OK: &str = "NYSIA-PROFILES-CHILD-OK";
+
+    /// Ask a fresh copy of this test binary which shells it can launch, with `dir` as the
+    /// **whole** of its `PATH`.
+    ///
+    /// By re-exec rather than `set_var`, for `agent::claude::launch`'s reason: resolution
+    /// reads `PATH` on every call, the pty tests next door spawn shells on other threads, and
+    /// changing the environment under them is a data race. The whole of `PATH` rather than a
+    /// prefix, so a `pwsh` the machine really has cannot stand in for the one this test put
+    /// there — or be missed when this test put none.
+    fn availability_on(dir: &std::path::Path) -> Vec<ProfileAvailability> {
+        let path = module_path!();
+        let without_crate = path.split_once("::").map_or(path, |(_, rest)| rest);
+        let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args([
+                "--exact",
+                &format!("{without_crate}::child_reports_which_shells_it_can_launch"),
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(
+                "PATH",
+                std::env::join_paths([dir]).expect("a PATH with no separator in it"),
+            )
+            .output()
+            .expect("the child test binary runs");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.status.success() && text.contains(PROFILES_CHILD_OK),
+            "the child did not run to the end:\n{text}"
+        );
+        let answer = text
+            .lines()
+            .find_map(|line| line.strip_prefix(PROFILES_LINE))
+            .unwrap_or_else(|| panic!("the child printed no answer:\n{text}"));
+        serde_json::from_str(answer).expect("the child's answer parses")
+    }
+
+    #[test]
+    #[ignore = "driven by its outer test, which owns PATH"]
+    fn child_reports_which_shells_it_can_launch() {
+        println!(
+            "{PROFILES_LINE}{}",
+            serde_json::to_string(&profile_availability()).expect("serialises")
+        );
+        println!("{PROFILES_CHILD_OK}");
+    }
+
+    #[test]
+    fn which_shells_are_offered_is_what_resolution_finds_on_path_not_a_platform_list() {
+        // The `+` menu used to list every profile the wire can spell, and a person learned
+        // that PowerShell 7 was not installed by picking it. The answer has to come from the
+        // same resolution a spawn runs, on the daemon's own `PATH` — so this asks it on three
+        // `PATH`s it controls: one holding a `pwsh`, one holding nothing, and one holding a
+        // `pwsh` that resolution finds and rejects.
+        //
+        // A `cfg!(windows)` list fails on each leg: it offers `pwsh` on Windows where the
+        // empty `PATH` has none, and withholds it on macOS where the fixture put one.
+        let scratch = crate::git::testing::Scratch::new("profiles");
+        let with_pwsh = scratch.folder("with-pwsh");
+        let empty = scratch.folder("empty");
+        // A distinctive component, so the leak check below cannot pass merely because the
+        // folder's name was short or ordinary.
+        let broken = scratch.folder("a-clients-private-toolchain");
+        if cfg!(windows) {
+            // A batch shim, which resolution launches through `cmd.exe` from `System32` —
+            // found by `SystemRoot`, not by `PATH`, so it resolves with nothing else on it.
+            std::fs::write(with_pwsh.join("pwsh.cmd"), "@echo off\r\n").expect("a pwsh");
+        } else {
+            std::fs::write(with_pwsh.join("pwsh"), "#!/bin/sh\n").expect("a pwsh");
+        }
+        // Found by name and refused by validation: no launchable extension on Windows, no
+        // execute bit on Unix. Either refusal names the file it rejected, which is what
+        // makes this the case the leak check below can actually trip on.
+        std::fs::write(broken.join("pwsh"), "not a program\n").expect("a broken pwsh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                with_pwsh.join("pwsh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("the pwsh is executable");
+            std::fs::set_permissions(broken.join("pwsh"), std::fs::Permissions::from_mode(0o644))
+                .expect("the broken pwsh is not");
+        }
+
+        let pwsh = |rows: &[ProfileAvailability]| {
+            rows.iter()
+                .find(|row| row.profile == WireProfile::Pwsh)
+                .cloned()
+                .expect("every menu profile is a row, launchable or not")
+        };
+
+        let offered = availability_on(&with_pwsh);
+        assert_eq!(
+            offered.iter().map(|row| &row.profile).collect::<Vec<_>>(),
+            MENU_PROFILES.iter().collect::<Vec<_>>(),
+            "one row per menu entry, in the menu's order"
+        );
+        assert_eq!(
+            pwsh(&offered).unavailable,
+            None,
+            "a pwsh on PATH is a pwsh the daemon can launch: {offered:?}"
+        );
+
+        let absent = availability_on(&empty);
+        let reason = pwsh(&absent)
+            .unavailable
+            .expect("no pwsh on PATH is a pwsh the daemon cannot launch");
+        assert!(
+            reason.contains("pwsh") && reason.contains("not found"),
+            "the reason says which shell and what was wrong with it: {reason:?}"
+        );
+
+        let rejected = availability_on(&broken);
+        assert!(
+            pwsh(&rejected).unavailable.is_some(),
+            "a pwsh resolution finds and cannot launch is not offered: {rejected:?}"
+        );
+
+        // The reason reaches a menu a person screenshots. It names the shell, never a file —
+        // and the rejected `pwsh` is the row whose error, rendered whole, would name one.
+        for row in offered.iter().chain(&absent).chain(&rejected) {
+            let said = row.unavailable.as_deref().unwrap_or_default();
+            for folder in [&with_pwsh, &empty, &broken] {
+                assert!(
+                    !said.contains(folder.to_string_lossy().as_ref()),
+                    "{said:?} names a folder"
+                );
+            }
+            assert!(
+                !said.contains("a-clients-private-toolchain"),
+                "{said:?} names a folder"
+            );
+        }
     }
 
     /// A request for an agent session, with nothing else asked for.

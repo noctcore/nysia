@@ -21,12 +21,13 @@
 use nysia_proto::{
     AgentHook, AgentStatus, AgentStatusGet, AgentStatusList, AgentStatusSubscribe,
     AgentStatusSubscribed, AgentStatusUnsubscribe, ClientId, ClientRole, DaemonIdentity, ErrorCode,
-    ErrorEnvelope, HelloRequest, HelloResponse, Issue, PROTOCOL_VERSION, PaneKey, Project,
-    ProjectForget, ProjectId, ProjectList, ProjectRegister, ProjectRegistered, ProjectStart,
-    ProjectStarted, RejectReason, RequestEnvelope, RequestId, RequestPayload, ResponseEnvelope,
-    ResponsePayload, SessionClose, SessionCreate, SessionCreated, SessionHandle, SessionList,
-    SessionSummary, StreamAttach, StreamAttached, StreamDetach, StreamId, TasksList, TerminalRead,
-    TerminalReadResult, TerminalResize, TerminalSend, TerminalWait, TerminalWaitResult,
+    ErrorEnvelope, HelloRequest, HelloResponse, Issue, PROTOCOL_VERSION, PaneKey,
+    ProfileAvailability, ProfileList, Project, ProjectForget, ProjectId, ProjectList,
+    ProjectRegister, ProjectRegistered, ProjectStart, ProjectStarted, RejectReason,
+    RequestEnvelope, RequestId, RequestPayload, ResponseEnvelope, ResponsePayload, SessionClose,
+    SessionCreate, SessionCreated, SessionHandle, SessionList, SessionSummary, StreamAttach,
+    StreamAttached, StreamDetach, StreamId, TasksList, TerminalRead, TerminalReadResult,
+    TerminalResize, TerminalSend, TerminalWait, TerminalWaitResult,
 };
 
 use crate::rpc::control::{ControlError, ControlReader, ControlWriter};
@@ -526,6 +527,22 @@ impl Client {
         {
             ResponsePayload::TasksList { issues } => Ok(issues),
             other => Err(mismatched("tasks_list", &other)),
+        }
+    }
+
+    /// Every shell a menu offers, and whether the daemon can launch each one now.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`]. A shell the daemon cannot launch is a row with a reason, not
+    /// an error.
+    pub async fn profile_list(&mut self) -> Result<Vec<ProfileAvailability>, ClientError> {
+        match self
+            .request(RequestPayload::ProfileList(ProfileList {}))
+            .await?
+        {
+            ResponsePayload::ProfileList { profiles } => Ok(profiles),
+            other => Err(mismatched("profile_list", &other)),
         }
     }
 
