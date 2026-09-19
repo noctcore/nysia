@@ -116,6 +116,37 @@ pub fn endpoint() -> Result<Endpoint, DaemonError> {
 #[cfg(windows)]
 const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 
+/// `ERROR_PIPE_BUSY`: every instance of the pipe is connected to somebody.
+///
+/// Matched by number, as `nysia_core::rpc::transport` matches it, because which
+/// [`std::io::ErrorKind`] the standard library maps it to has changed between releases and
+/// the number has not.
+const ERROR_PIPE_BUSY: i32 = 231;
+
+/// How many times a dial opens a pipe whose every instance is taken, and how long it waits
+/// between tries.
+///
+/// **Core's numbers, for core's reason.** They are a copy of `PIPE_BUSY_ATTEMPTS` and
+/// `PIPE_BUSY_BACKOFF` in `nysia_core::rpc::transport`, which are private to that module and
+/// serve its async dial; nothing checks that the two stay equal, so change them together.
+/// The daemon creates a pipe's next instance only after the last one has been accepted, so a
+/// client that dials in that gap meets a busy pipe from a daemon that is listening perfectly
+/// well. The gap is one `CreateNamedPipeW` long, and it is met: hooks dial on every agent
+/// event and the window on every menu open and launch. With one dial and no retry, 2 of 300
+/// calls the window made on connections of their own failed this way beside two hook-like
+/// clients dialling in a loop.
+///
+/// A few hundred milliseconds at the outside, then it stops. Far too short to be a queue on
+/// purpose: a daemon saturated with clients frees instances continuously, and a dial that
+/// waited for one would turn a click into a hang. What is still busy after this is
+/// [`DaemonError::Busy`].
+#[cfg(windows)]
+const PIPE_BUSY_ATTEMPTS: u32 = 10;
+
+/// How long a dial waits between opens of a busy pipe. See [`PIPE_BUSY_ATTEMPTS`].
+#[cfg(windows)]
+const PIPE_BUSY_BACKOFF: Duration = Duration::from_millis(20);
+
 /// Open a socket to the daemon at `listening`.
 ///
 /// The variant decides which syscall, which is the whole reason
@@ -123,26 +154,44 @@ const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 /// a filesystem path, and a `CreateFile` that treats one as such creates a file literally
 /// named for the pipe instead of opening it.
 ///
+/// A pipe whose every instance is taken is opened again, [`PIPE_BUSY_ATTEMPTS`] times in all.
+/// Blocking, like the rest of this module: every caller is already on a blocking thread.
+///
 /// # Errors
 ///
 /// [`DaemonError::Unreachable`] when nothing is listening — which is the ordinary case on a
-/// machine where the daemon has not been started, not a fault — and
-/// [`DaemonError::Endpoint`] when the endpoint names a transport this platform cannot dial.
+/// machine where the daemon has not been started, not a fault — [`DaemonError::Busy`] when
+/// the pipe stayed busy through every attempt, and [`DaemonError::Endpoint`] when the
+/// endpoint names a transport this platform cannot dial.
 pub fn open(listening: &Listening) -> Result<Box<dyn Socket>, DaemonError> {
     match listening {
         #[cfg(windows)]
         Listening::NamedPipe(name) => {
             use std::os::windows::fs::OpenOptionsExt;
 
-            // A Win32 named pipe is opened like a file. `read(true).write(true)` is what
-            // makes it the duplex handle the protocol needs rather than a one-way reader.
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .security_qos_flags(SECURITY_IDENTIFICATION)
-                .open(name)
-                .map(|pipe| Box::new(pipe) as Box<dyn Socket>)
-                .map_err(|error| dial_failure(name.clone(), &error))
+            let mut attempt = 1;
+            loop {
+                // A Win32 named pipe is opened like a file. `read(true).write(true)` is what
+                // makes it the duplex handle the protocol needs rather than a one-way reader.
+                let opened = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .security_qos_flags(SECURITY_IDENTIFICATION)
+                    .open(name);
+                match opened {
+                    Ok(pipe) => return Ok(Box::new(pipe)),
+                    // The one failure worth trying again, and only until the daemon has had
+                    // time to create its next instance.
+                    Err(error)
+                        if error.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                            && attempt < PIPE_BUSY_ATTEMPTS =>
+                    {
+                        attempt += 1;
+                        std::thread::sleep(PIPE_BUSY_BACKOFF);
+                    }
+                    Err(error) => return Err(dial_failure(name.clone(), &error)),
+                }
+            }
         }
         #[cfg(not(windows))]
         Listening::UnixSocket(path) => std::os::unix::net::UnixStream::connect(path)
@@ -181,12 +230,12 @@ pub fn open(listening: &Listening) -> Result<Box<dyn Socket>, DaemonError> {
 ///   refuses the connection. Classifying only `NotFound` there would leave the macOS window
 ///   unable to start a daemon over a post-crash socket for as long as the file was there.
 ///
-/// Everything else is [`DaemonError::Io`]: retryable, so the window keeps dialling, but never
-/// a reason to spawn. A busy pipe (`ERROR_PIPE_BUSY`) means a daemon is *right there* and all
-/// its instances are in use; an access denial means one is there and this caller may not talk
-/// to it. Spawning against either produced a daemon that could not bind, twenty seconds of
-/// waiting, and then a complaint pointing at a log whose only line says the endpoint is
-/// already held.
+/// Everything else is retryable, so the window keeps dialling, but never a reason to spawn.
+/// A busy pipe (`ERROR_PIPE_BUSY`) means a daemon is *right there* and all its instances are
+/// in use, and is [`DaemonError::Busy`] so the sentence can say so; an access denial means
+/// one is there and this caller may not talk to it, and is [`DaemonError::Io`]. Spawning
+/// against either produced a daemon that could not bind, twenty seconds of waiting, and then
+/// a complaint pointing at a log whose only line says the endpoint is already held.
 fn dial_failure(endpoint: String, error: &std::io::Error) -> DaemonError {
     let absent = matches!(error.kind(), std::io::ErrorKind::NotFound)
         || (cfg!(unix) && matches!(error.kind(), std::io::ErrorKind::ConnectionRefused));
@@ -195,6 +244,8 @@ fn dial_failure(endpoint: String, error: &std::io::Error) -> DaemonError {
             endpoint,
             cause: error.to_string(),
         }
+    } else if cfg!(windows) && error.raw_os_error() == Some(ERROR_PIPE_BUSY) {
+        DaemonError::Busy
     } else {
         DaemonError::Io(format!("could not open {endpoint}: {error}"))
     }
@@ -456,6 +507,78 @@ mod tests {
                 "{kind:?} lost the endpoint it was about: {failure}"
             );
         }
+    }
+
+    #[test]
+    fn a_busy_pipe_is_busy_and_never_nothing_listening() {
+        // `Unreachable` is the one answer that lets the window start a daemon, and starting
+        // one beside a daemon whose instances are all in use leaves it unable to bind. Built
+        // from the number, as the dial matches it, and not from a kind.
+        let busy = dial_failure(
+            "the endpoint".to_owned(),
+            &std::io::Error::from_raw_os_error(ERROR_PIPE_BUSY),
+        );
+        if cfg!(windows) {
+            assert!(matches!(busy, DaemonError::Busy), "got {busy:?}");
+        } else {
+            // No socket on Unix fails this way, and 231 is not an errno there.
+            assert!(
+                !matches!(busy, DaemonError::Unreachable { .. }),
+                "got {busy:?}"
+            );
+        }
+        assert!(busy.retryable(), "a busy daemon is worth dialling again");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_pipe_that_frees_within_the_wait_is_opened() {
+        // The case the retry exists for: every instance taken for a moment, then the daemon's
+        // accept loop makes the next one. One dial and no retry refused this, and a refused
+        // menu question wrote the daemon off.
+        let endpoint = crate::interop::scratch("frees");
+        let occupied = crate::interop::Occupied::at(&endpoint);
+        let freed = occupied.free_after(Duration::from_millis(60));
+
+        let opened = open(endpoint.listening());
+        let instance = freed.join();
+
+        assert!(
+            matches!(instance, Ok(Ok(_))),
+            "the next instance was never made, so this proves nothing"
+        );
+        assert!(
+            opened.is_ok(),
+            "a daemon that made its next instance 60 ms later was refused: {:?}",
+            opened.as_ref().err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_pipe_that_stays_busy_is_busy_after_the_wait_and_not_before() {
+        let endpoint = crate::interop::scratch("busy");
+        let _occupied = crate::interop::Occupied::at(&endpoint);
+
+        let started = std::time::Instant::now();
+        let opened = open(endpoint.listening());
+        let waited = started.elapsed();
+
+        assert!(
+            matches!(opened, Err(DaemonError::Busy)),
+            "a pipe with every instance taken became {:?}",
+            opened.as_ref().err()
+        );
+        // Every sleep but the last one's. A dial that gave up at once is the defect this
+        // closes: it took 244 µs, and a menu question that met it wrote the daemon off.
+        assert!(
+            waited >= PIPE_BUSY_BACKOFF * (PIPE_BUSY_ATTEMPTS - 1),
+            "gave up after {waited:?}, without waiting for the next instance"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "a busy pipe is a bounded wait, not a queue: {waited:?}"
+        );
     }
 
     #[test]
