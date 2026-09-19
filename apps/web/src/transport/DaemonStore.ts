@@ -80,8 +80,10 @@ import type { TerminalRouter } from './terminals';
  * `ShellProfile`'s four variants, which offered PowerShell 7 on a machine without it and let
  * the person find out from the refusal. `profile_list` answers from the daemon's own `PATH`
  * at the moment it is asked, so it is asked on connect, after a launch the daemon answered,
- * and by {@link DaemonStore.refreshLaunchers} when the menu opens. See
- * {@link DaemonStore.refreshLaunchers} for what a daemon too old to answer costs.
+ * and by {@link DaemonStore.refreshLaunchers} when the menu opens. Nothing waits for the
+ * answer: the walk took 21 s with an unreachable share on `PATH`, so `ready` does not hold
+ * for it, and the Rust side asks on a connection of its own so no keystroke queues behind
+ * it. See `#profilesUnservedBy` for what a daemon too old to answer costs.
  *
  * **A new session opens in the active project.** The window holds a project's id and never
  * its folder — `Project` carries no path on the wire — so `openTab` names the project and
@@ -198,12 +200,16 @@ export class DaemonStore implements Store {
   /**
    * The daemon that dropped the connection when it was asked `profile_list`, by launch nonce.
    *
-   * **This is what stops a reconnect loop against an older daemon.** One built before the
-   * verb cannot read the request at all; it closes the control connection instead of
-   * answering `unsupported`, and the window reconnects. Asking again on that connect would
-   * close it again, for ever. So the daemon that did it is remembered and not asked again —
-   * one reconnect per older daemon rather than one per connect — and its menu keeps the
-   * shells it would have offered before the verb existed.
+   * One built before the verb cannot read the request at all; it closes the connection the
+   * question arrived on instead of answering `unsupported`. That connection is one the Rust
+   * side opened for this question alone (`Client::request_aside`), so it costs the window
+   * no reconnect. Asking again would cost the same refused connection on every menu open,
+   * for ever, so the daemon that did it is remembered and not asked again. Its menu keeps
+   * the shells it would have offered before the verb existed.
+   *
+   * Only a failure that is not an answer, or an answer of `unsupported`, writes a daemon
+   * off. A daemon that read the question and refused it for any other reason is asked again
+   * next time.
    *
    * The cost of being wrong is small and bounded: a transport failure that merely
    * *coincided* with the question leaves that one daemon's menu without availability until
@@ -211,6 +217,8 @@ export class DaemonStore implements Store {
    * refusal.
    */
   #profilesUnservedBy: string | null = null;
+  /** The `profile_list` question in flight, which a second ask waits on rather than repeating. */
+  #launchersAsked: Promise<void> | null = null;
 
   constructor(options: {
     readonly bridge: DaemonBridge;
@@ -338,6 +346,10 @@ export class DaemonStore implements Store {
       await this.#refresh();
     } catch (cause) {
       const failure = asCommandFailure(cause);
+      // A refusal, and only a refusal. A create that got no answer says nothing about which
+      // shells exist, and asking straight after one is asking into the same trouble: a
+      // transport failure *then* is taken for an older daemon, which writes this one's
+      // menu off until it restarts. `does not take a launch that got no answer…` holds it.
       if (failure !== null && !TRANSPORT_FAILURES.has(failure.kind)) {
         // The daemon read the request and said no — possibly because the shell the menu
         // offered has gone since it was drawn — so the menu is re-read before the notice
@@ -364,16 +376,12 @@ export class DaemonStore implements Store {
   };
 
   /**
-   * Ask the daemon again which shells it can launch.
+   * Ask the daemon again which shells it can launch. The `+` menu calls this as it opens.
    *
-   * Only while connected. A menu opened mid-reconnect has nothing to ask, and a transport
-   * failure here would be taken for an older daemon refusing the verb — see
-   * {@link #profilesUnservedBy}.
+   * Only while connected, and never two questions at once — see {@link #refreshLaunchers},
+   * which holds both rules for every caller rather than only this one.
    */
   refreshLaunchers = async (): Promise<void> => {
-    if (this.#snapshot.status !== 'ready') {
-      return;
-    }
     await this.#refreshLaunchers();
   };
 
@@ -960,11 +968,19 @@ export class DaemonStore implements Store {
     // sequence above turned that into an endless reconnect against a refusal that said, in
     // the envelope, that waiting would not help.
     await this.#refreshProjects();
-    // After the projects and for their reason: the menu is something the window would like,
-    // never a reason to fail the connection. It cannot throw.
-    await this.#refreshLaunchers();
 
+    // The menu is drawn with nothing marked until the daemon has answered for it, which is
+    // what "nothing has said it is unavailable" means — and `ready` does not wait for that
+    // answer. It used to: the question was awaited here, and the daemon answers it by walking
+    // its `PATH`, which took 21 s with an unreachable share on it. The window sat in
+    // `connecting` for those 21 s, and the tabs already open said nothing was wrong.
+    this.#update((current) =>
+      current.launchers.length > 0 ? current : { ...current, launchers: launchersFrom(null) },
+    );
     this.#update((current) => ({ ...current, status: 'ready' }));
+    // Not awaited, so the reconnect loop starts watching the connection straight away rather
+    // than after the walk. It cannot throw.
+    void this.#refreshLaunchers();
     return 'connected';
   }
 
@@ -974,8 +990,36 @@ export class DaemonStore implements Store {
    * On an answer, the `+` menu is redrawn from it. On a failure the menu is left as it was —
    * the shells were true when the daemon said them — or, when there is no menu yet, drawn
    * with nothing marked unavailable, which is what a daemon too old to be asked gets.
+   *
+   * **Only while connected**, on every path that asks: the connect sequence, a launch, and a
+   * menu opening. With nothing connected there is nobody to answer, and a transport failure
+   * then would be taken for an older daemon refusing the verb — see
+   * {@link #profilesUnservedBy}.
+   *
+   * **One question at a time.** The daemon walks its `PATH` to answer, which can take
+   * seconds, and the answer does not depend on who asked. A second ask while one is out
+   * waits for that answer rather than sending another. Otherwise a menu opened five times
+   * during a slow walk would start five walks on the daemon, and whichever finished last
+   * would draw the menu, not whichever was asked last.
    */
   async #refreshLaunchers(): Promise<void> {
+    if (this.#snapshot.status !== 'ready') {
+      return;
+    }
+    if (this.#launchersAsked !== null) {
+      return this.#launchersAsked;
+    }
+    const asked = this.#askForLaunchers();
+    this.#launchersAsked = asked;
+    try {
+      await asked;
+    } finally {
+      this.#launchersAsked = null;
+    }
+  }
+
+  /** {@link #refreshLaunchers}'s question itself: one `profile_list`, answered or not. */
+  async #askForLaunchers(): Promise<void> {
     const nonce = this.#launchNonce;
     if (nonce !== null && nonce === this.#profilesUnservedBy) {
       this.#update((current) =>

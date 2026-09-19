@@ -1689,40 +1689,37 @@ describe('the + menu', () => {
     expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
   });
 
-  it('costs one reconnect against a daemon too old to be asked, not a loop', async () => {
-    // A daemon built before the verb cannot read the request, so it closes the connection
-    // rather than answering `unsupported` — and asking again on the reconnect would close it
-    // again for ever. The daemon that did it is remembered by its launch nonce.
-    const daemon = new FakeDaemon();
-    daemon.seed([session(1)]);
-    const realInvoke = daemon.invoke.bind(daemon);
-    daemon.invoke = async <T,>(name: string, args?: Record<string, unknown>): Promise<T> => {
-      if (name === 'profile_list') {
-        daemon.calls.push({ command: name });
-        daemon.drop();
-        throw disconnected('the daemon closed the connection');
-      }
-      return realInvoke<T>(name, args);
-    };
-    const store = new DaemonStore({
-      bridge: daemon,
-      router: new TerminalRouter({
-        bridge: daemon,
-        createTerminal: stubTerminals(),
-        platform: 'windows',
-      }),
-      retryDelaysMs: [0],
-    });
-    void store.run();
-    await until(() => daemon.connects >= 2 && store.getSnapshot().status === 'ready');
-    const settled = daemon.connects;
-    await until(() => daemon.connects > settled, 50);
+  /** How many times the daemon has been asked which shells it has. */
+  function asked(daemon: FakeDaemon): number {
+    return daemon.calls.filter((call) => call.command === 'profile_list').length;
+  }
 
+  it('asks a daemon too old to answer once, and costs the window no reconnect', async () => {
+    // A daemon built before the verb cannot read the request, so it closes the connection
+    // the question arrived on rather than answering `unsupported`. The Rust side opens that
+    // connection for the question alone (`Client::request_aside`), so what reaches the store
+    // is an `io` failure with the window still connected — and asking again would cost the
+    // same refused connection on every menu open. The daemon is remembered by launch nonce.
+    const { store, daemon } = build();
+    daemon.refusals.set('profile_list', {
+      failure: {
+        kind: 'io',
+        message: 'the daemon closed the control socket',
+        nextSteps: [],
+        retryable: true,
+      },
+      times: Number.MAX_SAFE_INTEGER,
+    });
+    await ready(store);
+    await until(() => asked(daemon) === 1);
+    await store.refreshLaunchers();
+    await store.refreshLaunchers();
+
+    expect(asked(daemon), 'a daemon that could not answer was asked again').toBe(1);
     expect(store.getSnapshot().status).toBe('ready');
-    expect(daemon.connects, 'the second connect must not ask again').toBe(2);
-    expect(daemon.calls.filter((call) => call.command === 'profile_list')).toHaveLength(1);
+    expect(daemon.connects, 'the question cost the window its connection').toBe(1);
     // And the menu is the one from before the verb existed, not an empty one.
-    expect(shells(store).map((row) => row)).toEqual([
+    expect(shells(store)).toEqual([
       { id: 'shell.pwsh', unavailable: null },
       { id: 'shell.cmd', unavailable: null },
       { id: 'shell.git_bash', unavailable: null },
@@ -1730,13 +1727,105 @@ describe('the + menu', () => {
     ]);
 
     // A daemon that restarted is a different daemon, and is asked.
+    daemon.refusals.delete('profile_list');
     daemon.launchNonce = 'nonce_second';
-    daemon.invoke = realInvoke;
     withoutPwsh(daemon);
     daemon.drop();
     await until(() => shells(store)[0]?.unavailable === NO_PWSH);
     expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
-    store.dispose();
+  });
+
+  it('asks again a daemon that read the question and refused it', async () => {
+    // Only a failure that is not an answer writes a daemon off. One that read the question
+    // and said no — out of memory, a store it could not open — may well answer next time,
+    // and a menu that never asked it again would offer every shell until it restarted.
+    const { store, daemon } = build();
+    await ready(store);
+    await until(() => asked(daemon) === 1);
+    daemon.failures.set('profile_list', {
+      kind: 'internal',
+      message: 'the daemon could not answer just now',
+      nextSteps: [],
+      retryable: true,
+    });
+    await store.refreshLaunchers();
+    expect(asked(daemon)).toBe(2);
+
+    withoutPwsh(daemon);
+    await store.refreshLaunchers();
+    expect(asked(daemon), 'a refusal wrote the daemon off').toBe(3);
+    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
+  });
+
+  it('does not take a launch that got no answer for a refusal', async () => {
+    // A create the daemon never answered says nothing about which shells exist, and asking
+    // straight after it asks into the same trouble. If that question fails the same way it
+    // is taken for an older daemon, and this one's menu is written off until it restarts.
+    const { store, daemon } = build();
+    await ready(store);
+    await until(() => asked(daemon) === 1);
+    const lost: CommandFailure = {
+      kind: 'io',
+      message: 'the connection failed part way through',
+      nextSteps: [],
+      retryable: true,
+    };
+    daemon.failures.set('session_create', lost);
+    daemon.failures.set('profile_list', lost);
+    await store.openTab('shell.cmd').catch(() => {});
+    expect(asked(daemon), 'a launch that got no answer re-read the menu').toBe(1);
+
+    daemon.failures.delete('profile_list');
+    withoutPwsh(daemon);
+    await store.refreshLaunchers();
+    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
+  });
+
+  it('reaches ready without waiting for the menu, and draws it unmarked meanwhile', async () => {
+    // The daemon answers by walking its PATH, and with an unreachable share on it that took
+    // 21 s. The connect sequence used to await it, so the window sat in `connecting` the
+    // whole time. Held here until released, which is the slow walk without the clock.
+    const { store, daemon } = build();
+    withoutPwsh(daemon);
+    const walk = hold(daemon, 'profile_list');
+    await ready(store);
+
+    expect(store.getSnapshot().status).toBe('ready');
+    expect(shells(store).map((row) => row.unavailable)).toEqual([null, null, null, null]);
+
+    walk.release(0);
+    await until(() => shells(store)[0]?.unavailable === NO_PWSH);
+    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
+  });
+
+  it('asks one question at a time, and every asker gets its answer', async () => {
+    // A menu opened again and again during a slow walk must not start a walk each time on
+    // the daemon, and an older answer landing last must not redraw over a newer one.
+    const { store, daemon } = build();
+    await ready(store);
+    await until(() => asked(daemon) === 1);
+    const walk = hold(daemon, 'profile_list');
+    withoutPwsh(daemon);
+
+    const first = store.refreshLaunchers();
+    const second = store.refreshLaunchers();
+    const third = store.refreshLaunchers();
+    await until(() => walk.held === 1);
+    await until(() => walk.held > 1, 20);
+    expect(walk.held, 'a second question went out while one was in flight').toBe(1);
+
+    walk.release(0);
+    await Promise.all([first, second, third]);
+    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
+
+    // And once it has been answered, the next open asks again.
+    daemon.profiles = daemon.profiles.map((row) => ({ ...row, unavailable: null }));
+    const again = store.refreshLaunchers();
+    await until(() => walk.held === 2);
+    walk.release(1);
+    await again;
+    expect(asked(daemon)).toBe(3);
+    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: null });
   });
 
   it('does not write a daemon off for a menu opened while reconnecting', async () => {
@@ -1788,7 +1877,10 @@ describe('the + menu', () => {
  * snapshot reached `started` either way and the assertion passed against a store with no
  * ownership check in it — a test that watched the right screen and proved nothing.
  */
-function hold(daemon: FakeDaemon, command: string): { release: (call: number) => void } {
+function hold(
+  daemon: FakeDaemon,
+  command: string,
+): { release: (call: number) => void; readonly held: number } {
   const waiting: (() => void)[] = [];
   const realInvoke = daemon.invoke.bind(daemon);
   daemon.invoke = async <T,>(name: string, args?: Record<string, unknown>): Promise<T> => {
@@ -1802,6 +1894,10 @@ function hold(daemon: FakeDaemon, command: string): { release: (call: number) =>
       const resume = waiting[call];
       expect(resume, `no call ${call} of ${command} is waiting`).toBeDefined();
       resume?.();
+    },
+    /** How many calls have arrived, released or not. A held call is not in `calls` yet. */
+    get held() {
+      return waiting.length;
     },
   };
 }
