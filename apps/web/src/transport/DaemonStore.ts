@@ -220,8 +220,12 @@ export class DaemonStore implements Store {
    * off the new daemon for the old one's answer would cost it its menu for its whole life.
    */
   #profilesUnservedBy: string | null = null;
-  /** The `profile_list` question in flight, which a second ask waits on rather than repeating. */
-  #launchersAsked: Promise<void> | null = null;
+  /**
+   * The `profile_list` question in flight and the daemon it was asked of, which a second ask
+   * of the same daemon waits on rather than repeating.
+   */
+  #launchersAsked: { readonly nonce: string | null; readonly answered: Promise<void> } | null =
+    null;
 
   constructor(options: {
     readonly bridge: DaemonBridge;
@@ -997,31 +1001,43 @@ export class DaemonStore implements Store {
    * menu opening. With nothing connected there is nobody to answer, and no daemon to write
    * off if the question fails — see {@link #profilesUnservedBy}.
    *
-   * **One question at a time.** The daemon walks its `PATH` to answer, which can take
-   * seconds, and the answer does not depend on who asked. A second ask while one is out
-   * waits for that answer rather than sending another. Otherwise a menu opened five times
+   * **One question at a time, of each daemon.** The daemon walks its `PATH` to answer, which
+   * can take seconds, and the answer does not depend on who asked. A second ask while one is
+   * out waits for that answer rather than sending another. Otherwise a menu opened five times
    * during a slow walk would start five walks on the daemon, and whichever finished last
    * would draw the menu, not whichever was asked last.
+   *
+   * A question still out to a daemon that has since been replaced is not waited on. Its
+   * answer is that daemon's, and the connect sequence for the replacement used to get it back
+   * and leave the new daemon unasked until the menu next opened. The new daemon is asked
+   * straight away, and the old answer is dropped when it lands.
    */
   async #refreshLaunchers(): Promise<void> {
     if (this.#snapshot.status !== 'ready') {
       return;
     }
-    if (this.#launchersAsked !== null) {
-      return this.#launchersAsked;
+    const nonce = this.#launchNonce;
+    const inFlight = this.#launchersAsked;
+    if (inFlight !== null && inFlight.nonce === nonce) {
+      return inFlight.answered;
     }
-    const asked = this.#askForLaunchers();
+    const asked = { nonce, answered: this.#askForLaunchers(nonce) };
     this.#launchersAsked = asked;
     try {
-      await asked;
+      await asked.answered;
     } finally {
-      this.#launchersAsked = null;
+      // Only its own: a question to a newer daemon may have taken the slot since.
+      if (this.#launchersAsked === asked) {
+        this.#launchersAsked = null;
+      }
     }
   }
 
-  /** {@link #refreshLaunchers}'s question itself: one `profile_list`, answered or not. */
-  async #askForLaunchers(): Promise<void> {
-    const nonce = this.#launchNonce;
+  /**
+   * {@link #refreshLaunchers}'s question itself: one `profile_list`, answered or not, of the
+   * daemon `nonce` names — the one connected when it was asked.
+   */
+  async #askForLaunchers(nonce: string | null): Promise<void> {
     if (nonce !== null && nonce === this.#profilesUnservedBy) {
       this.#update((current) =>
         current.launchers.length > 0 ? current : { ...current, launchers: launchersFrom(null) },
@@ -1044,6 +1060,10 @@ export class DaemonStore implements Store {
       return;
     }
 
+    if (nonce !== this.#launchNonce) {
+      // A replaced daemon's shells. The one connected now has been asked for its own.
+      return;
+    }
     const launchers = launchersFrom(readProfiles(answer));
     this.#update((current) => ({ ...current, launchers }));
   }
