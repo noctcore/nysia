@@ -23,6 +23,14 @@ export interface GeneralPreferences {
   readonly sessionRecaps: boolean;
   readonly autoClearSuggestion: boolean;
   readonly confirmDestructiveGit: boolean;
+  /**
+   * Ask before closing a tab whose agent is mid-turn (`chrome/stopAgent.ts`).
+   *
+   * The dialog's *Don't ask again* writes this, and General's Behaviour card shows it, so
+   * a user who turned the question off can see that they did and turn it back on. A value
+   * that is not a boolean reads as the default, which is to ask.
+   */
+  readonly confirmStopAgent: boolean;
   readonly needsInputAlerts: boolean;
   readonly completionSound: boolean;
 }
@@ -34,9 +42,19 @@ export const DEFAULT_GENERAL: GeneralPreferences = {
   sessionRecaps: true,
   autoClearSuggestion: true,
   confirmDestructiveGit: true,
+  confirmStopAgent: true,
   needsInputAlerts: true,
   completionSound: false,
 };
+
+/**
+ * The Settings › General row that holds {@link GeneralPreferences.confirmStopAgent}.
+ *
+ * One constant because two surfaces print it: the row itself, and the stop dialog's pointer
+ * to it. A pointer spelled separately is a pointer that goes on naming a row after the row
+ * is renamed, which is how a user who ticked *Don't ask again* loses the way back.
+ */
+export const CONFIRM_STOP_AGENT_LABEL = 'Confirm stopping an agent';
 
 const STORAGE_KEY = 'nysia.general';
 
@@ -76,6 +94,7 @@ export function parseGeneral(raw: string | null): GeneralPreferences {
       record.confirmDestructiveGit,
       DEFAULT_GENERAL.confirmDestructiveGit,
     ),
+    confirmStopAgent: boolOr(record.confirmStopAgent, DEFAULT_GENERAL.confirmStopAgent),
     needsInputAlerts: boolOr(record.needsInputAlerts, DEFAULT_GENERAL.needsInputAlerts),
     completionSound: boolOr(record.completionSound, DEFAULT_GENERAL.completionSound),
   };

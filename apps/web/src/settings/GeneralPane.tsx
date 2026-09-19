@@ -4,6 +4,7 @@ import { Segmented } from '../ui/Segmented';
 import { SettingRow } from '../ui/SettingRow';
 import { Toggle } from '../ui/Toggle';
 import {
+  CONFIRM_STOP_AGENT_LABEL,
   MODELS,
   PERMISSION_MODES,
   THINKING_EFFORTS,
@@ -120,6 +121,20 @@ export function GeneralPane() {
               label="Confirm destructive git"
               checked={preferences.confirmDestructiveGit}
               onChange={(value) => update('confirmDestructiveGit', value)}
+            />
+          }
+        />
+        {/* The other half of the stop dialog's "Don't ask again", which names this row.
+            A confirmation a user can switch off from the dialog and then not find is
+            worse than none, so switching it off there is only half a preference. */}
+        <SettingRow
+          label={CONFIRM_STOP_AGENT_LABEL}
+          description="Ask before closing a tab whose agent is working or waiting on you."
+          control={
+            <Toggle
+              label={CONFIRM_STOP_AGENT_LABEL}
+              checked={preferences.confirmStopAgent}
+              onChange={(value) => update('confirmStopAgent', value)}
             />
           }
         />
