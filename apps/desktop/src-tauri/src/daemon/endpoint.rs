@@ -189,14 +189,14 @@ pub fn open(listening: &Listening) -> Result<Box<dyn Socket>, DaemonError> {
                         attempt += 1;
                         std::thread::sleep(PIPE_BUSY_BACKOFF);
                     }
-                    Err(error) => return Err(dial_failure(name.clone(), &error)),
+                    Err(error) => return Err(dial_failure(name, &error)),
                 }
             }
         }
         #[cfg(not(windows))]
         Listening::UnixSocket(path) => std::os::unix::net::UnixStream::connect(path)
             .map(|socket| Box::new(socket) as Box<dyn Socket>)
-            .map_err(|error| dial_failure(path.display().to_string(), &error)),
+            .map_err(|error| dial_failure(&path.display().to_string(), &error)),
 
         // Resolution is shared, so the wrong variant can only come from an explicit
         // `NYSIA_ENDPOINT` naming the other platform's transport. Refused with the endpoint
@@ -236,18 +236,22 @@ pub fn open(listening: &Listening) -> Result<Box<dyn Socket>, DaemonError> {
 /// one is there and this caller may not talk to it, and is [`DaemonError::Io`]. Spawning
 /// against either produced a daemon that could not bind, twenty seconds of waiting, and then
 /// a complaint pointing at a log whose only line says the endpoint is already held.
-fn dial_failure(endpoint: String, error: &std::io::Error) -> DaemonError {
+///
+/// **The endpoint goes to the log, never into the sentence.** A dial failure reaches the user
+/// as a notice, and the pipe's name is this account's own endpoint on the machine: a notice
+/// that repeats it tells the person nothing they can act on and puts it on screen.
+fn dial_failure(endpoint: &str, error: &std::io::Error) -> DaemonError {
+    tracing::debug!(endpoint, %error, "could not open the daemon's socket");
     let absent = matches!(error.kind(), std::io::ErrorKind::NotFound)
         || (cfg!(unix) && matches!(error.kind(), std::io::ErrorKind::ConnectionRefused));
     if absent {
         DaemonError::Unreachable {
-            endpoint,
             cause: error.to_string(),
         }
     } else if cfg!(windows) && error.raw_os_error() == Some(ERROR_PIPE_BUSY) {
         DaemonError::Busy
     } else {
-        DaemonError::Io(format!("could not open {endpoint}: {error}"))
+        DaemonError::Io(format!("could not open the daemon's socket: {error}"))
     }
 }
 
@@ -462,10 +466,7 @@ mod tests {
         // access denial means something *is* listening: spawning against it produces a daemon
         // that cannot bind, twenty seconds of waiting, and a log line saying so.
         let dial = |kind: std::io::ErrorKind| {
-            dial_failure(
-                "the endpoint".to_owned(),
-                &std::io::Error::new(kind, "as it happens"),
-            )
+            dial_failure("the endpoint", &std::io::Error::new(kind, "as it happens"))
         };
 
         assert!(
@@ -502,10 +503,6 @@ mod tests {
                 failure.retryable(),
                 "{kind:?} must still have the window keep dialling"
             );
-            assert!(
-                failure.to_string().contains("the endpoint"),
-                "{kind:?} lost the endpoint it was about: {failure}"
-            );
         }
     }
 
@@ -515,7 +512,7 @@ mod tests {
         // one beside a daemon whose instances are all in use leaves it unable to bind. Built
         // from the number, as the dial matches it, and not from a kind.
         let busy = dial_failure(
-            "the endpoint".to_owned(),
+            "the endpoint",
             &std::io::Error::from_raw_os_error(ERROR_PIPE_BUSY),
         );
         if cfg!(windows) {
@@ -579,6 +576,36 @@ mod tests {
             waited < Duration::from_secs(5),
             "a busy pipe is a bounded wait, not a queue: {waited:?}"
         );
+    }
+
+    #[test]
+    fn a_dial_failure_does_not_put_the_endpoint_on_screen() {
+        // The kinds test above used to assert the opposite. The sentence becomes a notice, and
+        // on a `+` menu launch the notice read "could not open \\.\pipe\nysiad-v2-<account>:
+        // …", which is this account's endpoint on the machine and nothing a person can act on.
+        let endpoint = r"\\.\pipe\nysiad-v2-someone";
+        let failures = [
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+            std::io::Error::from_raw_os_error(ERROR_PIPE_BUSY),
+        ];
+        for error in failures {
+            let failure = super::super::CommandFailure::from(dial_failure(endpoint, &error));
+            assert!(
+                !failure.message.contains("nysiad-v2-someone"),
+                "{error:?} names the endpoint: {}",
+                failure.message
+            );
+            assert!(
+                failure
+                    .next_steps
+                    .iter()
+                    .all(|step| !step.contains("nysiad-v2-someone")),
+                "{error:?} names the endpoint in its next steps: {:?}",
+                failure.next_steps
+            );
+        }
     }
 
     #[test]
