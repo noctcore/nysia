@@ -52,6 +52,14 @@ pub enum DaemonError {
         /// What the OS said.
         cause: String,
     },
+    /// A daemon is listening and every connection it offers stayed in use.
+    ///
+    /// Only a Windows named pipe can say this (`ERROR_PIPE_BUSY`), and only after the dial
+    /// has tried again for a few hundred milliseconds — see `endpoint::open`. **Never
+    /// [`Self::Unreachable`]**: that one allows the window to start a daemon, and starting one
+    /// beside a busy daemon leaves it unable to bind.
+    #[error("the daemon did not take a new connection: every one it offers was in use")]
+    Busy,
     /// The daemon declined the handshake, or speaks a protocol this build cannot attach to.
     ///
     /// `retryable` comes off the wire rather than being inferred from the reason: a daemon
@@ -143,6 +151,7 @@ impl DaemonError {
         match self {
             Self::Endpoint(_) => "endpoint",
             Self::Unreachable { .. } => "unreachable",
+            Self::Busy => "busy",
             Self::Refused { .. } => "refused",
             Self::Spawn { .. } => "spawn",
             Self::Starting { .. } => "starting",
@@ -163,9 +172,11 @@ impl DaemonError {
     /// and pretending otherwise would spin forever against a daemon that will never agree.
     pub fn retryable(&self) -> bool {
         match self {
-            Self::Unreachable { .. } | Self::Io(_) | Self::Disconnected | Self::Starting { .. } => {
-                true
-            }
+            Self::Unreachable { .. }
+            | Self::Busy
+            | Self::Io(_)
+            | Self::Disconnected
+            | Self::Starting { .. } => true,
             Self::Refused { retryable, .. } => *retryable,
             Self::Daemon(envelope) => envelope.is_retryable(),
             Self::Endpoint(_) | Self::Protocol(_) | Self::Spawn { .. } => false,
@@ -183,6 +194,11 @@ impl DaemonError {
             Self::Daemon(envelope) => envelope.next_steps().to_vec(),
             Self::Unreachable { .. } | Self::Disconnected => {
                 vec!["Start the Nysia daemon, then try again.".to_owned()]
+            }
+            // Not "the daemon went away": it is there, and nothing will reconnect, because
+            // the connection the window keeps was never involved.
+            Self::Busy => {
+                vec!["The daemon is busy with other connections. Try again in a moment.".to_owned()]
             }
             Self::Io(_) => {
                 vec!["The daemon went away. Nysia will reconnect on its own.".to_owned()]
@@ -274,6 +290,7 @@ mod tests {
             }
             .retryable()
         );
+        assert!(DaemonError::Busy.retryable());
         assert!(DaemonError::Io("reset".to_owned()).retryable());
         assert!(DaemonError::Disconnected.retryable());
         assert!(
@@ -320,6 +337,7 @@ mod tests {
                 endpoint: "pipe".to_owned(),
                 cause: "not found".to_owned(),
             },
+            DaemonError::Busy,
             DaemonError::Refused {
                 reason: "this daemon speaks v9".to_owned(),
                 retryable: false,

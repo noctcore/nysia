@@ -163,6 +163,78 @@ pub(crate) fn scratch(tag: &str) -> Endpoint {
     Endpoint::resolve(PROTOCOL_VERSION, source).expect("a scratch endpoint resolves")
 }
 
+/// A pipe at an endpoint whose only instance is taken.
+///
+/// What a dial meets in the gap between the daemon accepting one client and creating its
+/// next instance, held open for as long as a test needs it. A real daemon closes that gap in
+/// one `CreateNamedPipeW`, so the gap cannot be aimed at; this is the gap without the race.
+///
+/// Windows only. A Unix socket has a backlog rather than instances, so nothing on the macOS
+/// leg fails this way and nothing there can exercise the retry that answers it.
+#[cfg(windows)]
+pub(crate) struct Occupied {
+    name: String,
+    _taken: std::fs::File,
+    _server: tokio::net::windows::named_pipe::NamedPipeServer,
+    /// Last, so the instances are closed before the reactor they are registered with.
+    runtime: tokio::runtime::Runtime,
+}
+
+#[cfg(windows)]
+impl Occupied {
+    /// Create `endpoint`'s pipe with one instance, and connect to that instance.
+    pub(crate) fn at(endpoint: &Endpoint) -> Self {
+        let nysia_core::rpc::Listening::NamedPipe(name) = endpoint.listening() else {
+            panic!(
+                "a Windows endpoint is a named pipe, not {}",
+                endpoint.listening()
+            );
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime for the pipe");
+        // Inside the runtime: a pipe server registers with its reactor as it is created.
+        let server = runtime
+            .block_on(async {
+                tokio::net::windows::named_pipe::ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .create(name)
+            })
+            .expect("the pipe is created");
+        let taken = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(name)
+            .expect("the pipe's only instance is taken");
+        Self {
+            name: name.clone(),
+            _taken: taken,
+            _server: server,
+            runtime,
+        }
+    }
+
+    /// Create the pipe's next instance after `delay`, from another thread, as the daemon's
+    /// accept loop does once the client before has been accepted.
+    ///
+    /// The instance comes back through the join handle, so it stays open until the test has
+    /// joined it.
+    pub(crate) fn free_after(
+        &self,
+        delay: Duration,
+    ) -> std::thread::JoinHandle<std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer>>
+    {
+        let reactor = self.runtime.handle().clone();
+        let name = self.name.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let _inside = reactor.enter();
+            tokio::net::windows::named_pipe::ServerOptions::new().create(&name)
+        })
+    }
+}
+
 /// The webview, as far as the client can tell.
 ///
 /// Decodes each coalesced window the dispatcher delivers and reports what it "rendered",
