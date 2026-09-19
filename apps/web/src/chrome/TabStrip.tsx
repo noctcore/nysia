@@ -41,9 +41,10 @@ import { createStopGate, openQuestion } from './stopAgent';
  *
  * Both of those closes go through the stop gate (`./stopAgent`) and neither calls
  * `closeTab` itself. Closing a tab ends its session, and for an agent mid-turn that is its
- * work, so the gate asks first; `TabStrip.source.test.ts` holds the strip to having no other
- * way to close a tab. The window's own close is not gated and must not be: under D-1 the
- * daemon owns the session, so closing the window interrupts nothing.
+ * work, so the gate asks first; `TabStrip.source.test.ts` holds this file to not naming
+ * `closeTab`. A helper in another file would not write that identifier here, and the check
+ * cannot see it. The window's own close is not gated and must not be: under D-1 the daemon
+ * owns the session, so closing the window interrupts nothing.
  */
 export function TabStrip() {
   const { tabs, activeTab } = useSnapshot();
