@@ -60,14 +60,59 @@ describe('the tab close button', () => {
     expect(closeButtonJsx()).toContain('tabIndex={-1}');
   });
 
-  it('reads the focus question before issuing the command', () => {
+  it('reads the focus question before issuing the request', () => {
     // The node is unmounted by the time `onSettled` runs, so asking then would be asking
     // about an element that no longer exists.
     const jsx = source.slice(source.indexOf('onClick={(event) => {', source.indexOf('aria-label={`Close ')));
     const asked = jsx.indexOf('document.activeElement');
-    const issued = jsx.indexOf('commands.closeTab');
+    const issued = jsx.indexOf('requestClose(tab');
     expect(asked).toBeGreaterThan(-1);
     expect(issued).toBeGreaterThan(-1);
-    expect(asked, 'the focus test moved after the command').toBeLessThan(issued);
+    expect(asked, 'the focus test moved after the request').toBeLessThan(issued);
+  });
+});
+
+/*
+ * The strip's two closes, and the gate between them and the session.
+ *
+ * `stopAgent.test.ts` and `StopAgentDialog.render.test.ts` prove the gate asks before a
+ * working agent is closed and that Cancel leaves it running — which proves nothing if the
+ * strip calls `closeTab` itself and never reaches the gate. That wiring is inside a component
+ * with hooks, which a node-only suite cannot press (D-18), so it is read out of the source
+ * like the mousedown guard above: weaker than behaviour, and it still turns "someone restored
+ * the direct call and every gate stayed green" into a named failure.
+ */
+describe('closing a tab', () => {
+  it('never calls closeTab from the strip', () => {
+    expect(source, 'the strip closes a tab without going through the stop gate').not.toMatch(
+      /\bcloseTab\s*\(/,
+    );
+  });
+
+  it('sends the close button through the gate', () => {
+    const jsx = source.slice(source.indexOf('onClick={(event) => {', source.indexOf('aria-label={`Close ')));
+    expect(jsx).toContain('requestClose(tab, ');
+    expect(source).toContain('requestClose={gate.request}');
+  });
+
+  it('sends Delete and Backspace through the gate', () => {
+    const start = source.indexOf("event.key === 'Delete'");
+    expect(start, 'the Delete branch moved or was renamed').toBeGreaterThan(-1);
+    const branch = source.slice(start, source.indexOf('\n    }\n', start));
+    expect(branch).toContain('gate.request(tab, ');
+  });
+
+  it('mounts the question outside the tablist', () => {
+    // The tablist holds nothing but tabs (`App.render.test.ts`); a dialog inside it would be
+    // a child a screen reader is told is a tab.
+    const tablistEnd = source.indexOf('</div>', source.indexOf('role="tablist"'));
+    expect(source.indexOf('<StopAgentDialog')).toBeGreaterThan(tablistEnd);
+  });
+
+  it('shows the question only through openQuestion', () => {
+    // `stopAgent.test.ts` holds `openQuestion` to dropping a question whose session left the
+    // strip or whose pane key was reused; that is only true of the strip if it asks it.
+    expect(source).toMatch(/openQuestion\(\s*useSyncExternalStore\(gate\.subscribe/);
+    expect(source).toContain('pending={question}');
   });
 });
