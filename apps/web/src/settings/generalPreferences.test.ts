@@ -43,4 +43,16 @@ describe('parseGeneral', () => {
     expect(parsed.sessionRecaps).toBe(DEFAULT_GENERAL.sessionRecaps);
     expect(parsed.completionSound).toBe(true);
   });
+
+  it('asks before stopping an agent unless told not to', () => {
+    // A confirmation in front of a destructive action is on by default, and only an actual
+    // `false` turns it off. A hand-edited `"no"` or a missing field would otherwise decide,
+    // silently, that closing a working agent needs no question.
+    expect(DEFAULT_GENERAL.confirmStopAgent).toBe(true);
+    for (const stray of ['"no"', '0', 'null', '"false"']) {
+      const raw = `{"confirmStopAgent":${stray}}`;
+      expect(parseGeneral(raw).confirmStopAgent, raw).toBe(true);
+    }
+    expect(parseGeneral('{"confirmStopAgent":false}').confirmStopAgent).toBe(false);
+  });
 });
