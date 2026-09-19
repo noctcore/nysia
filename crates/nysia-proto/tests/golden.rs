@@ -59,8 +59,8 @@ use nysia_proto::project::{
     RegisterRefusal, Worktree,
 };
 use nysia_proto::session::{
-    ExitStatus, SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary,
-    ShellProfile, WorkingDirectory,
+    ExitStatus, ProfileAvailability, ProfileList, SessionClose, SessionCreate, SessionCreated,
+    SessionList, SessionSummary, ShellProfile, WorkingDirectory,
 };
 use nysia_proto::stream::{StreamAttach, StreamAttached, StreamDetach, StreamId};
 use nysia_proto::tasks::{Issue, IssueState, TasksList};
@@ -756,6 +756,34 @@ goldens! {
     response_tasks_list_empty: ResponseEnvelope = ResponseEnvelope::new(
         request_id(),
         ResponsePayload::TasksList { issues: Vec::new() },
+    );
+
+    request_profile_list: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::ProfileList(ProfileList {}),
+    };
+
+    // What the `+` menu is drawn from. Every shell is a row, launchable or not, and the
+    // reason names the shell and never a file: the menu shows it to a person.
+    response_profile_list: ResponseEnvelope = ResponseEnvelope::new(
+        request_id(),
+        ResponsePayload::ProfileList {
+            profiles: vec![
+                ProfileAvailability {
+                    profile: ShellProfile::Pwsh,
+                    unavailable: Some(
+                        "the pwsh profile is unavailable: pwsh was not found on PATH".to_owned(),
+                    ),
+                },
+                ProfileAvailability { profile: ShellProfile::Cmd, unavailable: None },
+                ProfileAvailability { profile: ShellProfile::GitBash, unavailable: None },
+                ProfileAvailability {
+                    profile: ShellProfile::Wsl { distro: None },
+                    unavailable: None,
+                },
+            ],
+        },
     );
 
     // The three the Tasks screen draws distinct headings for. Fixtures rather than unit

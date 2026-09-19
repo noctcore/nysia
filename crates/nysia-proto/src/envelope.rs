@@ -38,7 +38,10 @@ use crate::project::{
     Project, ProjectForget, ProjectList, ProjectRegister, ProjectRegistered, ProjectStart,
     ProjectStarted,
 };
-use crate::session::{SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary};
+use crate::session::{
+    ProfileAvailability, ProfileList, SessionClose, SessionCreate, SessionCreated, SessionList,
+    SessionSummary,
+};
 use crate::stream::{StreamAttach, StreamAttached, StreamDetach};
 use crate::tasks::{Issue, TasksList};
 use crate::terminal::{
@@ -157,6 +160,8 @@ pub enum RequestPayload {
     ProjectStart(ProjectStart),
     /// List a project's open GitHub issues, queried live (D-5).
     TasksList(TasksList),
+    /// Which shells this daemon can launch right now.
+    ProfileList(ProfileList),
 }
 
 impl RequestPayload {
@@ -183,6 +188,7 @@ impl RequestPayload {
             Self::ProjectForget(_) => "project_forget",
             Self::ProjectStart(_) => "project_start",
             Self::TasksList(_) => "tasks_list",
+            Self::ProfileList(_) => "profile_list",
         }
     }
 
@@ -229,7 +235,9 @@ impl RequestPayload {
             | Self::ProjectList(_)
             // Querying GitHub changes nothing here or there. D-5 keeps no local task model,
             // so there is not even a cache for a second call to disturb.
-            | Self::TasksList(_) => false,
+            | Self::TasksList(_)
+            // Resolving a program is a look at the filesystem; nothing is kept.
+            | Self::ProfileList(_) => false,
         }
     }
 }
@@ -370,6 +378,15 @@ pub enum ResponsePayload {
         /// The rows.
         issues: Vec<Issue>,
     },
+    /// Every shell a menu offers, and whether this daemon can launch each one now.
+    ///
+    /// All four, always, in [`ShellProfile`](crate::ShellProfile)'s order — a shell the
+    /// daemon cannot launch is a row saying why, not a missing row, so a client can tell
+    /// "not installed" from "not asked about".
+    ProfileList {
+        /// The rows.
+        profiles: Vec<ProfileAvailability>,
+    },
     /// The verb failed.
     Error(ErrorEnvelope),
 }
@@ -398,6 +415,7 @@ impl ResponsePayload {
             Self::ProjectForget => "project_forget",
             Self::ProjectStart(_) => "project_start",
             Self::TasksList { .. } => "tasks_list",
+            Self::ProfileList { .. } => "profile_list",
             Self::Error(_) => "error",
         }
     }
@@ -577,6 +595,7 @@ mod tests {
             RequestPayload::TasksList(TasksList {
                 project: project_id(),
             }),
+            RequestPayload::ProfileList(ProfileList {}),
         ];
         for payload in payloads {
             let envelope = RequestEnvelope::new(payload);
@@ -605,6 +624,8 @@ mod tests {
 
         assert!(!RequestPayload::SessionList(SessionList {}).is_mutation());
         assert!(!RequestPayload::TerminalRead(TerminalRead::screen(handle())).is_mutation());
+        // Asking which shells resolve changes nothing, so a lost answer is asked again.
+        assert!(!RequestPayload::ProfileList(ProfileList {}).is_mutation());
         // Reading GitHub changes nothing anywhere. D-5 keeps no local task model, so unlike
         // every other verb that touches a project there is not even a row for a repeat to
         // disturb — which is why this one is a read despite naming a project.
@@ -686,6 +707,40 @@ mod tests {
                 profile: None,
             })
             .is_mutation()
+        );
+    }
+
+    #[test]
+    fn a_profile_list_is_answered_by_one_row_per_shell() {
+        let asked = RequestEnvelope::new(RequestPayload::ProfileList(ProfileList {}));
+        assert_eq!(asked.payload.verb(), "profile_list");
+        let answered = ResponseEnvelope::new(
+            asked.request_id.clone(),
+            ResponsePayload::ProfileList {
+                profiles: vec![
+                    ProfileAvailability {
+                        profile: crate::session::ShellProfile::Cmd,
+                        unavailable: None,
+                    },
+                    ProfileAvailability {
+                        profile: crate::session::ShellProfile::Pwsh,
+                        unavailable: Some("the pwsh profile is unavailable".to_owned()),
+                    },
+                ],
+            },
+        );
+        assert!(answered.answers(&asked));
+        let json = serde_json::to_value(&answered).unwrap();
+        assert_eq!(json["type"], "profile_list");
+        assert_eq!(json["profiles"][0]["profile"]["shell"], "cmd");
+        assert_eq!(json["profiles"][0]["unavailable"], serde_json::Value::Null);
+        assert_eq!(
+            json["profiles"][1]["unavailable"],
+            "the pwsh profile is unavailable"
+        );
+        assert_eq!(
+            serde_json::from_value::<ResponseEnvelope>(json).unwrap(),
+            answered
         );
     }
 

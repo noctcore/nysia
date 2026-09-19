@@ -242,6 +242,57 @@ pub struct SessionClose {
     pub handle: SessionHandle,
 }
 
+/// Ask which shells this daemon can launch.
+///
+/// # Why the window has to ask
+///
+/// [`ShellProfile`]'s four variants are the four a menu *can* offer, and deriving the menu
+/// from them offered PowerShell 7 on a machine that did not have it: the person picked it,
+/// and learned which shells were real from the refusal. Which programs resolve is a fact
+/// about the machine the daemon runs on — its `PATH`, where Git for Windows is installed —
+/// and the daemon is the only party that can look.
+///
+/// # When the answer is computed, and what makes it stale
+///
+/// **On every request**, by resolving each profile exactly as a spawn would, and cached
+/// nowhere, so it is never older than the request that asked for it. A shell that appears in,
+/// or vanishes from, a directory already on the daemon's `PATH` is reflected by the next one.
+///
+/// **A directory an installer adds to `PATH` is not.** The daemon searches the `PATH` it
+/// started with, and a running process never sees a later change to the system's — so a
+/// shell whose installer puts a new directory on `PATH`, as PowerShell 7's MSI does, is
+/// offered once the daemon has been restarted from an environment that has it. That is true
+/// of every program the daemon resolves, `git` included.
+///
+/// What makes a client's copy stale is the client not asking again, which is the client's
+/// decision — and why a launch this answer called possible can still be refused. That refusal
+/// stays; this answer does not replace it.
+///
+/// Deliberately empty, like [`SessionList`]: there are four profiles, and a filter over four
+/// would be a wire shape to support for no benefit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ProfileList {}
+
+/// One shell, and whether the daemon can launch it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ProfileAvailability {
+    /// Which shell. WSL is listed once, as `distro: null` — the distribution a bare
+    /// `wsl.exe` would open — because that is the one WSL entry a menu offers.
+    pub profile: ShellProfile,
+    /// Why the daemon cannot launch it right now, or `null` when it can.
+    ///
+    /// A sentence for a person, naming the shell and what resolution found — *not on
+    /// `PATH`*, *not on this platform* — and **never a file**: the candidate a resolution
+    /// rejected is a path on somebody's disk (traps register #13/#14). Not a closed set, so
+    /// nothing should branch on its text; `null` or not is the whole of the machine-readable
+    /// answer.
+    pub unavailable: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
