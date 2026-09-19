@@ -114,10 +114,10 @@ export interface Launcher {
    *
    * **`null` means nothing has said it is unavailable**, which is not quite "available": the
    * agent row is not asked about, and a daemon too old to serve `profile_list` answers
-   * nothing, so its shells are offered as they were before the verb existed. How a row with
-   * a reason is drawn — disabled with the sentence as its title, or left out — is the menu's
-   * decision. Opening one anyway still reaches the daemon, whose refusal says the same thing:
-   * a shell can vanish between this answer and a click, so the refusal stays the backstop.
+   * nothing, so its shells are offered as they were before the verb existed. The `+` menu
+   * draws a row with a reason disabled, with the sentence under its name (`NewSessionMenu`
+   * says why). A launch still reaches the daemon, whose refusal says the same thing: a shell
+   * can vanish between this answer and a click, so the refusal stays the backstop.
    */
   readonly unavailable: string | null;
 }

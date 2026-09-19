@@ -725,6 +725,42 @@ impl Client {
         outcome
     }
 
+    /// Issue a control verb on a connection of its own, opened for it and closed after.
+    ///
+    /// For a verb whose answer can take seconds for reasons that have nothing to do with
+    /// what the window is doing. The shared connection is served **one verb at a time at both
+    /// ends**: [`Control`]'s worker sends the next request only after the last answer, and
+    /// the daemon reads a connection's next frame only after it has written the last answer.
+    /// So every `terminal_send` queues behind whatever went before it. `profile_list` walks
+    /// the daemon's `PATH`, and with an unreachable share on it that walk took 21,069 ms. A
+    /// `session_list` sent 30 ms later on the same connection waited 21,032 ms. On a
+    /// connection of its own, it answered in 0 ms while the walk ran. The daemon serves
+    /// connections independently, so moving the verb is the whole fix; its comment on
+    /// `profile_list` says the same from that side.
+    ///
+    /// `session_create` comes here for the same reason: the first pty a daemon spawns loads
+    /// `conpty.dll` by bare name, Windows searches `PATH` for it, and that create took 21 s.
+    /// Verbs that are slow for other reasons — `tasks_list` reaching GitHub, the project
+    /// verbs running git — still use the shared connection.
+    ///
+    /// Dials the endpoint [`Self::connect`] dials, and **never starts a daemon**. It holds
+    /// the client lock for none of it.
+    ///
+    /// **A failure here is this connection's alone.** Nothing is torn down, unlike
+    /// [`Self::request`]: a daemon too old to know a verb closes the connection it arrived on,
+    /// and on the shared one that cost the window a reconnect. Here it costs one refused
+    /// connection, and the shared one never learns about it.
+    ///
+    /// # Errors
+    ///
+    /// [`DaemonError::Unreachable`] when nothing answers at the endpoint, whatever the
+    /// handshake produced, and whatever the daemon said to the verb.
+    pub fn request_aside(&self, payload: RequestPayload) -> Result<ResponsePayload, DaemonError> {
+        let endpoint = self.dial()?;
+        // Dropped at the end of this call, which closes the socket and joins its worker.
+        Control::connect(endpoint.listening())?.request(payload)
+    }
+
     /// Take the webview's channel — or any other [`FrameSink`] — and open the output
     /// connection.
     ///
@@ -1402,6 +1438,35 @@ mod tests {
             client.rendered(StreamId(1), 128),
             Err(DaemonError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn a_verb_asked_aside_that_fails_leaves_the_shared_connection_alone() {
+        // A daemon too old to know `profile_list` closes the connection the question arrived
+        // on. When that was the shared connection the window lost it and reconnected; aside,
+        // the failure must stay with the connection that was opened for it. Nothing listens
+        // at this endpoint, so the aside connection fails before it is made, and the shared
+        // one is a pretence that would be torn down by anything that touched it.
+        let client = Client::at(crate::interop::scratch("aside-fails"));
+        client.pretend_connected();
+        let quiet = client.edge_count();
+
+        let answer = client.request_aside(RequestPayload::ProfileList(
+            nysia_proto::session::ProfileList {},
+        ));
+        assert!(
+            matches!(answer, Err(DaemonError::Unreachable { .. })),
+            "the question did not go to the endpoint: {answer:?}"
+        );
+        assert!(
+            client.identity().is_some(),
+            "a failure on the aside connection took the shared one down"
+        );
+        assert_eq!(
+            client.edge_count(),
+            quiet,
+            "a failure on the aside connection woke the reconnect loop"
+        );
     }
 
     #[test]
