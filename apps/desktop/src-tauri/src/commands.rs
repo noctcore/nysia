@@ -197,6 +197,14 @@ pub async fn session_list(app: AppHandle) -> Failed<Vec<SessionSummary>> {
 /// A project that has since been forgotten, or whose folder has gone, is refused
 /// (`unknown_project`, `path_unreadable`) rather than opened somewhere else.
 ///
+/// **Asked on a connection of its own** ([`Client::request_aside`]), for [`profile_list`]'s
+/// reason. The first pty a daemon spawns loads `conpty.dll` by bare name
+/// (`portable-pty`'s `win/pseudocon.rs`), and Windows' search for it walks `PATH`. With an
+/// unreachable share on it, that first `session_create` took 21,083 ms, and a `session_list`
+/// sent 30 ms after it on the shared connection waited 21,053 ms. Aside, it waited under a
+/// millisecond. Resolving a missing shell, or an agent CLI found late on `PATH`, walks it
+/// too.
+///
 /// # Errors
 ///
 /// [`CommandFailure`] carrying the daemon's own `nextSteps` when the shell will not
@@ -204,25 +212,30 @@ pub async fn session_list(app: AppHandle) -> Failed<Vec<SessionSummary>> {
 #[tauri::command]
 pub async fn session_create(app: AppHandle, request: SessionCreate) -> Failed<SessionHandle> {
     let client = client(&app)?;
-    blocking("session_create", move || {
-        match client.request(RequestPayload::SessionCreate(request))? {
-            ResponsePayload::SessionCreate(created) => {
-                // **One of the two correlation lines**, and the reason the rest of either log
-                // can be read. Everything after this names a handle or a stream id; this is
-                // what says which pane those belong to. All three come off the daemon's
-                // answer, so none of it is the request echoed back — see the module docs.
-                tracing::info!(
-                    pane_key = %created.pane_key,
-                    handle = %created.handle,
-                    incarnation = %created.incarnation,
-                    "the daemon opened a session"
-                );
-                Ok(created.handle)
-            }
-            other => Err(unexpected("session_create", &other)),
+    blocking("session_create", move || create_session(&client, request)).await
+}
+
+/// [`session_create`]'s whole body, apart from the command for [`profiles`]' reason.
+pub(crate) fn create_session(
+    client: &Client,
+    request: SessionCreate,
+) -> Result<SessionHandle, DaemonError> {
+    match client.request_aside(RequestPayload::SessionCreate(request))? {
+        ResponsePayload::SessionCreate(created) => {
+            // **One of the two correlation lines**, and the reason the rest of either log
+            // can be read. Everything after this names a handle or a stream id; this is
+            // what says which pane those belong to. All three come off the daemon's
+            // answer, so none of it is the request echoed back — see the module docs.
+            tracing::info!(
+                pane_key = %created.pane_key,
+                handle = %created.handle,
+                incarnation = %created.incarnation,
+                "the daemon opened a session"
+            );
+            Ok(created.handle)
         }
-    })
-    .await
+        other => Err(unexpected("session_create", &other)),
+    }
 }
 
 /// Every shell the `+` menu offers, and whether the daemon can launch each one now.
@@ -233,22 +246,34 @@ pub async fn session_create(app: AppHandle, request: SessionCreate) -> Failed<Se
 /// installer adds is not seen until it restarts. A shell that cannot launch is a row carrying
 /// a sentence, not a failure.
 ///
+/// **Asked on a connection of its own** ([`Client::request_aside`]), never the one every
+/// keystroke uses. The walk takes as long as the slowest directory on `PATH` takes to
+/// answer, which for an unreachable share was 21 seconds, and on the shared connection every
+/// `terminal_send` in every pane waited that long behind it.
+///
 /// # Errors
 ///
 /// [`CommandFailure`] if the daemon is unreachable. A daemon built before the verb existed
-/// cannot read the request at all and closes the connection, which reaches the window as a
-/// transport failure rather than as `unsupported`.
+/// cannot read the request at all and closes the connection it arrived on, which reaches the
+/// window as an `io` failure rather than as `unsupported` — and, because that connection was
+/// opened for this question alone, costs the window nothing else.
 #[tauri::command]
 pub async fn profile_list(app: AppHandle) -> Failed<Vec<ProfileAvailability>> {
     let client = client(&app)?;
     // Blocking: the daemon walks `PATH` once per shell before it answers.
-    blocking("profile_list", move || {
-        match client.request(RequestPayload::ProfileList(ProfileList {}))? {
-            ResponsePayload::ProfileList { profiles } => Ok(profiles),
-            other => Err(unexpected("profile_list", &other)),
-        }
-    })
-    .await
+    blocking("profile_list", move || profiles(&client)).await
+}
+
+/// [`profile_list`]'s whole body, apart from the command so a test can reach it.
+///
+/// `interop`'s `the_menu_is_asked_on_a_connection_no_keystroke_waits_behind` calls this,
+/// not [`Client::request_aside`], so moving the question back onto the shared connection
+/// here fails that test rather than only the one about the method.
+pub(crate) fn profiles(client: &Client) -> Result<Vec<ProfileAvailability>, DaemonError> {
+    match client.request_aside(RequestPayload::ProfileList(ProfileList {}))? {
+        ResponsePayload::ProfileList { profiles } => Ok(profiles),
+        other => Err(unexpected("profile_list", &other)),
+    }
 }
 
 /// Close a session, and with it the process tree behind it.
