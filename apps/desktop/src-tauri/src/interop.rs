@@ -38,7 +38,7 @@ use nysia_proto::credit::CreditWindow;
 use nysia_proto::envelope::{RequestPayload, ResponsePayload};
 use nysia_proto::frame::{FrameDecoder, FrameKind};
 use nysia_proto::identity::{SessionHandle, SessionKind};
-use nysia_proto::session::{SessionCreate, SessionList, ShellProfile};
+use nysia_proto::session::{SessionClose, SessionCreate, SessionList, ShellProfile};
 use nysia_proto::stream::StreamId;
 use nysia_proto::terminal::{TerminalRead, TerminalSend, TerminalWait, WaitFor};
 use nysia_proto::version::PROTOCOL_VERSION;
@@ -777,6 +777,93 @@ fn a_relaunched_window_finds_the_session_and_replays_its_scrollback() {
         1,
         "the attach sent {} boundaries; the contract is one per attach",
         second_pane.boundary_count(after)
+    );
+}
+
+#[test]
+fn the_menu_is_asked_on_a_connection_no_keystroke_waits_behind() {
+    // `profile_list` walks the daemon's `PATH`, and an unreachable share on it made that walk
+    // take 21 s. The window's shared connection is served one verb at a time at both ends, so
+    // every keystroke typed in any pane during those 21 s waited for it (#111's review).
+    // Picking a row does the same once per daemon: the first pty a daemon spawns loads
+    // `conpty.dll` by bare name, Windows searches `PATH` for it, and that `session_create`
+    // took 21 s too.
+    //
+    // A slow `PATH` cannot be staged on a CI runner, so this stages the other half of the
+    // same property: a verb that is genuinely in flight on the shared connection and does not
+    // answer for seconds. The menu's question has to be answered while that verb is still
+    // waiting. Asked on the shared connection, it would queue behind the wait and this would
+    // fail on its timeout.
+    let harness = Harness::start("aside");
+    let client = harness.window(Webview::new());
+    let handle = open_shell(&client);
+    await_prompt(&client, &handle);
+
+    // An exit that will not come, bounded so a broken build fails rather than hangs.
+    let waiting = std::thread::spawn({
+        let client = client.clone();
+        let handle = handle.clone();
+        move || {
+            client.request(RequestPayload::TerminalWait(TerminalWait {
+                handle,
+                wait_for: WaitFor::Exit,
+                timeout_ms: Some(DEADLINE_MS / 2),
+            }))
+        }
+    });
+    // In flight at the daemon, not merely sent. Before the daemon reads it the wait holds
+    // nothing up, and a question that overtook it would pass for the wrong reason.
+    assert!(
+        eventually(|| harness.daemon.verbs_in_flight() >= 1),
+        "the wait never reached the daemon"
+    );
+
+    // Through the command's own body, so the command cannot quietly ask somewhere else.
+    let asked = Instant::now();
+    let profiles = crate::commands::profiles(&client).expect("the daemon answers the menu");
+    let took = asked.elapsed();
+    assert!(
+        !waiting.is_finished(),
+        "the menu was answered only after the verb ahead of it, in {took:?}: it queued on the \
+         connection every keystroke uses"
+    );
+    assert_eq!(profiles.len(), 4, "one row per shell the menu offers");
+
+    // And what the menu does when a row is picked. Creating a session resolves its program
+    // on the daemon's `PATH` too, and a Command Prompt walks all of it.
+    let created = crate::commands::create_session(
+        &client,
+        SessionCreate {
+            kind: SessionKind::Shell,
+            pane_key: None,
+            profile: shell().0,
+            cwd: None,
+            env_overrides: BTreeMap::new(),
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .expect("the daemon opens a second session");
+    assert!(
+        !waiting.is_finished(),
+        "the new session was answered only after the verb ahead of it: it queued on the \
+         connection every keystroke uses"
+    );
+
+    // Closing the session ends the wait, and the shared connection is still the window's.
+    for opened in [&created, &handle] {
+        client
+            .request_aside(RequestPayload::SessionClose(SessionClose {
+                handle: opened.clone(),
+            }))
+            .expect("the session closes");
+    }
+    let _ = waiting.join().expect("the waiting thread does not panic");
+    assert!(
+        client
+            .request(RequestPayload::SessionList(SessionList {}))
+            .is_ok(),
+        "asking aside disturbed the shared connection"
     );
 }
 

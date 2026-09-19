@@ -288,6 +288,17 @@ impl Daemon {
         &self.status
     }
 
+    /// How many verbs this daemon is serving at this moment, across every connection.
+    ///
+    /// Exposed for [`Self::streams`]'s reason: a test that needs a verb to be *in flight*
+    /// has to wait for one the daemon has actually started serving. Waiting only for the
+    /// client to have sent it leaves a gap in which the verb has not been read yet, and a
+    /// test asserting across that gap can pass for the wrong reason.
+    #[must_use]
+    pub fn verbs_in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Acquire)
+    }
+
     /// Rotate the log beside this endpoint if it has outgrown
     /// [`log_file::MAX_LOG_BYTES`].
     ///
@@ -917,7 +928,16 @@ impl Daemon {
             RequestPayload::ProfileList(ProfileList {}) => {
                 // Blocking and lock-free: every profile walks `PATH`, which is filesystem
                 // probes per directory and a slow share makes slow. Nothing here holds the
-                // registry, so a slow walk delays this answer and no other verb.
+                // registry, so no other *connection* waits on the walk.
+                //
+                // **Every later verb on this one does.** `serve_control` reads a connection's
+                // next frame only after writing its last answer, so a verb queued behind this
+                // walk waits for all of it. Measured with an unreachable `\\192.0.2.1\tools`
+                // on `PATH`, on the first walk after the machine last tried that share: this
+                // answered in 21,069 ms and a `session_list` sent 30 ms after it on the same
+                // connection in 21,032 ms. The window asks on a connection of its own for that
+                // reason (`Client::request_aside` in `apps/desktop`); a client that sends it
+                // on a connection it types over will stall its own keystrokes.
                 blocking(|| ResponsePayload::ProfileList {
                     profiles: crate::rpc::session::profile_availability(),
                 })
