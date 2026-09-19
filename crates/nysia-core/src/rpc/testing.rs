@@ -22,6 +22,13 @@ pub(crate) struct TestShell {
     pub(crate) lines: Vec<&'static str>,
     /// A line that makes the shell print a great deal of output.
     pub(crate) flood: &'static str,
+    /// The command that prints a file, followed by a space and the file's name.
+    ///
+    /// Named relative to the shell's own working directory, which is what makes it a probe:
+    /// a file only one folder holds is printed only by a shell that is in that folder, so
+    /// the answer is the directory the session actually got rather than the one it was
+    /// asked for.
+    pub(crate) show_file: &'static str,
 }
 
 impl TestShell {
@@ -41,6 +48,7 @@ impl TestShell {
                 profile: Some(WireProfile::Pwsh),
                 lines: vec![r#"Write-Output ("NYSIA" + "-" + (6*7))"#],
                 flood: r#"1..500 | ForEach-Object { ('{0:d4}' -f $_) + ('X' * 250) }"#,
+                show_file: "Get-Content",
             };
         }
         if cfg!(windows) {
@@ -57,6 +65,7 @@ impl TestShell {
                     "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
                     "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
                 ),
+                show_file: "type",
             };
         }
         Self {
@@ -70,6 +79,7 @@ impl TestShell {
                 "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
                 r#"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"; i=$((i+1)); done"#,
             ),
+            show_file: "cat",
         }
     }
 }

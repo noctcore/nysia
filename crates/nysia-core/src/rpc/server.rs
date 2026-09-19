@@ -727,8 +727,15 @@ impl Daemon {
             RequestPayload::SessionCreate(request) => {
                 // Spawning opens a pty and starts three threads. On a runtime worker that
                 // would stall every other session sharing it.
+                //
+                // Through the project service and not straight to the registry, for every
+                // request: a create may name a project instead of a folder, and the service
+                // is what holds the registrations that turn one into the other. The registry
+                // refuses a project it cannot resolve rather than opening the session where
+                // the daemon happens to be running.
                 let client = caller.client_id.clone();
-                blocking(move || match sessions.create(&request) {
+                let projects = Arc::clone(&self.projects);
+                blocking(move || match projects.create_session(&request) {
                     Ok(created) => {
                         // **One of the daemon's two correlation lines**, and `info` rather
                         // than `debug` on purpose: a join key only a reader who already knew
@@ -746,7 +753,7 @@ impl Daemon {
                         );
                         ResponsePayload::SessionCreate(created)
                     }
-                    Err(err) => ResponsePayload::Error(err.into_envelope()),
+                    Err(envelope) => ResponsePayload::Error(envelope),
                 })
                 .await
             }
