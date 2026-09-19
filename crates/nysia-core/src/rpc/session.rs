@@ -39,7 +39,7 @@ use nysia_proto::{
 };
 
 use crate::agent::LaunchError;
-use crate::git::CanonicalPath;
+use crate::git::{CanonicalPath, PathError};
 use crate::pty::{
     DEFAULT_GRACE, Output, ProfileError, PtyOutput, PtySession, ResolveError, SessionSpec,
     ShellProfile, SpawnError,
@@ -841,28 +841,48 @@ fn program_for(request: &SessionCreate) -> Result<SessionSpec, SessionError> {
 /// What an agent session is launched with, which is nothing.
 const NO_ARGUMENTS: [&std::ffi::OsStr; 0] = [];
 
-/// Confine a requested working directory.
+/// Confine a requested working directory, and resolve it to the spelling a spawn can use.
 ///
 /// v0.1's confinement is deliberately narrow: absolute, existing, and a directory. §7.5's
 /// `safe_join` / `path_confine` — the worktree-relative rules — arrive with the worktree
 /// module, and claiming them here before they exist would be worse than saying what this
 /// actually checks.
-fn confine_cwd(cwd: Option<&PathBuf>) -> Result<Option<PathBuf>, SessionError> {
+///
+/// # Why the answer is a [`CanonicalPath`] and not what `fs::canonicalize` returned
+///
+/// On Windows `fs::canonicalize` answers in the verbatim form, `\\?\C:\…`, and **`cmd.exe`
+/// cannot run in one**. Handed it as a working directory, it prints *"UNC paths are not
+/// supported. Defaulting to Windows directory."* and opens in `C:\Windows` — a Command
+/// Prompt asked for a project, running somewhere else entirely, with only a line of its own
+/// banner to say so. `pwsh` and the agent CLI accept the prefix, which is how it went
+/// unnoticed: every session anybody had looked at was one of those.
+///
+/// [`CanonicalPath`] drops the prefix wherever the plain spelling means the same folder, and
+/// it is also the spelling `git` prints and the project verbs compare — so the directory a
+/// session is spawned in and the directory it is listed under are one value rather than two
+/// that have to be kept in step. A path that must keep its prefix (at or over `MAX_PATH`, or
+/// with a component Win32 would rewrite) keeps it, and a shell that cannot use it says so.
+///
+/// Every refusal's `reason` is a sentence written here or the OS's own error, which names no
+/// path; [`PathError`]'s `Display` does, which is why it is matched on and never rendered.
+fn confine_cwd(cwd: Option<&PathBuf>) -> Result<Option<CanonicalPath>, SessionError> {
     let Some(path) = cwd else {
         return Ok(None);
     };
-    let refuse = |reason: &str| SessionError::PathRefused {
+    let refuse = |reason: String| SessionError::PathRefused {
         path: path.clone(),
-        reason: reason.to_owned(),
+        reason,
     };
     if !path.is_absolute() {
-        return Err(refuse("a working directory must be absolute"));
+        return Err(refuse("a working directory must be absolute".to_owned()));
     }
-    let canonical = std::fs::canonicalize(path).map_err(|err| refuse(&err.to_string()))?;
-    if !canonical.is_dir() {
-        return Err(refuse("it is not a directory"));
-    }
-    Ok(Some(canonical))
+    CanonicalPath::of(path).map(Some).map_err(|err| {
+        refuse(match err {
+            PathError::Missing { .. } => "it does not exist".to_owned(),
+            PathError::Unreadable { source, .. } => source.to_string(),
+            PathError::NotADirectory { .. } => "it is not a directory".to_owned(),
+        })
+    })
 }
 
 /// The pane key every session carries in its environment.
@@ -986,18 +1006,10 @@ impl SessionRegistry {
         let title = spec.program.label();
         let size = TerminalSize::new(request.cols, request.rows);
         spec = spec.with_size(size);
-        let confined = confine_cwd(requested)?;
-        if let Some(cwd) = confined.clone() {
-            spec = spec.with_cwd(cwd);
+        let cwd = confine_cwd(requested)?;
+        if let Some(cwd) = &cwd {
+            spec = spec.with_cwd(cwd.as_path());
         }
-        // Resolved a second time rather than reusing `confined`, and the difference is one
-        // Windows prefix. `confine_cwd` hands back what `fs::canonicalize` returned, which is
-        // `\\?\C:\…`; `CanonicalPath` strips that, and it is the spelling `git` prints and
-        // the project verbs compare. Two paths for one folder that never compare equal would
-        // put every session under no worktree at all, on one platform only.
-        let cwd = confined
-            .as_deref()
-            .and_then(|path| CanonicalPath::of(path).ok());
         for (key, value) in &request.env_overrides {
             // `with_env`, never `with_env_overriding_the_scrub`: the scrub runs after this,
             // so a caller cannot reintroduce `ANTHROPIC_API_KEY` or a
@@ -1805,6 +1817,51 @@ mod tests {
         }
     }
 
+    #[test]
+    #[cfg(windows)]
+    fn a_command_prompt_given_a_folder_runs_in_it_rather_than_in_the_windows_directory() {
+        // `cmd.exe` cannot run in a verbatim `\\?\` path. Handed one, it says "UNC paths are
+        // not supported", opens in `C:\Windows` and carries on — so a Command Prompt started
+        // in a project ran somewhere else entirely. `pwsh` accepts the prefix, and CI has
+        // `pwsh` on both legs, so every other test that sets a working directory drives the
+        // shell that could not see this; this one names `cmd` outright.
+        //
+        // Asserted from inside the shell: the file is printed by a name relative to its
+        // working directory, and only the requested folder holds it.
+        let dir = std::env::temp_dir().join(format!("nysia-cmd-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a folder to start in");
+        std::fs::write(dir.join("nysia-cwd-probe.txt"), "PROBE-CMD-SEEN").expect("the probe");
+
+        let registry = SessionRegistry::new();
+        let created = registry
+            .create(&SessionCreate {
+                kind: SessionKind::Shell,
+                pane_key: None,
+                profile: Some(WireProfile::Cmd),
+                cwd: Some(WorkingDirectory::Path { path: dir.clone() }),
+                env_overrides: BTreeMap::new(),
+                cols: 200,
+                rows: 24,
+            })
+            .expect("a command prompt starts");
+        let session = registry.get(&created.handle).expect("the session is there");
+        await_prompt(&session);
+        session
+            .send(&TerminalSend::line(
+                created.handle.clone(),
+                "type nysia-cwd-probe.txt",
+            ))
+            .expect("writes");
+        let screen = until(&session, |text| text.contains("PROBE-CMD-SEEN"));
+        assert!(
+            screen.contains("PROBE-CMD-SEEN"),
+            "the command prompt could not print a file from the folder it was started in: \
+             {screen}"
+        );
+        registry.close(&created.handle).expect("closes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A request for an agent session, with nothing else asked for.
     fn agent_request() -> SessionCreate {
         SessionCreate {
@@ -1901,8 +1958,8 @@ mod tests {
     ///
     /// - [`SessionError::Invalid`] carries a sentence written at its call sites, every one
     ///   of which is a literal in this file with no path to write.
-    /// - [`SessionError::PathRefused`] carries `reason`, which is one of two sentences
-    ///   written in `confine_cwd` or an `io::Error` from `fs::canonicalize` — which the OS
+    /// - [`SessionError::PathRefused`] carries `reason`, which is a sentence written in
+    ///   `confine_cwd` or the `io::Error` behind a [`PathError::Unreadable`] — which the OS
     ///   reports without the path it was given.
     ///
     /// The roster puts [`SECRET`] into every **other** position: every field of every error
