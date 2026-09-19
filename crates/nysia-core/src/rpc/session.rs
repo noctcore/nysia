@@ -1002,6 +1002,14 @@ const MAX_WORKING_DIRECTORY: usize = 258;
 
 /// Whether `program` runs through `cmd.exe`: a Command Prompt, or a program that resolved to a
 /// batch shim, which `cmd.exe` runs on its behalf — an agent CLI installed by npm is one.
+///
+/// **Read off argv\[0\], and not from `ResolvedProgram::through_cmd`**, which is dropped
+/// before [`SessionProgram::Resolved`] is built. That flag answers a different question:
+/// whether `cmd.exe` parses the *arguments* again (`pty::resolve`'s BatBadBut guard). It is
+/// `false` for a program resolved straight to `cmd.exe`, which still cannot start in a network
+/// folder. The question here is which process is started in the folder, and argv\[0\] is
+/// that process. If the two ever need to agree, carry the answer to this question through
+/// `SessionProgram`; do not reuse the flag.
 fn runs_through_cmd(program: &SessionProgram) -> bool {
     match program {
         SessionProgram::Shell(profile) => matches!(profile, ShellProfile::CommandPrompt),
@@ -1036,6 +1044,15 @@ fn windows_length(path: &std::path::Path) -> usize {
 }
 
 /// A spawn that failed, told apart from one Windows refused for its folder's length.
+///
+/// **Inferred from the length, not read off the failure.** It runs only after a spawn has
+/// already failed, so it cannot refuse a folder that would have started. But nothing in the
+/// failure says the length was the cause: [`SpawnError::Spawn`] carries the pty layer's
+/// sentence, not an error code, and the OS text inside it is localised. The threshold was
+/// measured with `LongPathsEnabled` off. On a machine where it is on and a program can start
+/// in a longer folder, a failure for some other reason in a folder over the threshold is
+/// still put down to the length. The daemon's log keeps the spawn's own account for that
+/// case.
 fn spawn_refusal(err: SpawnError, cwd: Option<&CanonicalPath>) -> SessionError {
     if cfg!(windows)
         && matches!(err, SpawnError::Spawn { .. })
