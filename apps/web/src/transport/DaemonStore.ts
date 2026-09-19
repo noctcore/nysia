@@ -1262,7 +1262,7 @@ const TRANSPORT_FAILURES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The failures that say a daemon cannot answer `profile_list`, and that nothing else says.
+ * The failures that say a daemon cannot answer `profile_list`.
  *
  * `unanswered` is Rust's word for a connection the daemon accepted the `hello` on and then
  * closed with the verb unanswered, which is what a daemon built before the verb does with it
