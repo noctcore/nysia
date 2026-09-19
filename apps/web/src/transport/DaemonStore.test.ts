@@ -1694,46 +1694,89 @@ describe('the + menu', () => {
     return daemon.calls.filter((call) => call.command === 'profile_list').length;
   }
 
-  it('asks a daemon too old to answer once, and costs the window no reconnect', async () => {
-    // A daemon built before the verb cannot read the request, so it closes the connection
-    // the question arrived on rather than answering `unsupported`. The Rust side opens that
-    // connection for the question alone (`Client::request_aside`), so what reaches the store
-    // is an `io` failure with the window still connected — and asking again would cost the
-    // same refused connection on every menu open. The daemon is remembered by launch nonce.
-    const { store, daemon } = build();
-    daemon.refusals.set('profile_list', {
-      failure: {
-        kind: 'io',
-        message: 'the daemon closed the control socket',
-        nextSteps: [],
-        retryable: true,
-      },
-      times: Number.MAX_SAFE_INTEGER,
+  /** A failure of `kind`, as `CommandFailure` carries one across the bridge. */
+  function failed(kind: string, message: string): CommandFailure {
+    return { kind, message, nextSteps: ['Try again in a moment.'], retryable: true };
+  }
+
+  /**
+   * What `Client::request_aside` says when a daemon accepted the `hello` and then closed the
+   * connection with the question on it. `DaemonError::Unanswered` in Rust, and the state
+   * test `a_daemon_that_takes_the_hello_and_closes_on_the_verb_is_unanswered` holds that a
+   * daemon doing so is reported as this kind.
+   */
+  const UNANSWERED = failed('unanswered', 'the daemon closed the connection without answering');
+
+  for (const cannot of [
+    // A daemon built before the verb: it cannot parse the question, so it closes the
+    // connection rather than answering `unsupported`.
+    UNANSWERED,
+    // A daemon that read the question and said it does not serve it.
+    failed('unsupported', 'this daemon does not serve profile_list'),
+  ]) {
+    it(`asks a daemon that says ${cannot.kind} once, and costs the window no reconnect`, async () => {
+      // The Rust side opens the connection for the question alone, so the failure reaches
+      // the store with the window still connected — and asking again would cost the same
+      // refused connection on every menu open. The daemon is remembered by launch nonce.
+      const { store, daemon } = build();
+      daemon.refusals.set('profile_list', { failure: cannot, times: Number.MAX_SAFE_INTEGER });
+      await ready(store);
+      await until(() => asked(daemon) === 1);
+      await store.refreshLaunchers();
+      await store.refreshLaunchers();
+
+      expect(asked(daemon), 'a daemon that could not answer was asked again').toBe(1);
+      expect(store.getSnapshot().status).toBe('ready');
+      expect(daemon.connects, 'the question cost the window its connection').toBe(1);
+      // And the menu is the one from before the verb existed, not an empty one.
+      expect(shells(store)).toEqual([
+        { id: 'shell.pwsh', unavailable: null },
+        { id: 'shell.cmd', unavailable: null },
+        { id: 'shell.git_bash', unavailable: null },
+        { id: 'shell.wsl', unavailable: null },
+      ]);
+
+      // A daemon that restarted is a different daemon, and is asked.
+      daemon.refusals.delete('profile_list');
+      daemon.launchNonce = 'nonce_second';
+      withoutPwsh(daemon);
+      daemon.drop();
+      await until(() => shells(store)[0]?.unavailable === NO_PWSH);
+      expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
     });
-    await ready(store);
-    await until(() => asked(daemon) === 1);
-    await store.refreshLaunchers();
-    await store.refreshLaunchers();
+  }
 
-    expect(asked(daemon), 'a daemon that could not answer was asked again').toBe(1);
-    expect(store.getSnapshot().status).toBe('ready');
-    expect(daemon.connects, 'the question cost the window its connection').toBe(1);
-    // And the menu is the one from before the verb existed, not an empty one.
-    expect(shells(store)).toEqual([
-      { id: 'shell.pwsh', unavailable: null },
-      { id: 'shell.cmd', unavailable: null },
-      { id: 'shell.git_bash', unavailable: null },
-      { id: 'shell.wsl', unavailable: null },
-    ]);
+  for (const lost of [
+    // The review's reproduction: a pipe whose every instance was taken. Before the Rust dial
+    // retried it, it arrived here as `io` and wrote a current daemon off until it restarted,
+    // with the menu offering every shell and nothing on screen to say why.
+    failed('busy', 'the daemon did not take a new connection: every one it offers was in use'),
+    failed('io', 'the connection to the daemon failed: could not open the daemon’s socket'),
+    failed('unreachable', 'no daemon is listening: the system cannot find the file specified'),
+    failed('refused', 'the daemon refused this client: the daemon is retiring'),
+    failed('protocol', 'the daemon sent something this build cannot read'),
+    disconnected('no control connection is open'),
+    // Not a `CommandFailure` at all. Nothing says a daemon read the question.
+    'the command could not be invoked',
+  ]) {
+    const label = typeof lost === 'string' ? 'a bare string' : lost.kind;
+    it(`asks again a daemon whose question failed with ${label} before it reached it`, async () => {
+      // Every one of these ends before the daemon has seen the verb — a dial, a busy pipe,
+      // a refused hello — or says nothing about why. Writing the daemon off for them is the
+      // defect: one busy moment, and the menu is wrong until the daemon restarts, for days.
+      const { store, daemon } = build();
+      await ready(store);
+      await until(() => asked(daemon) === 1);
+      daemon.failures.set('profile_list', lost);
+      await store.refreshLaunchers();
+      expect(asked(daemon)).toBe(2);
 
-    // A daemon that restarted is a different daemon, and is asked.
-    daemon.refusals.delete('profile_list');
-    daemon.launchNonce = 'nonce_second';
-    withoutPwsh(daemon);
-    daemon.drop();
-    await until(() => shells(store)[0]?.unavailable === NO_PWSH);
-    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
-  });
+      withoutPwsh(daemon);
+      await store.refreshLaunchers();
+      expect(asked(daemon), `${label} wrote the daemon off`).toBe(3);
+      expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
+    });
+  }
 
   it('asks again a daemon that read the question and refused it', async () => {
     // Only a failure that is not an answer writes a daemon off. One that read the question
@@ -1757,29 +1800,27 @@ describe('the + menu', () => {
     expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
   });
 
-  it('does not take a launch that got no answer for a refusal', async () => {
-    // A create the daemon never answered says nothing about which shells exist, and asking
-    // straight after it asks into the same trouble. If that question fails the same way it
-    // is taken for an older daemon, and this one's menu is written off until it restarts.
-    const { store, daemon } = build();
-    await ready(store);
-    await until(() => asked(daemon) === 1);
-    const lost: CommandFailure = {
-      kind: 'io',
-      message: 'the connection failed part way through',
-      nextSteps: [],
-      retryable: true,
-    };
-    daemon.failures.set('session_create', lost);
-    daemon.failures.set('profile_list', lost);
-    await store.openTab('shell.cmd').catch(() => {});
-    expect(asked(daemon), 'a launch that got no answer re-read the menu').toBe(1);
+  // `session_create` is asked on a connection of its own too, so it can end in any of the
+  // ways a dial or a handshake ends, as well as the shared connection's `io`.
+  for (const kind of ['io', 'busy', 'unreachable', 'refused', 'unanswered']) {
+    it(`does not take a launch that got no answer (${kind}) for a refusal`, async () => {
+      // A create the daemon never answered says nothing about which shells exist, and asking
+      // straight after it asks into the same trouble.
+      const { store, daemon } = build();
+      await ready(store);
+      await until(() => asked(daemon) === 1);
+      const lost = failed(kind, 'the create got no answer');
+      daemon.failures.set('session_create', lost);
+      daemon.failures.set('profile_list', lost);
+      await store.openTab('shell.cmd').catch(() => {});
+      expect(asked(daemon), 'a launch that got no answer re-read the menu').toBe(1);
 
-    daemon.failures.delete('profile_list');
-    withoutPwsh(daemon);
-    await store.refreshLaunchers();
-    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
-  });
+      daemon.failures.delete('profile_list');
+      withoutPwsh(daemon);
+      await store.refreshLaunchers();
+      expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
+    });
+  }
 
   it('reaches ready without waiting for the menu, and draws it unmarked meanwhile', async () => {
     // The daemon answers by walking its PATH, and with an unreachable share on it that took
