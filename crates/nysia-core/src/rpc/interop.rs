@@ -24,6 +24,8 @@
 //! | [`a_second_stream_connection_does_not_take_the_first_one_s_streams_down`] | a reload does not deafen the window |
 //! | [`a_client_grant_cannot_talk_the_daemon_out_of_its_own_window`] | the producer's window holds against a consumer's grant |
 //! | [`a_replay_is_closed_by_one_boundary_with_live_output_strictly_after_it`] | a client can tell a replayed query from a live one |
+//! | [`a_session_created_for_a_project_runs_in_its_folder_and_one_without_still_runs`] | a window that names a project gets a shell in its folder |
+//! | [`a_session_for_a_project_that_is_gone_is_refused_rather_than_opened_elsewhere`] | a project that no longer resolves opens nothing |
 //!
 //! Each fails against the code as it was and passes against the code as it is.
 
@@ -33,13 +35,14 @@ use std::time::{Duration, Instant};
 
 use nysia_proto::stream::UnattachedFrame;
 use nysia_proto::{
-    ClientId, ClientRole, CreditAck, CreditFrame, CreditWindow, Frame, FrameDecoder, FrameKind,
-    SessionCreate, SessionCreated, SessionHandle, SessionKind, StreamId, TerminalRead,
-    TerminalSend, TerminalWait, WaitFor,
+    ClientId, ClientRole, CreditAck, CreditFrame, CreditWindow, ErrorCode, Frame, FrameDecoder,
+    FrameKind, SessionCreate, SessionCreated, SessionHandle, SessionKind, StreamId, TerminalRead,
+    TerminalSend, TerminalWait, WaitFor, WorkingDirectory,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::rpc::client::Client;
+use crate::git::testing::{Scratch, git_or_skip};
+use crate::rpc::client::{Client, ClientError};
 use crate::rpc::endpoint::Endpoint;
 use crate::rpc::server::{Daemon, DaemonConfig};
 use crate::rpc::testing::{TOKEN, TestShell};
@@ -940,5 +943,222 @@ async fn a_replay_is_closed_by_one_boundary_with_live_output_strictly_after_it()
         .session_close(created.handle)
         .await
         .expect("closes the session");
+    harness.stop();
+}
+
+/// A file only the project's folder holds, and what it says.
+///
+/// The text is in no line this module types, so it can only reach a screen by a shell that
+/// found the file — which it does by a name relative to where that shell is running.
+const PROBE_FILE: &str = "nysia-cwd-probe.txt";
+
+/// See [`PROBE_FILE`].
+const PROBE_TEXT: &str = "PROBE-7F3A-SEEN";
+
+/// A session request, starting wherever `cwd` says.
+fn create_in(cwd: Option<WorkingDirectory>) -> SessionCreate {
+    SessionCreate {
+        kind: SessionKind::Shell,
+        pane_key: None,
+        profile: TestShell::pick().profile,
+        cwd,
+        env_overrides: std::collections::BTreeMap::new(),
+        // Wide, so that nothing a probe prints is wrapped across two rows.
+        cols: 200,
+        rows: 24,
+    }
+}
+
+/// Read the screen until `predicate` holds over it, or give up and return what it shows.
+async fn screen_until(
+    client: &mut Client,
+    handle: &SessionHandle,
+    predicate: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let text = client
+            .terminal_read(TerminalRead::screen(handle.clone()))
+            .await
+            .expect("reading the screen")
+            .lines
+            .join("\n");
+        if predicate(&text) || Instant::now() >= deadline {
+            return text;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Ask the shell to print [`PROBE_FILE`] from wherever it is running.
+async fn show_probe(client: &mut Client, handle: &SessionHandle) {
+    let line = format!("{} {PROBE_FILE}", TestShell::pick().show_file);
+    client
+        .terminal_send(TerminalSend::line(handle.clone(), line))
+        .await
+        .expect("writing a line");
+    settle(client, handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_created_for_a_project_runs_in_its_folder_and_one_without_still_runs() {
+    // The window cannot send a folder: `Project` carries no path on the wire. Before a
+    // create could name the project instead, it sent `null` and the session opened wherever
+    // the daemon was running — a user's home directory, with the project selected.
+    //
+    // **What is asserted is the directory the shell is in**, not the request that was sent
+    // and not only the daemon's record of it: the probe is printed by a name relative to the
+    // shell's own working directory, and only the project's folder holds it.
+    let Some(_git) = git_or_skip() else {
+        return;
+    };
+    let scratch = Scratch::new("interop-project-cwd");
+    let repo = scratch.repository("repo");
+    std::fs::write(repo.join(PROBE_FILE), PROBE_TEXT).expect("the probe file");
+    let harness = Harness::start("iproject", CreditWindow::DEFAULT);
+    let mut control = harness.control(&client_id("nysia-interop-project")).await;
+    let project = control
+        .project_register(repo.clone())
+        .await
+        .expect("the repository registers")
+        .project
+        .id;
+
+    let in_project = control
+        .session_create(create_in(Some(WorkingDirectory::Project {
+            project: project.clone(),
+        })))
+        .await
+        .expect("a session for a registered project starts");
+    await_prompt(&mut control, &in_project.handle).await;
+    show_probe(&mut control, &in_project.handle).await;
+    let screen = screen_until(&mut control, &in_project.handle, |text| {
+        text.contains(PROBE_TEXT)
+    })
+    .await;
+    assert!(
+        screen.contains(PROBE_TEXT),
+        "the shell could not print a file that only the project's folder holds, so it is not \
+         running there: {screen}"
+    );
+
+    // And the sidebar agrees: the daemon lists it under the project's checkout, which is the
+    // same question the window asks to draw a session under a worktree.
+    let listed = control.project_list().await.expect("the projects list");
+    let under_project = listed
+        .iter()
+        .filter(|row| row.id == project)
+        .flat_map(|row| row.worktrees.iter())
+        .any(|worktree| {
+            worktree
+                .sessions
+                .iter()
+                .any(|session| session.handle == in_project.handle)
+        });
+    assert!(
+        under_project,
+        "the session is not listed under the project it was opened in: {listed:?}"
+    );
+
+    // **No project still works**: the CLI never has one, and the window has none selected on
+    // a fresh machine. It starts where the daemon is running — which is not the project's
+    // folder, so the same probe finds nothing there, and the token after it says the shell
+    // got as far as answering.
+    let nowhere = control
+        .session_create(create_in(None))
+        .await
+        .expect("a session with no project still starts");
+    await_prompt(&mut control, &nowhere.handle).await;
+    show_probe(&mut control, &nowhere.handle).await;
+    compute_token(&mut control, &nowhere.handle).await;
+    let screen = screen_until(&mut control, &nowhere.handle, |text| text.contains(TOKEN)).await;
+    assert!(
+        screen.contains(TOKEN),
+        "the unscoped shell never answered: {screen}"
+    );
+    assert!(
+        !screen.contains(PROBE_TEXT),
+        "a session with no project found the project's file, so the probe above proves \
+         nothing about where that one ran: {screen}"
+    );
+
+    for handle in [in_project.handle, nowhere.handle] {
+        control
+            .session_close(handle)
+            .await
+            .expect("closes the session");
+    }
+    harness.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_for_a_project_that_is_gone_is_refused_rather_than_opened_elsewhere() {
+    // The window lists projects when it connects and may hold one for hours. A project
+    // forgotten by another client, or whose folder was moved, is still on its screen — and
+    // the one answer a create for it must never get is a session in the daemon's own
+    // directory, which is the defect this verb was changed to fix.
+    let Some(_git) = git_or_skip() else {
+        return;
+    };
+    let scratch = Scratch::new("interop-project-gone");
+    let forgotten = scratch.repository("forgotten");
+    // A distinctive component, so the leak check below cannot pass merely because the path
+    // was short or ordinary.
+    let moved = scratch.repository("a-clients-private-repository");
+    let harness = Harness::start("igone", CreditWindow::DEFAULT);
+    let mut control = harness.control(&client_id("nysia-interop-gone")).await;
+
+    let forgotten_id = control
+        .project_register(forgotten.clone())
+        .await
+        .expect("registers")
+        .project
+        .id;
+    control
+        .project_forget(forgotten_id.clone())
+        .await
+        .expect("forgets");
+    let moved_id = control
+        .project_register(moved.clone())
+        .await
+        .expect("registers")
+        .project
+        .id;
+    std::fs::rename(&moved, scratch.root().join("somewhere-else")).expect("the folder moves");
+
+    for (project, code) in [
+        (forgotten_id, ErrorCode::UnknownProject),
+        (moved_id, ErrorCode::PathUnreadable),
+    ] {
+        let refused = control
+            .session_create(create_in(Some(WorkingDirectory::Project { project })))
+            .await;
+        let Err(ClientError::Verb(envelope)) = refused else {
+            panic!("a project that no longer resolves was answered with {refused:?}");
+        };
+        assert_eq!(*envelope.code(), code, "{envelope:?}");
+        assert!(
+            !envelope.next_steps().is_empty(),
+            "a refusal says what to do: {envelope:?}"
+        );
+        let said = format!("{} {:?}", envelope.message(), envelope.next_steps());
+        for secret in [
+            moved.to_string_lossy().into_owned(),
+            "a-clients-private-repository".to_owned(),
+        ] {
+            assert!(
+                !said.contains(&secret),
+                "the refusal carried {secret:?}, which names somebody's disk: {said}"
+            );
+        }
+    }
+    assert!(
+        control
+            .session_list()
+            .await
+            .expect("the sessions list")
+            .is_empty(),
+        "a refused create opened a session anyway"
+    );
     harness.stop();
 }

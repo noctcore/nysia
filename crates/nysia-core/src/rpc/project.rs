@@ -46,7 +46,7 @@ use std::time::Duration;
 use nysia_proto::{
     ErrorCode, ErrorEnvelope, Project, ProjectForget, ProjectId, ProjectRegister,
     ProjectRegistered, ProjectStart, ProjectStarted, RegisterRefusal, ResponsePayload,
-    SessionCreate, WorkingDirectory, Worktree,
+    SessionCreate, SessionCreated, WorkingDirectory, Worktree,
 };
 
 use crate::git::{CanonicalPath, Folder, Git, GitError, PathError, Repository};
@@ -319,19 +319,7 @@ impl ProjectService {
     /// The body of [`ProjectService::start`], in the shape `?` can be used in.
     fn starting(&self, request: &ProjectStart) -> Result<ProjectStarted, ErrorEnvelope> {
         let git = self.git()?;
-        let stored = self
-            .store
-            .project(&request.project)
-            .map_err(|err| store_refusal(&err))?
-            .ok_or_else(|| unknown_project(&request.project))?;
-
-        // The registered folder, re-resolved. A project whose drive has been unplugged lists
-        // perfectly well — that is deliberate, see `list` — so this is the first step that
-        // finds out, and it must say which of the two it is rather than "could not start".
-        let at = CanonicalPath::of(&stored.path).map_err(|err| {
-            tracing::warn!(project = %stored.id, kind = path_kind(&err), "a registered folder could not be resolved");
-            unreadable_project()
-        })?;
+        let (stored, at) = self.folder_of(&request.project)?;
 
         // **Before `ensure`, which is the first step that writes.** `create` used to refuse
         // `kind: agent` as its own first statement — after a branch and a worktree had been
@@ -399,6 +387,75 @@ impl ProjectService {
             handle: created.handle,
             pane_key: created.pane_key,
         })
+    }
+
+    /// `session_create`, for every request — the ones that name a project and the ones that
+    /// do not.
+    ///
+    /// **Every create goes through here** rather than only the project-scoped ones, so that
+    /// the one place that can resolve [`WorkingDirectory::Project`] is also the one place a
+    /// request can arrive: [`SessionRegistry::create`] holds no registrations and refuses
+    /// that variant, so a caller that bypassed this would be told so rather than served a
+    /// session in the daemon's own directory.
+    ///
+    /// A project is resolved to the folder it was registered at — its primary checkout — and
+    /// handed on as a [`WorkingDirectory::Path`], so `confine_cwd` still runs on it exactly
+    /// as it does on a folder the CLI named. A project forgotten since the caller listed it
+    /// is `unknown_project`, and one whose folder no longer opens is `path_unreadable`, both
+    /// **before** anything is spawned. Neither falls back to "no directory", which would
+    /// open the session wherever the daemon is running: that is the defect this resolves.
+    ///
+    /// No `git`: opening a shell in a folder does not need one, and a machine without it can
+    /// still hold the registration the request names.
+    ///
+    /// Blocking: it reads a row, canonicalises a path and spawns a pty. Every caller runs it
+    /// on the blocking pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns the envelope the refusal becomes: the project's, or the session registry's.
+    pub fn create_session(&self, request: &SessionCreate) -> Result<SessionCreated, ErrorEnvelope> {
+        let Some(WorkingDirectory::Project { project }) = &request.cwd else {
+            return self
+                .sessions
+                .create(request)
+                .map_err(IntoEnvelope::into_envelope);
+        };
+        let (stored, folder) = self.folder_of(project)?;
+        let created = self
+            .sessions
+            .create(&SessionCreate {
+                cwd: Some(WorkingDirectory::Path {
+                    path: folder.as_path().to_path_buf(),
+                }),
+                ..request.clone()
+            })
+            .map_err(IntoEnvelope::into_envelope)?;
+        // The id and the handle, never the folder: this is a line the log file keeps.
+        tracing::info!(
+            project = %stored.id,
+            handle = %created.handle,
+            "opened a session in a project"
+        );
+        Ok(created)
+    }
+
+    /// A registered project and its folder, re-resolved now.
+    ///
+    /// A project whose drive has been unplugged lists perfectly well — that is deliberate,
+    /// see `list` — so the verbs that need the folder are the first to find out, and each
+    /// must say which of the two it is rather than "could not start".
+    fn folder_of(&self, id: &ProjectId) -> Result<(StoredProject, CanonicalPath), ErrorEnvelope> {
+        let stored = self
+            .store
+            .project(id)
+            .map_err(|err| store_refusal(&err))?
+            .ok_or_else(|| unknown_project(id))?;
+        let at = CanonicalPath::of(&stored.path).map_err(|err| {
+            tracing::warn!(project = %stored.id, kind = path_kind(&err), "a registered folder could not be resolved");
+            unreadable_project()
+        })?;
+        Ok((stored, at))
     }
 
     /// Forget a project's registration, and nothing else.
