@@ -41,8 +41,8 @@ use nysia_proto::{
 use crate::agent::LaunchError;
 use crate::git::{CanonicalPath, PathError};
 use crate::pty::{
-    DEFAULT_GRACE, Output, ProfileError, PtyOutput, PtySession, ResolveError, SessionSpec,
-    ShellProfile, SpawnError,
+    DEFAULT_GRACE, Output, ProfileError, PtyOutput, PtySession, ResolveError, SessionProgram,
+    SessionSpec, ShellProfile, SpawnError,
 };
 use crate::rpc::errors::{IntoEnvelope, envelope};
 use crate::rpc::stream::{SendOutcome, StreamSink};
@@ -112,6 +112,30 @@ pub enum SessionError {
         /// Why.
         reason: String,
     },
+    /// The session would run through `cmd.exe`, and the folder it was asked for is a network
+    /// one.
+    ///
+    /// `cmd.exe` refuses every UNC working directory. It prints *"UNC paths are not
+    /// supported. Defaulting to Windows directory."* and runs in `C:\Windows`, so without this
+    /// the session would open somewhere it was not asked for, which is the defect
+    /// `confine_cwd`'s spelling fix exists to remove. A drive letter mapped to a share
+    /// resolves to the share's own path, so it arrives here too. No path is carried: the
+    /// folder was refused, and a refused value is not the daemon's to write down.
+    #[error("Command Prompt cannot start in a network folder")]
+    CmdOnNetworkFolder,
+    /// The program would not start, and the folder's path is longer than Windows will start
+    /// one in.
+    ///
+    /// Diagnosed after the spawn has failed, never predicted before it: a folder is refused
+    /// only when Windows has refused it, and then the length is the reason given rather than
+    /// "check the shell is installed", which is not the cause.
+    #[error("could not start the session: its folder's path is {length} characters long")]
+    FolderTooLong {
+        /// The folder's length, in the spelling a spawn is handed.
+        length: usize,
+        /// What the spawn said, kept for the daemon's log.
+        source: crate::pty::SpawnError,
+    },
     /// The request was not well formed.
     #[error("{0}")]
     Invalid(String),
@@ -147,6 +171,16 @@ impl IntoEnvelope for SessionError {
             Self::PathRefused { reason, .. } => {
                 format!("that working directory was refused: {reason}")
             }
+            Self::CmdOnNetworkFolder => "that working directory was refused: it is a network \
+                                         folder, and this session runs through Command Prompt \
+                                         (`cmd.exe`), which cannot start in one and would open \
+                                         in C:\\Windows instead"
+                .to_owned(),
+            Self::FolderTooLong { length, .. } => format!(
+                "could not start the session: its folder's path is {length} characters long, \
+                 and Windows will not start a program in a folder whose path is longer than \
+                 {MAX_WORKING_DIRECTORY}"
+            ),
             // A handle, a pane key, a sentence this module wrote, and an `io::Error` from a
             // write to a pty that is closing. None of the four has a path to lose.
             other => other.to_string(),
@@ -236,6 +270,39 @@ impl IntoEnvelope for SessionError {
                         "a session started in a worktree searches the daemon's `PATH`, not \
                          the project's",
                     ],
+                )
+            }
+            Self::CmdOnNetworkFolder => {
+                // Nothing about the folder: it was refused, for `PathRefused`'s reason.
+                tracing::debug!("a network folder was refused to a session run through cmd.exe");
+                envelope(
+                    ErrorCode::PathRefused,
+                    message,
+                    "open a network folder in PowerShell 7 or Git Bash, which can start in one",
+                    &[
+                        "a drive letter mapped to a network share resolves to the share's own \
+                         path, so it is refused the same way",
+                        "an agent CLI installed as an npm `.cmd` shim runs through Command \
+                         Prompt too",
+                    ],
+                )
+            }
+            Self::FolderTooLong { length, source } => {
+                // The spawn's own account, kept for the reason the `Spawn` arm keeps it: the
+                // daemon tried to start a program in this folder, and a failure that was not
+                // the length is diagnosed from the command line and the directory or not at
+                // all.
+                tracing::warn!(
+                    length,
+                    err = %spawn_log_line(&source),
+                    "a session could not be started: its folder's path is too long"
+                );
+                envelope(
+                    ErrorCode::SpawnFailed,
+                    message,
+                    "open the session in a folder whose path is shorter; the shell itself is \
+                     not the problem",
+                    &[],
                 )
             }
             Self::Invalid(_) => envelope(
@@ -924,6 +991,66 @@ fn confine_cwd(cwd: Option<&PathBuf>) -> Result<Option<CanonicalPath>, SessionEr
     })
 }
 
+/// The longest working directory Windows will start a program in, in UTF-16 units.
+///
+/// `MAX_PATH` less the terminating null and the trailing separator a current directory always
+/// carries. Measured as well as documented: a Command Prompt asked for a 258-character folder
+/// started there, and one asked for 259 did not start at all, on a machine with
+/// `LongPathsEnabled` off. `a_folder_too_long_to_start_in_says_so_rather_than_blaming_the_shell`
+/// holds both sides of it.
+const MAX_WORKING_DIRECTORY: usize = 258;
+
+/// Whether `program` runs through `cmd.exe`: a Command Prompt, or a program that resolved to a
+/// batch shim, which `cmd.exe` runs on its behalf — an agent CLI installed by npm is one.
+fn runs_through_cmd(program: &SessionProgram) -> bool {
+    match program {
+        SessionProgram::Shell(profile) => matches!(profile, ShellProfile::CommandPrompt),
+        SessionProgram::Resolved { argv, .. } => argv.first().is_some_and(|first| {
+            program_name(&first.to_string_lossy()).eq_ignore_ascii_case("cmd.exe")
+        }),
+    }
+}
+
+/// Whether `path` is a network folder: `\\server\share\…`, or `\\?\UNC\server\share\…`.
+///
+/// Read from the spelling rather than from `Path::components`, which parses a UNC prefix on
+/// Windows only. The rule is the same on both platforms, and a test of it runs on both.
+fn is_network_folder(path: &std::path::Path) -> bool {
+    let text = path.to_string_lossy();
+    let starts = |prefix: &str| {
+        text.get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    };
+    starts(r"\\?\UNC\") || (starts(r"\\") && !starts(r"\\?\") && !starts(r"\\.\"))
+}
+
+/// `path`'s length the way Windows measures a working directory: UTF-16 units, in the
+/// spelling without the `\\?\` prefix, which [`CanonicalPath`] keeps on a path this long.
+fn windows_length(path: &std::path::Path) -> usize {
+    let text = path.to_string_lossy();
+    let plain = match text.get(..8).zip(text.get(8..)) {
+        Some((head, rest)) if head.eq_ignore_ascii_case(r"\\?\UNC\") => format!(r"\\{rest}"),
+        _ => text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned(),
+    };
+    plain.encode_utf16().count()
+}
+
+/// A spawn that failed, told apart from one Windows refused for its folder's length.
+fn spawn_refusal(err: SpawnError, cwd: Option<&CanonicalPath>) -> SessionError {
+    if cfg!(windows)
+        && matches!(err, SpawnError::Spawn { .. })
+        && let Some(length) = cwd
+            .map(|cwd| windows_length(cwd.as_path()))
+            .filter(|length| *length > MAX_WORKING_DIRECTORY)
+    {
+        return SessionError::FolderTooLong {
+            length,
+            source: err,
+        };
+    }
+    SessionError::Spawn(err)
+}
+
 /// The pane key every session carries in its environment.
 ///
 /// §3.2 names it as the hint: a process inside a pane can read it without a round trip, and
@@ -1047,6 +1174,11 @@ impl SessionRegistry {
         spec = spec.with_size(size);
         let cwd = confine_cwd(requested)?;
         if let Some(cwd) = &cwd {
+            // Refused rather than spawned: `cmd.exe` would start, say it cannot use the
+            // folder, and run in `C:\Windows` instead. Nothing this side would ever see it.
+            if runs_through_cmd(&spec.program) && is_network_folder(cwd.as_path()) {
+                return Err(SessionError::CmdOnNetworkFolder);
+            }
             spec = spec.with_cwd(cwd.as_path());
         }
         for (key, value) in &request.env_overrides {
@@ -1063,7 +1195,8 @@ impl SessionRegistry {
         // choosing which pane its own unreachable status is later restored into.
         spec = spec.with_env(PANE_KEY_VAR, pane_key.as_str());
 
-        let (pty, output) = PtySession::spawn(spec).map_err(SessionError::Spawn)?;
+        let (pty, output) =
+            PtySession::spawn(spec).map_err(|err| spawn_refusal(err, cwd.as_ref()))?;
         let handle = pty.handle().clone();
         let incarnation = self.next_incarnation(&pane_key);
 
@@ -1901,6 +2034,170 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn only_a_program_run_through_cmd_is_refused_a_network_folder() {
+        // The rule by its two halves, on both platforms: which programs `cmd.exe` runs, and
+        // which folders are network ones. An agent installed by npm resolves to a batch shim
+        // that `cmd.exe` runs on its behalf, so it is in the first set whatever it is called.
+        let through_cmd = [
+            SessionProgram::Shell(ShellProfile::CommandPrompt),
+            SessionProgram::Resolved {
+                argv: vec![
+                    std::ffi::OsString::from(r"C:\WINDOWS\System32\CMD.EXE"),
+                    std::ffi::OsString::from("/d"),
+                ],
+                label: "an agent".to_owned(),
+            },
+        ];
+        let not_through_cmd = [
+            SessionProgram::Shell(ShellProfile::PowerShell7),
+            SessionProgram::Shell(ShellProfile::GitBash),
+            SessionProgram::Resolved {
+                argv: vec![std::ffi::OsString::from(
+                    r"C:\Users\me\.local\bin\an-agent.exe",
+                )],
+                label: "an agent".to_owned(),
+            },
+        ];
+        for program in &through_cmd {
+            assert!(
+                runs_through_cmd(program),
+                "{program:?} runs through cmd.exe"
+            );
+        }
+        for program in &not_through_cmd {
+            assert!(!runs_through_cmd(program), "{program:?} does not");
+        }
+
+        for network in [
+            r"\\server\share\repo",
+            r"\\localhost\C$\Users\me\repo",
+            r"\\?\UNC\server\share\repo",
+            r"\\?\unc\server\share\repo",
+        ] {
+            assert!(
+                is_network_folder(std::path::Path::new(network)),
+                "{network} is a network folder"
+            );
+        }
+        for local in [
+            r"C:\src\repo",
+            r"\\?\C:\src\a-folder-too-long-to-lose-its-prefix",
+            r"\\.\pipe\nysiad",
+            "/home/me/repo",
+        ] {
+            assert!(
+                !is_network_folder(std::path::Path::new(local)),
+                "{local} is not a network folder"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_command_prompt_asked_for_a_network_folder_is_refused_rather_than_opened_elsewhere() {
+        // `cmd.exe` refuses every UNC working directory: it says so in its own banner and
+        // runs in `C:\Windows`. A drive letter mapped to a share arrives as the share's path,
+        // so that is the same case. Staged through this machine's own administrative share,
+        // which reaches a local folder by its network path.
+        let dir = std::env::temp_dir().join(format!("nysia-cmd-unc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a folder to share");
+        let local = CanonicalPath::of(&dir).expect("the folder resolves");
+        let text = local.as_path().to_string_lossy().into_owned();
+        let (drive, tail) = text.split_once(r":\").expect("a drive-letter folder");
+        let network = PathBuf::from(format!(r"\\localhost\{drive}$\{tail}"));
+        assert!(
+            network.is_dir(),
+            "the administrative share does not reach {network:?}, so this cannot stage a \
+             network folder at all"
+        );
+
+        let registry = SessionRegistry::new();
+        let refused = registry.create(&SessionCreate {
+            kind: SessionKind::Shell,
+            pane_key: None,
+            profile: Some(WireProfile::Cmd),
+            cwd: Some(WorkingDirectory::Path { path: network }),
+            env_overrides: BTreeMap::new(),
+            cols: 80,
+            rows: 24,
+        });
+        let err = match refused {
+            Err(err @ SessionError::CmdOnNetworkFolder) => err,
+            other => panic!(
+                "a Command Prompt asked for a network folder was {}: it would have opened in \
+                 C:\\Windows",
+                other.map_or_else(
+                    |err| format!("refused otherwise ({err})"),
+                    |_| { "started".to_owned() }
+                )
+            ),
+        };
+        assert!(registry.list().is_empty(), "something was spawned anyway");
+        let envelope = err.into_envelope();
+        assert!(envelope.message().contains("network folder"));
+        assert!(envelope.message().contains("Command Prompt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_folder_too_long_to_start_in_says_so_rather_than_blaming_the_shell() {
+        // A folder of 259 characters or more is one Windows will not start a program in, and
+        // the refusal used to say "check the shell is installed and on PATH" — which sends a
+        // person to their shell when the cause is the path. 258 starts; 259 and 260 do not,
+        // and 260 is also the length at which the folder keeps its `\\?\` prefix.
+        let base = std::env::temp_dir().join(format!("nysia-long-{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("a base folder");
+        let base = CanonicalPath::of(&base)
+            .expect("the base resolves")
+            .as_path()
+            .to_path_buf();
+        let at_length = |length: usize| {
+            let folder = base.join("a".repeat(length - windows_length(&base) - 1));
+            std::fs::create_dir_all(&folder).expect("a folder of that length");
+            assert_eq!(windows_length(&folder), length);
+            folder
+        };
+        let create = |registry: &SessionRegistry, folder: PathBuf| {
+            registry.create(&SessionCreate {
+                kind: SessionKind::Shell,
+                pane_key: None,
+                profile: Some(WireProfile::Cmd),
+                cwd: Some(WorkingDirectory::Path { path: folder }),
+                env_overrides: BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+            })
+        };
+
+        let registry = SessionRegistry::new();
+        let started = create(&registry, at_length(MAX_WORKING_DIRECTORY))
+            .expect("Windows starts a program in a folder of exactly the longest length");
+        registry.close(&started.handle).expect("closes");
+
+        for length in [MAX_WORKING_DIRECTORY + 1, MAX_WORKING_DIRECTORY + 2] {
+            let err = match create(&registry, at_length(length)) {
+                Err(err @ SessionError::FolderTooLong { .. }) => err,
+                Err(other) => panic!("a {length}-character folder was refused as {other:?}"),
+                Ok(_) => panic!("a {length}-character folder started a session"),
+            };
+            let envelope = err.into_envelope();
+            let said = format!("{} {:?}", envelope.message(), envelope.next_steps());
+            assert!(
+                said.contains(&format!("{length} characters")),
+                "the refusal does not say how long the path is: {said}"
+            );
+            for blamed in ["installed", "PATH", "shim"] {
+                assert!(
+                    !said.contains(blamed),
+                    "the refusal still blames the shell ({blamed}): {said}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Printed by the child before its answer, so the outer test can find the line.
     const PROFILES_LINE: &str = "NYSIA-PROFILES=";
 
@@ -2216,6 +2513,14 @@ mod tests {
                 path: PathBuf::from(SECRET),
                 reason: "it is not a directory".to_owned(),
             },
+            SessionError::CmdOnNetworkFolder,
+            SessionError::FolderTooLong {
+                length: 263,
+                source: SpawnError::Spawn {
+                    program: SECRET.to_owned(),
+                    reason: format!("CreateProcessW `{SECRET}` in cwd `{SECRET}` failed: …"),
+                },
+            },
             SessionError::Invalid("a session is at least one cell in each direction".to_owned()),
             SessionError::Closing(std::io::Error::other(SECRET)),
         ];
@@ -2326,6 +2631,8 @@ mod tests {
         "Spawn",
         "Launch",
         "PathRefused",
+        "CmdOnNetworkFolder",
+        "FolderTooLong",
         "Invalid",
         "Closing",
     ];
@@ -2341,6 +2648,8 @@ mod tests {
             SessionError::Spawn(_) => "Spawn",
             SessionError::Launch(_) => "Launch",
             SessionError::PathRefused { .. } => "PathRefused",
+            SessionError::CmdOnNetworkFolder => "CmdOnNetworkFolder",
+            SessionError::FolderTooLong { .. } => "FolderTooLong",
             SessionError::Invalid(_) => "Invalid",
             SessionError::Closing(_) => "Closing",
         }
