@@ -65,13 +65,14 @@ pub enum DaemonError {
     /// The daemon accepted this connection's `hello` and then closed it without answering
     /// the verb sent on it.
     ///
-    /// **Only [`crate::state::Client::request_aside`] says this**, and it is the one failure
-    /// there that the daemon itself caused after reading the request. A daemon built before a
-    /// verb existed cannot parse it, answers on an id nobody asked with, and closes the
-    /// connection (`serve_control` in `nysia_core::rpc::server`); so do a daemon retiring
-    /// between the two and one whose connection died mid-verb. A dial that failed, a busy
-    /// pipe and a refused `hello` all end **before** the daemon has seen the verb, so none of
-    /// them is this, and the web store writes a daemon off for this and never for those.
+    /// Said by [`crate::state::Client::request_aside`] when its connection ends after the
+    /// daemon accepted the `hello` and before it answered. A daemon built before a verb existed
+    /// does exactly that: it cannot parse the verb, answers on an id nobody asked with, and
+    /// closes the connection (`serve_control` in `nysia_core::rpc::server`). A daemon retiring
+    /// between the two, or a connection that dies mid-verb, looks the same. A dial that failed,
+    /// a busy pipe and a refused `hello` all end **before** the daemon has seen the verb, so
+    /// none of them is this, and the web store writes a daemon off for this and never for
+    /// those.
     ///
     /// On the shared connection the same close is [`Self::Io`], because there it is a lost
     /// connection and the window reconnects.

@@ -781,8 +781,8 @@ impl Client {
         let control = Control::connect(endpoint.listening())?;
         control.request(payload).map_err(|error| match error {
             // The daemon took the `hello` and closed the connection the verb was sent on. The
-            // worker says `Io` for that, whether the close came as an end of file or as a
-            // failed write, and nothing else it says is `Io`.
+            // worker says `Io` for a socket that failed, whether the close came as an end of
+            // file or as a failed write.
             DaemonError::Io(_) => DaemonError::Unanswered,
             other => other,
         })
