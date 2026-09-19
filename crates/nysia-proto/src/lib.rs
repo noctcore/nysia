@@ -52,7 +52,7 @@ pub use project::{
 };
 pub use session::{
     ExitStatus, SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary,
-    ShellProfile,
+    ShellProfile, WorkingDirectory,
 };
 pub use stream::{StreamAttach, StreamAttached, StreamDetach, StreamId};
 pub use tasks::{Issue, IssueState, TasksList};

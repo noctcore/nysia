@@ -1,6 +1,9 @@
 {
   "cols": 120,
-  "cwd": "C:/src/nysia",
+  "cwd": {
+    "from": "path",
+    "path": "C:/src/nysia"
+  },
   "envOverrides": {
     "NYSIA_PANE_KEY": "tab_1:leaf_1",
     "RUST_LOG": "info"

@@ -2,6 +2,7 @@
 import type { PaneKey } from "./PaneKey";
 import type { SessionKind } from "./SessionKind";
 import type { ShellProfile } from "./ShellProfile";
+import type { WorkingDirectory } from "./WorkingDirectory";
 
 /**
  * Spawn a session.
@@ -51,12 +52,11 @@ paneKey: PaneKey | null,
  */
 profile: ShellProfile | null, 
 /**
- * Where to start. `null` takes the project root.
+ * Where to start: a project, a folder, or `null` for neither. See [`WorkingDirectory`].
  *
- * Advisory: the daemon confines it through `safe_join` / `path_confine` (§7.5) before
- * spawning anything, so a path here is a request rather than a guarantee.
+ * `null` is **not** a project root: it is the daemon's own working directory.
  */
-cwd: string | null, 
+cwd: WorkingDirectory | null, 
 /**
  * Environment entries layered over the daemon's scrubbed base environment.
  *
