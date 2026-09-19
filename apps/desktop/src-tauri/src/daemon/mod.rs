@@ -45,11 +45,13 @@ pub enum DaemonError {
     /// Nothing is listening.
     ///
     /// The ordinary case on a machine where the daemon has not been started, not a fault.
-    #[error("no daemon is listening on {endpoint}: {cause}")]
+    ///
+    /// It does not name the socket that was tried. This is a sentence for the user, and the
+    /// socket is this account's endpoint on the machine, which is no use on screen; the dial
+    /// logs it instead.
+    #[error("no daemon is listening: {cause}")]
     Unreachable {
-        /// The socket that was tried.
-        endpoint: String,
-        /// What the OS said.
+        /// What the OS said, or why nothing could be started.
         cause: String,
     },
     /// A daemon is listening and every connection it offers stayed in use.
@@ -285,7 +287,6 @@ mod tests {
         // agree.
         assert!(
             DaemonError::Unreachable {
-                endpoint: "pipe".to_owned(),
                 cause: "not found".to_owned(),
             }
             .retryable()
@@ -334,7 +335,6 @@ mod tests {
         let failures = [
             DaemonError::Endpoint("no account".to_owned()),
             DaemonError::Unreachable {
-                endpoint: "pipe".to_owned(),
                 cause: "not found".to_owned(),
             },
             DaemonError::Busy,

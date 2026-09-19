@@ -1372,7 +1372,6 @@ fn spawn_failure(attempt: &Attempt<'_>, error: EnsureError<DaemonError>) -> Daem
             ),
             Waiting::Exhausted { started } => never_answered(attempt.endpoint, started),
             Waiting::No => DaemonError::Unreachable {
-                endpoint,
                 cause: "nothing is listening, and this client may not start one".to_owned(),
             },
         },
