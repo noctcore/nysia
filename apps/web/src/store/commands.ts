@@ -40,6 +40,7 @@ export interface StoreCommands {
   selectTab(paneKey: PaneKey, onSettled?: () => void): void;
   closeTab(paneKey: PaneKey, onSettled?: () => void): void;
   openTab(launcher: LauncherId, onSettled?: () => void): void;
+  refreshLaunchers(onSettled?: () => void): void;
   addProject(onSettled?: () => void): void;
   dismissAddProject(onSettled?: () => void): void;
   refreshTasks(onSettled?: () => void): void;
@@ -99,6 +100,8 @@ export function routeCommands(store: Store): StoreCommands {
       runCommand('closeTab', store.closeTab(paneKey), onSettled),
     openTab: (launcher, onSettled) =>
       runCommand('openTab', store.openTab(launcher), onSettled),
+    refreshLaunchers: (onSettled) =>
+      runCommand('refreshLaunchers', store.refreshLaunchers(), onSettled),
     addProject: (onSettled) => runCommand('addProject', store.addProject(), onSettled),
     dismissAddProject: (onSettled) =>
       runCommand('dismissAddProject', store.dismissAddProject(), onSettled),

@@ -155,19 +155,19 @@ export const SEED_LAUNCHERS: readonly LauncherGroup[] = [
   {
     label: 'Agents',
     items: [
-      { id: 'agent.claude', label: 'Claude', hint: 'default', kind: 'agent' },
-      { id: 'agent.codex', label: 'Codex', hint: '', kind: 'agent' },
-      { id: 'agent.gemini', label: 'Gemini', hint: '', kind: 'agent' },
-      { id: 'agent.opencode', label: 'OpenCode', hint: '', kind: 'agent' },
+      { id: 'agent.claude', label: 'Claude', hint: 'default', kind: 'agent', unavailable: null },
+      { id: 'agent.codex', label: 'Codex', hint: '', kind: 'agent', unavailable: null },
+      { id: 'agent.gemini', label: 'Gemini', hint: '', kind: 'agent', unavailable: null },
+      { id: 'agent.opencode', label: 'OpenCode', hint: '', kind: 'agent', unavailable: null },
     ],
   },
   {
     label: 'Terminals',
     items: [
-      { id: 'shell.pwsh', label: 'PowerShell 7', hint: 'pwsh', kind: 'shell' },
-      { id: 'shell.cmd', label: 'Command Prompt', hint: 'cmd', kind: 'shell' },
-      { id: 'shell.git_bash', label: 'Git Bash', hint: 'bash', kind: 'shell' },
-      { id: 'shell.wsl', label: 'WSL', hint: 'wsl', kind: 'shell' },
+      { id: 'shell.pwsh', label: 'PowerShell 7', hint: 'pwsh', kind: 'shell', unavailable: null },
+      { id: 'shell.cmd', label: 'Command Prompt', hint: 'cmd', kind: 'shell', unavailable: null },
+      { id: 'shell.git_bash', label: 'Git Bash', hint: 'bash', kind: 'shell', unavailable: null },
+      { id: 'shell.wsl', label: 'WSL', hint: 'wsl', kind: 'shell', unavailable: null },
     ],
   },
 ];

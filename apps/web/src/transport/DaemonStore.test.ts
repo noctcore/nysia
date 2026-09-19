@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Issue } from '../generated/Issue';
+import type { ProfileAvailability } from '../generated/ProfileAvailability';
 import type { Project as WireProject } from '../generated/Project';
 import type { SessionCreate } from '../generated/SessionCreate';
 import type { SessionSummary as WireSession } from '../generated/SessionSummary';
@@ -67,6 +68,23 @@ class FakeDaemon implements DaemonBridge {
   /** What the folder picker answers with. `null` is a cancelled dialog. */
   picks: string | null = 'D:/dev/valve';
   /**
+   * What `profile_list` answers with: every shell the menu offers, launchable or not.
+   *
+   * All four launchable by default, so a test about something else is not also a test about
+   * which shells exist. The ones about the menu say what the machine has.
+   */
+  profiles: ProfileAvailability[] = [
+    { profile: { shell: 'pwsh' }, unavailable: null },
+    { profile: { shell: 'cmd' }, unavailable: null },
+    { profile: { shell: 'git_bash' }, unavailable: null },
+    { profile: { shell: 'wsl', distro: null }, unavailable: null },
+  ];
+  /**
+   * The launch nonce `daemon_connect` reports, which is how the window tells one daemon from
+   * the next. Changing it is a daemon that restarted.
+   */
+  launchNonce = 'nonce_first';
+  /**
    * What `tasks_list` answers with, in the shape the **daemon** sends it.
    *
    * Lowercase `state` and flat label names, which is what changed when v0.3 wave C1 landed:
@@ -125,7 +143,12 @@ class FakeDaemon implements DaemonBridge {
       case 'daemon_connect':
         this.connects += 1;
         this.#connected = true;
-        return undefined as T;
+        return {
+          pid: 4242,
+          startedAtMs: 1_757_721_600_000,
+          launchNonce: this.launchNonce,
+          appVersion: '0.3.0',
+        } as T;
       case 'stream_attach': {
         this.attachCalls += 1;
         // Both refusals are real: `attach_session` needs a stream connection, and the daemon
@@ -147,6 +170,13 @@ class FakeDaemon implements DaemonBridge {
         return assigned as T;
       }
       case 'daemon_watch':
+        // `Client::wait_for_disconnect` returns at once when nothing is connected. A
+        // connection that dropped *during* the connect sequence is already gone by the time
+        // the window starts watching, and a fake that waited for a second drop would hide
+        // the reconnect that follows.
+        if (!this.#connected) {
+          return undefined as T;
+        }
         return new Promise<T>((resolve) => {
           this.#dropped = () => resolve(undefined as T);
         });
@@ -171,6 +201,8 @@ class FakeDaemon implements DaemonBridge {
       }
       case 'project_list':
         return this.projects.map((project) => ({ ...project })) as T;
+      case 'profile_list':
+        return this.profiles.map((row) => ({ ...row })) as T;
       case 'tasks_list':
         return [...this.issues] as T;
       case 'project_start': {
@@ -1567,6 +1599,180 @@ describe('opening a session in the active project', () => {
     expect(rejection).toBeInstanceOf(StoreCommandError);
     expect(store.getSnapshot().errors.at(-1)?.message).toContain('no project is registered');
     expect(store.getSnapshot().projects.some((project) => project.id === gone)).toBe(false);
+  });
+});
+
+describe('the + menu', () => {
+  const NO_PWSH = 'the pwsh profile is unavailable: pwsh was not found on PATH';
+
+  /** The terminal rows, as the chrome reads them. */
+  function shells(store: DaemonStore): { id: string; unavailable: string | null }[] {
+    return (
+      store
+        .getSnapshot()
+        .launchers.find((group) => group.label === 'TERMINALS')
+        ?.items.map(({ id, unavailable }) => ({ id, unavailable })) ?? []
+    );
+  }
+
+  function withoutPwsh(daemon: FakeDaemon): void {
+    daemon.profiles = daemon.profiles.map((row) =>
+      row.profile.shell === 'pwsh' ? { ...row, unavailable: NO_PWSH } : row,
+    );
+  }
+
+  it('says which shells the daemon cannot launch, in the daemon’s own words', async () => {
+    // The report: the menu offered PowerShell 7 on a machine without it, and the person
+    // learned so from a toast after picking it. The daemon knows — it resolves each shell on
+    // its own PATH — so the menu is drawn from its answer rather than from the enum.
+    const daemon = new FakeDaemon();
+    withoutPwsh(daemon);
+    daemon.seed([session(1)]);
+    const store = new DaemonStore({
+      bridge: daemon,
+      router: new TerminalRouter({
+        bridge: daemon,
+        createTerminal: stubTerminals(),
+        platform: 'windows',
+      }),
+      retryDelaysMs: [0],
+    });
+    void store.run();
+    await ready(store);
+
+    expect(shells(store)).toEqual([
+      { id: 'shell.pwsh', unavailable: NO_PWSH },
+      { id: 'shell.cmd', unavailable: null },
+      { id: 'shell.git_bash', unavailable: null },
+      { id: 'shell.wsl', unavailable: null },
+    ]);
+    // The agent row is not the daemon's to answer for here, and is not marked.
+    expect(store.getSnapshot().launchers[0]?.items[0]).toMatchObject({
+      id: 'agent.claude',
+      unavailable: null,
+    });
+    store.dispose();
+  });
+
+  it('asks again when the menu is refreshed, so a shell installed since is offered', async () => {
+    // The answer is computed by the daemon when it is asked, so asking is the whole of what
+    // keeps it true — installing PowerShell 7 while the window is open must not leave the
+    // menu saying it is missing until the next launch.
+    const { store, daemon } = build();
+    withoutPwsh(daemon);
+    await ready(store);
+    await store.refreshLaunchers();
+    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
+
+    daemon.profiles = daemon.profiles.map((row) => ({ ...row, unavailable: null }));
+    await store.refreshLaunchers();
+    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: null });
+  });
+
+  it('asks again after a launch the daemon refused, before the notice lands', async () => {
+    // Uninstalled while the window was open: the menu still offered it, the daemon refused —
+    // the refusal is the backstop and stays — and the menu is corrected by the same click.
+    const { store, daemon } = build();
+    await ready(store);
+    expect(shells(store)[0]?.unavailable).toBeNull();
+
+    withoutPwsh(daemon);
+    daemon.failures.set('session_create', {
+      kind: 'spawn_failed',
+      message: `could not start the session: ${NO_PWSH}`,
+      nextSteps: ['check the shell is installed and on PATH'],
+      retryable: false,
+    });
+    await store.openTab('shell.pwsh').catch(() => {});
+
+    expect(store.getSnapshot().errors.at(-1)?.message).toContain('check the shell is installed');
+    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
+  });
+
+  it('costs one reconnect against a daemon too old to be asked, not a loop', async () => {
+    // A daemon built before the verb cannot read the request, so it closes the connection
+    // rather than answering `unsupported` — and asking again on the reconnect would close it
+    // again for ever. The daemon that did it is remembered by its launch nonce.
+    const daemon = new FakeDaemon();
+    daemon.seed([session(1)]);
+    const realInvoke = daemon.invoke.bind(daemon);
+    daemon.invoke = async <T,>(name: string, args?: Record<string, unknown>): Promise<T> => {
+      if (name === 'profile_list') {
+        daemon.calls.push({ command: name });
+        daemon.drop();
+        throw disconnected('the daemon closed the connection');
+      }
+      return realInvoke<T>(name, args);
+    };
+    const store = new DaemonStore({
+      bridge: daemon,
+      router: new TerminalRouter({
+        bridge: daemon,
+        createTerminal: stubTerminals(),
+        platform: 'windows',
+      }),
+      retryDelaysMs: [0],
+    });
+    void store.run();
+    await until(() => daemon.connects >= 2 && store.getSnapshot().status === 'ready');
+    const settled = daemon.connects;
+    await until(() => daemon.connects > settled, 50);
+
+    expect(store.getSnapshot().status).toBe('ready');
+    expect(daemon.connects, 'the second connect must not ask again').toBe(2);
+    expect(daemon.calls.filter((call) => call.command === 'profile_list')).toHaveLength(1);
+    // And the menu is the one from before the verb existed, not an empty one.
+    expect(shells(store).map((row) => row)).toEqual([
+      { id: 'shell.pwsh', unavailable: null },
+      { id: 'shell.cmd', unavailable: null },
+      { id: 'shell.git_bash', unavailable: null },
+      { id: 'shell.wsl', unavailable: null },
+    ]);
+
+    // A daemon that restarted is a different daemon, and is asked.
+    daemon.launchNonce = 'nonce_second';
+    daemon.invoke = realInvoke;
+    withoutPwsh(daemon);
+    daemon.drop();
+    await until(() => shells(store)[0]?.unavailable === NO_PWSH);
+    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
+    store.dispose();
+  });
+
+  it('does not write a daemon off for a menu opened while reconnecting', async () => {
+    // Nothing is connected to answer, so a failure then says nothing about the daemon. Taken
+    // for an older daemon refusing the verb, it would cost the menu its availability until
+    // that daemon restarted.
+    const { store, daemon } = build();
+    await ready(store);
+    daemon.refusals.set('daemon_connect', {
+      failure: disconnected('the daemon is not answering'),
+      times: Number.MAX_SAFE_INTEGER,
+    });
+    daemon.drop();
+    await until(() => store.getSnapshot().status === 'reconnecting');
+
+    daemon.failures.set('profile_list', disconnected('no control connection is open'));
+    await store.refreshLaunchers();
+
+    withoutPwsh(daemon);
+    daemon.failures.delete('profile_list');
+    daemon.refusals.delete('daemon_connect');
+    await until(() => shells(store)[0]?.unavailable === NO_PWSH);
+    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
+  });
+
+  it('draws a shell the daemon cannot name as nothing, rather than failing the connection', async () => {
+    // A newer daemon may answer for a shell this build has never heard of, or answer in a
+    // shape it cannot read. Neither is a reason to fail a connect; the rows it can read are
+    // drawn and the rest are left out.
+    const { store, daemon } = build();
+    daemon.profiles = [
+      { profile: { shell: 'pwsh' }, unavailable: NO_PWSH },
+      { profile: { shell: 'nushell' }, unavailable: null } as unknown as ProfileAvailability,
+    ];
+    await ready(store);
+    expect(shells(store)).toEqual([{ id: 'shell.pwsh', unavailable: NO_PWSH }]);
   });
 });
 

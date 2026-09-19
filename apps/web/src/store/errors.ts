@@ -29,6 +29,9 @@ export type StoreCommandName =
   // notice was labelled `startTask` — telling a user the wrong verb about a failure that is
   // already a surprise. A name costs nothing; a wrong name costs somebody an hour.
   | 'refreshTasks'
+  // Never rejects either, and named for the same reason: a provider that broke that promise
+  // is reported under the verb it actually broke.
+  | 'refreshLaunchers'
   | 'startTask'
   | 'dismissError'
   | 'window.minimize'
