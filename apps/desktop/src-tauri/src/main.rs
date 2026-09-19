@@ -56,6 +56,7 @@ fn main() -> ExitCode {
             commands::daemon_watch,
             commands::session_list,
             commands::session_create,
+            commands::profile_list,
             commands::session_close,
             commands::terminal_attach,
             commands::stream_attach,

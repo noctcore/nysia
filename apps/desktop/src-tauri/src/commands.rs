@@ -46,7 +46,9 @@ use nysia_proto::project::{
     Project, ProjectId, ProjectList, ProjectRegister, ProjectRegistered, ProjectStart,
     ProjectStarted,
 };
-use nysia_proto::session::{SessionClose, SessionCreate, SessionList, SessionSummary};
+use nysia_proto::session::{
+    ProfileAvailability, ProfileList, SessionClose, SessionCreate, SessionList, SessionSummary,
+};
 use nysia_proto::tasks::{Issue, TasksList};
 use nysia_proto::terminal::{TerminalResize, TerminalSend};
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -190,6 +192,11 @@ pub async fn session_list(app: AppHandle) -> Failed<Vec<SessionSummary>> {
 
 /// Start a session.
 ///
+/// A session for a project names the **project**, not a folder: the window holds a
+/// `ProjectId` and never a path, and the daemon resolves the folder from the registration.
+/// A project that has since been forgotten, or whose folder has gone, is refused
+/// (`unknown_project`, `path_unreadable`) rather than opened somewhere else.
+///
 /// # Errors
 ///
 /// [`CommandFailure`] carrying the daemon's own `nextSteps` when the shell will not
@@ -213,6 +220,32 @@ pub async fn session_create(app: AppHandle, request: SessionCreate) -> Failed<Se
                 Ok(created.handle)
             }
             other => Err(unexpected("session_create", &other)),
+        }
+    })
+    .await
+}
+
+/// Every shell the `+` menu offers, and whether the daemon can launch each one now.
+///
+/// Computed by the daemon on every call, by resolving each shell on its own `PATH` the way a
+/// spawn would — so asking again is how a shell that appeared in or vanished from a directory
+/// on that `PATH` is noticed. The daemon keeps the `PATH` it started with, so a directory an
+/// installer adds is not seen until it restarts. A shell that cannot launch is a row carrying
+/// a sentence, not a failure.
+///
+/// # Errors
+///
+/// [`CommandFailure`] if the daemon is unreachable. A daemon built before the verb existed
+/// cannot read the request at all and closes the connection, which reaches the window as a
+/// transport failure rather than as `unsupported`.
+#[tauri::command]
+pub async fn profile_list(app: AppHandle) -> Failed<Vec<ProfileAvailability>> {
+    let client = client(&app)?;
+    // Blocking: the daemon walks `PATH` once per shell before it answers.
+    blocking("profile_list", move || {
+        match client.request(RequestPayload::ProfileList(ProfileList {}))? {
+            ResponsePayload::ProfileList { profiles } => Ok(profiles),
+            other => Err(unexpected("profile_list", &other)),
         }
     })
     .await
