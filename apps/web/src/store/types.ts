@@ -348,6 +348,14 @@ export interface Store {
   startTask(issue: Issue): Promise<void>;
   selectTab(paneKey: PaneKey): Promise<void>;
   closeTab(paneKey: PaneKey): Promise<void>;
+  /**
+   * Open a session from a launcher, **in the active project** when one is selected.
+   *
+   * The window has no folder to send — a project carries no path on the wire — so the
+   * request names the project and the daemon resolves its folder. With no project selected
+   * the session opens wherever the daemon runs. A project the daemon no longer holds, or
+   * whose folder has gone, is refused rather than opened somewhere else.
+   */
   openTab(launcher: LauncherId): Promise<void>;
   /** Drops one recorded failure. Unknown ids are not an error — dismissal is idempotent. */
   dismissError(id: string): Promise<void>;
