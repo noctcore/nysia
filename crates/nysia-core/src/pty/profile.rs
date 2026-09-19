@@ -116,6 +116,41 @@ impl ShellProfile {
     /// Returns [`ProfileError`] when the shell is not installed, not available on this
     /// platform, or named with an argument-like distribution.
     pub fn command(&self) -> Result<CommandBuilder, ProfileError> {
+        let mut command = CommandBuilder::from_argv(self.argv()?);
+        super::env::sanitize(&mut command);
+        Ok(command)
+    }
+
+    /// Whether this profile would build a command right now, and why not when it would not.
+    ///
+    /// **The same question [`Self::command`] asks before a spawn**, answered by the same code
+    /// and stopping short of the command itself: the program is resolved on this process's
+    /// `PATH` at the moment of the call, and validated the way a spawn would validate it. That
+    /// is the `PATH` this process started with; a directory added to the system's since is not
+    /// on it. That is what makes it an answer about *this machine* rather than about the
+    /// platform — a `cfg!(windows)` list would offer PowerShell 7 to everybody on Windows,
+    /// which is the menu entry that led a person to a refusal.
+    ///
+    /// It is a snapshot, not a promise. A shell can be uninstalled between this answer and a
+    /// launch, which is why [`Self::command`] still refuses on its own.
+    ///
+    /// # Cost
+    ///
+    /// Filesystem probes and nothing else — no process is started. Each profile walks `PATH`
+    /// with every `PATHEXT` extension tried in every directory, and Git Bash first resolves
+    /// `git` and then stats its candidates. Cheap per call, but unbounded by anything this
+    /// module controls: a long `PATH` on a slow or network drive makes it slow. Callers keep
+    /// it off hot paths and out from under any lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`ProfileError`] [`Self::command`] would have returned.
+    pub fn launchable(&self) -> Result<(), ProfileError> {
+        self.argv().map(|_| ())
+    }
+
+    /// The argument vector this profile launches, argv\[0\] resolved and validated.
+    fn argv(&self) -> Result<Vec<OsString>, ProfileError> {
         let (program, args) = match self {
             Self::PowerShell7 => (
                 locate("pwsh", self.id())?,
@@ -152,14 +187,12 @@ impl ShellProfile {
             }
         };
 
-        let mut command = CommandBuilder::from_argv(program.argv(args).map_err(|source| {
-            ProfileError::Unavailable {
+        program
+            .argv(args)
+            .map_err(|source| ProfileError::Unavailable {
                 profile: self.id(),
                 source,
-            }
-        })?);
-        super::env::sanitize(&mut command);
-        Ok(command)
+            })
     }
 }
 
@@ -272,6 +305,37 @@ mod tests {
             }
             .label(),
             "WSL (Ubuntu)"
+        );
+    }
+
+    #[test]
+    fn whether_a_profile_is_launchable_is_what_building_its_command_would_say() {
+        // One question with two callers: the `+` menu asks it ahead of time and a spawn asks
+        // it at the last moment. They share the code, and this holds the two answers equal —
+        // including for a refusal every platform makes, a distribution that reads as a flag,
+        // so an answer that said "yes" to everything fails here on both legs.
+        for profile in [
+            ShellProfile::PowerShell7,
+            ShellProfile::CommandPrompt,
+            ShellProfile::GitBash,
+            ShellProfile::Wsl { distro: None },
+            ShellProfile::Wsl {
+                distro: Some("-e".to_owned()),
+            },
+            ShellProfile::Posix,
+        ] {
+            assert_eq!(
+                profile.launchable().is_ok(),
+                profile.command().is_ok(),
+                "{profile:?}"
+            );
+        }
+        assert!(
+            ShellProfile::Wsl {
+                distro: Some("-e".to_owned())
+            }
+            .launchable()
+            .is_err()
         );
     }
 
