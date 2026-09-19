@@ -1,4 +1,10 @@
-import { useRef, type KeyboardEvent, type RefObject } from 'react';
+import {
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+  type KeyboardEvent,
+  type RefObject,
+} from 'react';
 
 import { useAgentStatus, useCommands, useSnapshot } from '../store/hooks';
 import type { Tab } from '../store/types';
@@ -8,6 +14,8 @@ import { useNow } from '../ui/useNow';
 import { NewTabButton } from './NewTabButton';
 import { SessionGlyph } from './SessionGlyph';
 import { StatusDot } from './StatusDot';
+import { StopAgentDialog } from './StopAgentDialog';
+import { createStopGate, openQuestion } from './stopAgent';
 
 /**
  * The tab strip (design-spec.md §2).
@@ -30,10 +38,21 @@ import { StatusDot } from './StatusDot';
  *  - the close button is `tabIndex={-1}` — still clickable, still reachable in a screen
  *    reader's browse mode — and Delete or Backspace on the focused tab closes it, which is
  *    APG's pattern for a deletable tab.
+ *
+ * Both of those closes go through the stop gate (`./stopAgent`) and neither calls
+ * `closeTab` itself. Closing a tab ends its session, and for an agent mid-turn that is its
+ * work, so the gate asks first; `TabStrip.source.test.ts` holds the strip to having no other
+ * way to close a tab. The window's own close is not gated and must not be: under D-1 the
+ * daemon owns the session, so closing the window interrupts nothing.
  */
 export function TabStrip() {
   const { tabs, activeTab } = useSnapshot();
   const commands = useCommands();
+  const gate = useMemo(() => createStopGate(commands), [commands]);
+  const question = openQuestion(
+    useSyncExternalStore(gate.subscribe, gate.getSnapshot, gate.getSnapshot),
+    tabs,
+  );
   // One clock for the strip. Staleness is a comparison against it, and a tab that held its
   // own interval would be a timer per tab for a dot that changes twice an hour.
   const now = useNow();
@@ -87,7 +106,7 @@ export function TabStrip() {
       event.preventDefault();
       // The key arrived on the tab, so the caret is inside it by definition — but the node
       // is gone by the time the callback runs, so the answer is captured now.
-      commands.closeTab(tab.paneKey, () => focusAfterClose(true));
+      gate.request(tab, () => focusAfterClose(true));
     }
   }
 
@@ -103,11 +122,14 @@ export function TabStrip() {
             now={now}
             nodes={tabNodes}
             onKeyDown={onKeyDown}
+            requestClose={gate.request}
             onClose={focusAfterClose}
           />
         ))}
       </div>
       <NewTabButton />
+      {/* Outside the tablist, which holds nothing but tabs. */}
+      {question !== null ? <StopAgentDialog pending={question} gate={gate} /> : null}
     </div>
   );
 }
@@ -119,6 +141,7 @@ function TabButton({
   now,
   nodes,
   onKeyDown,
+  requestClose,
   onClose,
 }: {
   readonly tab: Tab;
@@ -127,6 +150,8 @@ function TabButton({
   readonly now: number;
   readonly nodes: RefObject<Map<string, HTMLDivElement>>;
   readonly onKeyDown: (event: KeyboardEvent<HTMLDivElement>, tab: Tab) => void;
+  /** The stop gate's `request`: closes the tab, or asks first. */
+  readonly requestClose: (tab: Tab, onSettled: () => void) => void;
   readonly onClose: (hadFocus: boolean) => void;
 }) {
   const commands = useCommands();
@@ -183,13 +208,13 @@ function TabButton({
         onClick={(event) => {
           // Otherwise the click bubbles to the tab and selects what it is about to close.
           event.stopPropagation();
-          // Captured before the command, because the node is unmounted by the time the
+          // Captured before the request, because the node is unmounted by the time the
           // callback runs. A pointer close from elsewhere in the window leaves the caret
           // where it was.
           const hadFocus = event.currentTarget.closest('[role="tab"]')?.contains(
             document.activeElement,
           );
-          commands.closeTab(tab.paneKey, () => onClose(hadFocus === true));
+          requestClose(tab, () => onClose(hadFocus === true));
         }}
         className="text-fg3 hover:text-fg ml-1.5 cursor-pointer border-0 bg-transparent p-0"
       >
