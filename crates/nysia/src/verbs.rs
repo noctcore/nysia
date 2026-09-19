@@ -25,7 +25,7 @@ use nysia_proto::{
     LineCursor, PaneKey, Project, ProjectId, ProjectRegistered, ProjectStart, ProjectStarted,
     SessionCreate, SessionCreated, SessionHandle, SessionKind, SessionSummary, TerminalRead,
     TerminalReadResult, TerminalResize, TerminalSend, TerminalWait, TerminalWaitResult, UnixMillis,
-    WaitOutcome,
+    WaitOutcome, WorkingDirectory,
 };
 
 use crate::cli::{
@@ -414,7 +414,7 @@ fn create_request(args: &CreateArgs) -> Result<SessionCreate, VerbError> {
         profile: args
             .profile
             .map(|profile| profile.to_wire(args.distro.clone())),
-        cwd: args.cwd.clone(),
+        cwd: args.cwd.clone().map(|path| WorkingDirectory::Path { path }),
         env_overrides,
         cols: args.cols,
         rows: args.rows,

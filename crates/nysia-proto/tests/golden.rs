@@ -60,7 +60,7 @@ use nysia_proto::project::{
 };
 use nysia_proto::session::{
     ExitStatus, SessionClose, SessionCreate, SessionCreated, SessionList, SessionSummary,
-    ShellProfile,
+    ShellProfile, WorkingDirectory,
 };
 use nysia_proto::stream::{StreamAttach, StreamAttached, StreamDetach, StreamId};
 use nysia_proto::tasks::{Issue, IssueState, TasksList};
@@ -301,13 +301,28 @@ goldens! {
             kind: SessionKind::Shell,
             pane_key: Some(pane()),
             profile: Some(ShellProfile::Wsl { distro: Some("Ubuntu-24.04".to_owned()) }),
-            cwd: Some("C:/src/nysia".into()),
+            cwd: Some(WorkingDirectory::Path { path: "C:/src/nysia".into() }),
             env_overrides: BTreeMap::from([
                 ("NYSIA_PANE_KEY".to_owned(), "tab_1:leaf_1".to_owned()),
                 ("RUST_LOG".to_owned(), "info".to_owned()),
             ]),
             cols: 120,
             rows: 30,
+        }),
+    };
+
+    // What the window sends: it holds a project's id and never its folder.
+    request_session_create_in_project: RequestEnvelope = RequestEnvelope {
+        request_id: request_id(),
+        retry_request: None,
+        payload: RequestPayload::SessionCreate(SessionCreate {
+            kind: SessionKind::Agent,
+            pane_key: Some(pane()),
+            profile: None,
+            cwd: Some(WorkingDirectory::Project { project: project_id() }),
+            env_overrides: BTreeMap::new(),
+            cols: 80,
+            rows: 24,
         }),
     };
 

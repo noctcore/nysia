@@ -46,7 +46,7 @@ use std::time::Duration;
 use nysia_proto::{
     ErrorCode, ErrorEnvelope, Project, ProjectForget, ProjectId, ProjectRegister,
     ProjectRegistered, ProjectStart, ProjectStarted, RegisterRefusal, ResponsePayload,
-    SessionCreate, Worktree,
+    SessionCreate, WorkingDirectory, Worktree,
 };
 
 use crate::git::{CanonicalPath, Folder, Git, GitError, PathError, Repository};
@@ -368,7 +368,9 @@ impl ProjectService {
         let created = self
             .sessions
             .create(&SessionCreate {
-                cwd: Some(cwd.as_path().to_path_buf()),
+                cwd: Some(WorkingDirectory::Path {
+                    path: cwd.as_path().to_path_buf(),
+                }),
                 ..opening
             })
             .map_err(IntoEnvelope::into_envelope)?;

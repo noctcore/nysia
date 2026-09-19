@@ -35,6 +35,7 @@ use nysia_proto::{
     ErrorCode, ErrorEnvelope, ExitStatus, Frame, FrameKind, Incarnation, LineCursor, PaneKey,
     ReadMode, SessionCreate, SessionCreated, SessionHandle, SessionKind, SessionSummary,
     ShellProfile as WireProfile, TerminalReadResult, TerminalSend, WaitFor, WaitOutcome,
+    WorkingDirectory,
 };
 
 use crate::agent::LaunchError;
@@ -964,11 +965,28 @@ impl SessionRegistry {
             None => synthetic_pane(),
         };
 
+        let requested = match &request.cwd {
+            None => None,
+            Some(WorkingDirectory::Path { path }) => Some(path),
+            // Refused rather than read as "no directory", which is the one answer this must
+            // never give: a project the registry cannot resolve would otherwise open in the
+            // daemon's own directory, and that is the defect the variant exists to fix. The
+            // registry holds sessions and not registrations, so the folder is looked up by
+            // `rpc::project`'s `ProjectService::create_session`, which hands this a `Path`.
+            Some(WorkingDirectory::Project { .. }) => {
+                return Err(SessionError::Invalid(
+                    "a project's folder is resolved from its registration, and this session \
+                     registry holds none; the request has to reach the project service"
+                        .to_owned(),
+                ));
+            }
+        };
+
         let mut spec = program_for(request)?;
         let title = spec.program.label();
         let size = TerminalSize::new(request.cols, request.rows);
         spec = spec.with_size(size);
-        let confined = confine_cwd(request.cwd.as_ref())?;
+        let confined = confine_cwd(requested)?;
         if let Some(cwd) = confined.clone() {
             spec = spec.with_cwd(cwd);
         }
@@ -1773,7 +1791,7 @@ mod tests {
                 kind: SessionKind::Shell,
                 pane_key: None,
                 profile: None,
-                cwd: Some(cwd.clone()),
+                cwd: Some(WorkingDirectory::Path { path: cwd.clone() }),
                 env_overrides: BTreeMap::new(),
                 cols: 80,
                 rows: 24,
@@ -1881,8 +1899,8 @@ mod tests {
     /// identifier the daemon minted, with two exceptions, both named rather than left to be
     /// discovered:
     ///
-    /// - [`SessionError::Invalid`] carries a sentence written at its call sites, all three
-    ///   of which are in this file and none of which has a path to write.
+    /// - [`SessionError::Invalid`] carries a sentence written at its call sites, every one
+    ///   of which is a literal in this file with no path to write.
     /// - [`SessionError::PathRefused`] carries `reason`, which is one of two sentences
     ///   written in `confine_cwd` or an `io::Error` from `fs::canonicalize` — which the OS
     ///   reports without the path it was given.

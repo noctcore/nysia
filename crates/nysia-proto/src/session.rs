@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::identity::{Incarnation, PaneKey, SessionHandle, SessionKind};
+use crate::project::ProjectId;
 
 /// Which shell to spawn.
 ///
@@ -38,6 +39,60 @@ pub enum ShellProfile {
         /// today" and "Ubuntu-24.04". A session that outlives a `wsl --set-default` should
         /// land where it landed the first time, so the daemon records what it resolved.
         distro: Option<String>,
+    },
+}
+
+/// Where a session starts.
+///
+/// # Why a project is named rather than its folder
+///
+/// **The window has no folder to send.** [`Project`](crate::Project) carries no path on the
+/// wire, on purpose: a path travels in one direction only, into
+/// [`ProjectRegister`](crate::ProjectRegister) (traps register #13/#14), and a
+/// [`ProjectId`] is a one-way hash of one. So a window that wanted a session in a project
+/// could only ever send `null`, and the daemon opened the session wherever the daemon itself
+/// was running — a Claude session started on a project whose banner named the user's home
+/// directory. The fix is the one [`TasksList`](crate::TasksList) already made for the same
+/// reason: name the project, and let the daemon resolve the folder from its registration.
+///
+/// # The three cases
+///
+/// - **`null` — no project.** The session inherits the daemon's own working directory and
+///   belongs to no worktree. That is what `nysia session create` without `--cwd` has always
+///   done, and what the window sends when no project is selected.
+/// - **[`Self::Project`]** — the folder the project was registered at, which is its primary
+///   checkout, resolved by the daemon when this request arrives. A project that has been
+///   forgotten since the caller listed it is refused as `unknown_project`, and one whose
+///   folder no longer opens as `path_unreadable`. **Neither falls back to the daemon's own
+///   directory**: opening somewhere silently wrong is the defect this variant exists to fix.
+/// - **[`Self::Path`]** — a folder the caller names, which only a caller holding a path can
+///   do: the CLI's `--cwd`. Advisory — the daemon confines it before spawning anything
+///   (absolute, existing, a directory), so a path here is a request rather than a guarantee.
+///
+/// # Why an enum and not a `project` field beside `cwd`
+///
+/// So that "both" cannot be sent. Two optional fields would need a rule for which one wins
+/// and a refusal for a caller that set both; one field with three shapes has neither.
+///
+/// It also decides what an **older daemon** does with a request that names a project, and
+/// that is worth saying because the daemon outlives the window (D-1). An additive `project`
+/// field would be ignored by a daemon that predates it — serde drops unknown fields — and
+/// that daemon would open the session in its own directory with nothing to say so: the
+/// defect again, returned by the upgrade that was meant to fix it. An object where that
+/// daemon expects a string is instead a frame it cannot read, and it refuses the request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "from", rename_all = "snake_case")]
+#[ts(export)]
+pub enum WorkingDirectory {
+    /// A registered project's folder, resolved by the daemon.
+    Project {
+        /// Which project. The id is all the window holds, and all it needs to hold.
+        project: ProjectId,
+    },
+    /// A folder the caller names.
+    Path {
+        /// The folder. Confined by the daemon before anything is spawned.
+        path: PathBuf,
     },
 }
 
@@ -83,11 +138,10 @@ pub struct SessionCreate {
     /// Which shell, when `kind` is [`SessionKind::Shell`]. `null` takes the platform
     /// default. Ignored for an agent session, which is always `claude`.
     pub profile: Option<ShellProfile>,
-    /// Where to start. `null` takes the project root.
+    /// Where to start: a project, a folder, or `null` for neither. See [`WorkingDirectory`].
     ///
-    /// Advisory: the daemon confines it through `safe_join` / `path_confine` (§7.5) before
-    /// spawning anything, so a path here is a request rather than a guarantee.
-    pub cwd: Option<PathBuf>,
+    /// `null` is **not** a project root: it is the daemon's own working directory.
+    pub cwd: Option<WorkingDirectory>,
     /// Environment entries layered over the daemon's scrubbed base environment.
     ///
     /// Layered *over*, never instead of: §7.1 scrubs `CLAUDECODE`,
@@ -273,6 +327,46 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<SessionCreate>(json).unwrap(),
             create
+        );
+    }
+
+    #[test]
+    fn a_working_directory_says_which_of_its_cases_it_is() {
+        let project = ProjectId::from_canonical_path(std::path::Path::new("/src/nysia"))
+            .expect("a unicode path");
+        let in_project = WorkingDirectory::Project {
+            project: project.clone(),
+        };
+        assert_eq!(
+            serde_json::to_value(&in_project).unwrap(),
+            serde_json::json!({ "from": "project", "project": project.as_str() })
+        );
+        let at_path = WorkingDirectory::Path {
+            path: PathBuf::from("/src/nysia"),
+        };
+        assert_eq!(
+            serde_json::to_value(&at_path).unwrap(),
+            serde_json::json!({ "from": "path", "path": "/src/nysia" })
+        );
+        for cwd in [in_project, at_path] {
+            let json = serde_json::to_value(&cwd).unwrap();
+            assert_eq!(
+                serde_json::from_value::<WorkingDirectory>(json).unwrap(),
+                cwd
+            );
+        }
+
+        // A bare string is what `cwd` was before a project could be named, and it is refused
+        // rather than read as a path: there is exactly one spelling for each case.
+        assert!(
+            serde_json::from_value::<WorkingDirectory>(serde_json::json!("/src/nysia")).is_err()
+        );
+        // And a project that is not an id is refused at the boundary, not three layers later.
+        assert!(
+            serde_json::from_value::<WorkingDirectory>(serde_json::json!({
+                "from": "project", "project": "/src/nysia"
+            }))
+            .is_err()
         );
     }
 
