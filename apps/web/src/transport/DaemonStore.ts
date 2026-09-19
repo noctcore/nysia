@@ -3,6 +3,7 @@ import type { Project } from '../generated/Project';
 import type { ProjectRegistered } from '../generated/ProjectRegistered';
 import type { ProjectStart } from '../generated/ProjectStart';
 import type { ProjectStarted } from '../generated/ProjectStarted';
+import type { SessionCreate } from '../generated/SessionCreate';
 import type { SessionHandle } from '../generated/SessionHandle';
 import type { SessionKind } from '../generated/SessionKind';
 import type { SessionSummary as WireSession } from '../generated/SessionSummary';
@@ -75,6 +76,11 @@ import type { TerminalRouter } from './terminals';
  * **Launchers are derived**, from `ShellProfile`'s four variants. Which shells exist on the
  * machine is properly the daemon's answer, but the four *kinds* are on the wire already,
  * and deriving a menu from a closed enum is reading the protocol rather than inventing.
+ *
+ * **A new session opens in the active project.** The window holds a project's id and never
+ * its folder — `Project` carries no path on the wire — so `openTab` names the project and
+ * the daemon resolves where that is. It used to send `cwd: null`, which the daemon took as
+ * its own working directory: a Claude tab on a selected project opened in the user's home.
  *
  * ## Selection lives here
  *
@@ -280,23 +286,33 @@ export class DaemonStore implements Store {
       throw this.fail('openTab', `No launcher ${launcher} is available.`);
     }
 
+    // The project and never a folder: the window has no folder to send. `null` when nothing
+    // is selected, which the daemon takes as its own working directory — the one case where
+    // that is the honest answer. Typed as the wire's own shape so a change to it in Rust is a
+    // compile error here rather than a request the daemon refuses (D-13).
+    const project = this.#snapshot.activeProjectId;
+    const request: SessionCreate = {
+      kind: item.kind,
+      paneKey: null,
+      profile: profileFor(launcher),
+      cwd: project === null ? null : { from: 'project', project },
+      envOverrides: {},
+      cols: 80,
+      rows: 24,
+    };
+
     let handle: SessionHandle;
     try {
-      handle = await this.#bridge.invoke<SessionHandle>('session_create', {
-        request: {
-          kind: item.kind,
-          paneKey: null,
-          profile: profileFor(launcher),
-          cwd: null,
-          envOverrides: {},
-          cols: 80,
-          rows: 24,
-        },
-      });
+      handle = await this.#bridge.invoke<SessionHandle>('session_create', { request });
       // Inside the try for the same reason as `closeTab`: this is a round trip, and a
       // failure here has to reach the user as a `StoreCommandError` or it reaches nobody.
       await this.#refresh();
     } catch (cause) {
+      if (asCommandFailure(cause)?.kind === 'unknown_project') {
+        // Forgotten by another client since this window listed it. The sidebar is still
+        // drawing it, and the next click on it would be refused the same way.
+        await this.#refreshProjects();
+      }
       // The daemon's own message and next step, verbatim — "pwsh is not on PATH" and what
       // to do about it, rather than a menu that closed and a tab that never appeared.
       throw this.fail('openTab', describeFailure(cause));

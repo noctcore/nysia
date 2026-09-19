@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Issue } from '../generated/Issue';
 import type { Project as WireProject } from '../generated/Project';
+import type { SessionCreate } from '../generated/SessionCreate';
 import type { SessionSummary as WireSession } from '../generated/SessionSummary';
 import { CREDIT_WINDOW_DEFAULT } from '../generated/wireConstants';
 import { StoreCommandError } from '../store/errors';
@@ -1492,6 +1493,80 @@ describe('starting an issue', () => {
     held.release(1);
     await current;
     expect(store.getSnapshot().taskStart.phase).toBe('started');
+  });
+});
+
+describe('opening a session in the active project', () => {
+  /** Every `session_create` request the daemon was sent, in order. */
+  function creates(daemon: FakeDaemon): SessionCreate[] {
+    return daemon.calls
+      .filter((call) => call.command === 'session_create')
+      .map((call) => call.args?.request as SessionCreate);
+  }
+
+  it('names the active project, and never a folder', async () => {
+    // The bug, from the window's side. `Project` carries no path, so the only `cwd` this
+    // window could send was `null` — and the daemon opened the session in its own directory,
+    // the user's home, with a project selected. It names the project now and the daemon
+    // resolves the folder; `crates/nysia-core/src/rpc/interop.rs` asserts where the shell
+    // then actually is.
+    const { store, daemon } = build();
+    await ready(store);
+    const active = store.getSnapshot().activeProjectId;
+    expect(active, 'the fixture selects a project').not.toBeNull();
+
+    await store.openTab('agent.claude');
+    await store.openTab('shell.cmd');
+
+    for (const request of creates(daemon)) {
+      expect(request.cwd).toEqual({ from: 'project', project: active });
+    }
+    expect(creates(daemon)).toHaveLength(2);
+  });
+
+  it('opens where the daemon runs when no project is selected', async () => {
+    // A fresh machine has no projects, and a session must still open. `null` is the one
+    // honest answer when there is no project to name.
+    const daemon = new FakeDaemon();
+    daemon.projects = [];
+    daemon.seed([session(1)]);
+    const store = new DaemonStore({
+      bridge: daemon,
+      router: new TerminalRouter({
+        bridge: daemon,
+        createTerminal: stubTerminals(),
+        platform: 'windows',
+      }),
+      retryDelaysMs: [0],
+    });
+    void store.run();
+    await ready(store);
+    expect(store.getSnapshot().activeProjectId).toBeNull();
+
+    await store.openTab('shell.cmd');
+    expect(creates(daemon).at(-1)?.cwd).toBeNull();
+    store.dispose();
+  });
+
+  it('stops drawing a project the daemon says it no longer holds', async () => {
+    // Forgotten by another client since this window listed it. The daemon refuses the
+    // create rather than opening it somewhere else, and the sidebar would otherwise go on
+    // offering a project whose every session is refused the same way.
+    const { store, daemon } = build();
+    await ready(store);
+    const gone = store.getSnapshot().activeProjectId;
+    daemon.projects = daemon.projects.filter((project) => project.id !== gone);
+    daemon.failures.set('session_create', {
+      kind: 'unknown_project',
+      message: `no project is registered under ${String(gone)}`,
+      nextSteps: ['run `nysia project list` to see the projects this daemon holds'],
+      retryable: false,
+    });
+
+    const rejection = await store.openTab('agent.claude').catch((cause: unknown) => cause);
+    expect(rejection).toBeInstanceOf(StoreCommandError);
+    expect(store.getSnapshot().errors.at(-1)?.message).toContain('no project is registered');
+    expect(store.getSnapshot().projects.some((project) => project.id === gone)).toBe(false);
   });
 });
 
