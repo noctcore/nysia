@@ -77,16 +77,53 @@ describe('the tab close button', () => {
  *
  * `stopAgent.test.ts` and `StopAgentDialog.render.test.ts` prove the gate asks before a
  * working agent is closed and that Cancel leaves it running — which proves nothing if the
- * strip calls `closeTab` itself and never reaches the gate. That wiring is inside a component
+ * strip names `closeTab` itself and never reaches the gate. That wiring is inside a component
  * with hooks, which a node-only suite cannot press (D-18), so it is read out of the source
  * like the mousedown guard above: weaker than behaviour, and it still turns "someone restored
- * the direct call and every gate stayed green" into a named failure.
+ * a spelling of the identifier and every gate stayed green" into a named failure.
+ *
+ * The check is the identifier, not a call. An alias, a destructure, a bracket, an optional
+ * call and `.call` still write `closeTab`. A helper in another file does not, and a
+ * single-file read cannot see it.
  */
+const CLOSE_TAB = /\bcloseTab\b/;
+
+/** Drop line and block comments so a doc comment that names the identifier does not trip. */
+function withoutComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+}
+
+function namesCloseTab(src: string): boolean {
+  return CLOSE_TAB.test(withoutComments(src));
+}
+
 describe('closing a tab', () => {
-  it('never calls closeTab from the strip', () => {
-    expect(source, 'the strip closes a tab without going through the stop gate').not.toMatch(
-      /\bcloseTab\s*\(/,
+  it('does not name closeTab', () => {
+    expect(namesCloseTab(source), 'the strip closes a tab without going through the stop gate').toBe(
+      false,
     );
+  });
+
+  it('trips on each in-file spelling of the identifier', () => {
+    // Trap 12: the five spellings a `closeTab(` probe let through, plus the direct call that
+    // probe already caught. Each is planted in a copy of the source the check reads, so a
+    // guard that only plants the case it already caught goes red here rather than shipping.
+    const plants: readonly { name: string; snippet: string }[] = [
+      { name: 'variable alias', snippet: 'const shut = commands.closeTab; shut(tab.paneKey)' },
+      { name: 'destructure-rename', snippet: 'const { closeTab: shut } = commands' },
+      { name: 'bracket access', snippet: 'commands["closeTab"](tab.paneKey)' },
+      { name: 'optional call', snippet: 'commands.closeTab?.(tab.paneKey)' },
+      { name: '.call', snippet: 'commands.closeTab.call(commands, tab.paneKey)' },
+      { name: 'direct call', snippet: 'commands.closeTab(tab.paneKey)' },
+    ];
+    for (const { name, snippet } of plants) {
+      expect(namesCloseTab(`${source}\n${snippet}\n`), name).toBe(true);
+    }
+  });
+
+  it('does not trip on a comment that names closeTab', () => {
+    expect(namesCloseTab(`${source}\n// closeTab\n`)).toBe(false);
+    expect(namesCloseTab(`${source}\n/* closeTab */\n`)).toBe(false);
   });
 
   it('sends the close button through the gate', () => {
