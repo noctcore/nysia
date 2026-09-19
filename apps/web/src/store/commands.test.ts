@@ -95,6 +95,7 @@ describe('routeCommands', () => {
         'dismissAddProject',
         'dismissError',
         'openTab',
+        'refreshLaunchers',
         'refreshTasks',
         'selectNav',
         'selectProject',

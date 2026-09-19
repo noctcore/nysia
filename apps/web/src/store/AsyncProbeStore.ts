@@ -103,6 +103,14 @@ export class AsyncProbeStore implements Store {
     });
   };
 
+  /**
+   * Settles a turn late and changes nothing, which is an answer a daemon can give: the
+   * shells it can launch are the ones it could launch a moment ago.
+   */
+  refreshLaunchers = async (): Promise<void> => {
+    await this.#ack();
+  };
+
   openTab = async (launcher: LauncherId): Promise<void> => {
     await this.#ack();
     const item = this.#snapshot.launchers

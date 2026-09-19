@@ -331,6 +331,22 @@ export function describeStoreContract(name: string, create: StoreFactory): void 
         expect(new Set(after.tabs.map((tab) => tab.paneKey)).size).toBe(after.tabs.length);
       });
 
+      it('re-reads the launchers without rejecting, and leaves something to launch', async () => {
+        // The `+` menu asks when it opens, and nobody pressed anything that could fail — so
+        // an answer that cannot be had leaves the menu as it was rather than a notice.
+        const store = await ready();
+        await expect(store.refreshLaunchers()).resolves.toBeUndefined();
+        const snapshot = store.getSnapshot();
+        expect(snapshot.errors).toEqual([]);
+        const items = snapshot.launchers.flatMap((group) => group.items);
+        expect(items.length).toBeGreaterThan(0);
+        for (const item of items) {
+          // `null`, or a sentence a person can read — never an empty string, which would draw
+          // a row as unavailable with nothing to say why.
+          expect(item.unavailable === null || item.unavailable.length > 0, item.id).toBe(true);
+        }
+      });
+
       it('leaves the active tab pointing at a tab that exists after a close', async () => {
         // Which tab a provider activates next is its own decision — a daemon may well
         // pick the most recently used rather than the neighbour. What the chrome needs is

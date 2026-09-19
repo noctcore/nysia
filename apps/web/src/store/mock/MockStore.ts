@@ -127,6 +127,9 @@ export class MockStore implements Store {
     });
   };
 
+  /** The seeded menu is the whole answer: there is no machine behind it to ask again. */
+  refreshLaunchers = async (): Promise<void> => {};
+
   openTab = async (launcher: LauncherId): Promise<void> => {
     const item = this.#snapshot.launchers
       .flatMap((group) => group.items)

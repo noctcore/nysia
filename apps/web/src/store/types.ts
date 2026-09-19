@@ -105,6 +105,21 @@ export interface Launcher {
   /** Right-aligned mono hint — `pwsh`, `cmd`, `bash`, or `default` for the default agent. */
   readonly hint: string;
   readonly kind: SessionKind;
+  /**
+   * Why the daemon says it cannot launch this right now, or `null`.
+   *
+   * The sentence is the daemon's own — *"the pwsh profile is unavailable: pwsh was not found
+   * on PATH"* — and names the shell, never a file. It comes from `profile_list`, which the
+   * daemon answers by resolving each shell on its own `PATH` at the moment it is asked.
+   *
+   * **`null` means nothing has said it is unavailable**, which is not quite "available": the
+   * agent row is not asked about, and a daemon too old to serve `profile_list` answers
+   * nothing, so its shells are offered as they were before the verb existed. How a row with
+   * a reason is drawn — disabled with the sentence as its title, or left out — is the menu's
+   * decision. Opening one anyway still reaches the daemon, whose refusal says the same thing:
+   * a shell can vanish between this answer and a click, so the refusal stays the backstop.
+   */
+  readonly unavailable: string | null;
 }
 
 export interface LauncherGroup {
@@ -357,6 +372,18 @@ export interface Store {
    * whose folder has gone, is refused rather than opened somewhere else.
    */
   openTab(launcher: LauncherId): Promise<void>;
+  /**
+   * Ask the daemon again which shells it can launch, and redraw `launchers` from the answer.
+   *
+   * **Never rejects**, like {@link refreshTasks}: an answer that cannot be had leaves the
+   * menu as it was, and nobody pressed anything that failed. The daemon answers by searching
+   * its `PATH` when asked, so this is what makes a shell that appears in, or vanishes from, a
+   * directory already on that `PATH` show up while the window is open — call it when the `+`
+   * menu opens. It cannot show a directory an installer has just *added* to `PATH`: the
+   * daemon keeps the `PATH` it started with, and sees that shell once it is restarted. A
+   * provider also asks on its own when it connects and after a launch the daemon answered.
+   */
+  refreshLaunchers(): Promise<void>;
   /** Drops one recorded failure. Unknown ids are not an error — dismissal is idempotent. */
   dismissError(id: string): Promise<void>;
 

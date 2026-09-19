@@ -1,4 +1,6 @@
+import type { DaemonIdentity } from '../generated/DaemonIdentity';
 import type { PaneKey } from '../generated/PaneKey';
+import type { ProfileAvailability } from '../generated/ProfileAvailability';
 import type { Project } from '../generated/Project';
 import type { ProjectRegistered } from '../generated/ProjectRegistered';
 import type { ProjectStart } from '../generated/ProjectStart';
@@ -20,6 +22,7 @@ import { isAddProjectBusy, registerRefusal, type AddProjectState } from '../stor
 import { StoreCommandError, type StoreCommandName, type StoreError } from '../store/errors';
 import {
   emptySnapshot,
+  type Launcher,
   type LauncherGroup,
   type NavSection,
   type ProjectId,
@@ -73,9 +76,12 @@ import type { TerminalRouter } from './terminals';
  * window into `reconnecting` and retried forever against something no amount of waiting
  * fixes.
  *
- * **Launchers are derived**, from `ShellProfile`'s four variants. Which shells exist on the
- * machine is properly the daemon's answer, but the four *kinds* are on the wire already,
- * and deriving a menu from a closed enum is reading the protocol rather than inventing.
+ * **Which shells the `+` menu offers is the daemon's answer.** It used to be derived from
+ * `ShellProfile`'s four variants, which offered PowerShell 7 on a machine without it and let
+ * the person find out from the refusal. `profile_list` answers from the daemon's own `PATH`
+ * at the moment it is asked, so it is asked on connect, after a launch the daemon answered,
+ * and by {@link DaemonStore.refreshLaunchers} when the menu opens. See
+ * {@link DaemonStore.refreshLaunchers} for what a daemon too old to answer costs.
  *
  * **A new session opens in the active project.** The window holds a project's id and never
  * its folder — `Project` carries no path on the wire — so `openTab` names the project and
@@ -182,6 +188,29 @@ export class DaemonStore implements Store {
    */
   #taskQuery = 0;
   #disposed = false;
+  /**
+   * The launch nonce of the daemon this window is connected to, from `daemon_connect`.
+   *
+   * `null` until a connect has answered with one. Used only to recognise a daemon that has
+   * already shown it cannot serve `profile_list` — see {@link #profilesUnservedBy}.
+   */
+  #launchNonce: string | null = null;
+  /**
+   * The daemon that dropped the connection when it was asked `profile_list`, by launch nonce.
+   *
+   * **This is what stops a reconnect loop against an older daemon.** One built before the
+   * verb cannot read the request at all; it closes the control connection instead of
+   * answering `unsupported`, and the window reconnects. Asking again on that connect would
+   * close it again, for ever. So the daemon that did it is remembered and not asked again —
+   * one reconnect per older daemon rather than one per connect — and its menu keeps the
+   * shells it would have offered before the verb existed.
+   *
+   * The cost of being wrong is small and bounded: a transport failure that merely
+   * *coincided* with the question leaves that one daemon's menu without availability until
+   * it restarts or the window reloads, and every launch still reaches the daemon's own
+   * refusal.
+   */
+  #profilesUnservedBy: string | null = null;
 
   constructor(options: {
     readonly bridge: DaemonBridge;
@@ -308,20 +337,44 @@ export class DaemonStore implements Store {
       // failure here has to reach the user as a `StoreCommandError` or it reaches nobody.
       await this.#refresh();
     } catch (cause) {
-      if (asCommandFailure(cause)?.kind === 'unknown_project') {
-        // Forgotten by another client since this window listed it. The sidebar is still
-        // drawing it, and the next click on it would be refused the same way.
-        await this.#refreshProjects();
+      const failure = asCommandFailure(cause);
+      if (failure !== null && !TRANSPORT_FAILURES.has(failure.kind)) {
+        // The daemon read the request and said no — possibly because the shell the menu
+        // offered has gone since it was drawn — so the menu is re-read before the notice
+        // lands. Any refusal, not only a shell's: the reason is a sentence, not a code this
+        // window can branch on, and asking costs one round trip.
+        await this.#refreshLaunchers();
+        if (failure.kind === 'unknown_project') {
+          // Forgotten by another client since this window listed it. The sidebar is still
+          // drawing it, and the next click on it would be refused the same way.
+          await this.#refreshProjects();
+        }
       }
       // The daemon's own message and next step, verbatim — "pwsh is not on PATH" and what
       // to do about it, rather than a menu that closed and a tab that never appeared.
       throw this.fail('openTab', describeFailure(cause));
     }
-
     const opened = this.#snapshot.tabs.find((tab) => tab.handle === handle);
     if (opened) {
       this.#update((current) => ({ ...current, activeTab: opened.paneKey }));
     }
+    // After the tab is focused rather than before: the daemon walks `PATH` to answer, and a
+    // slow share on it should delay the menu, not the tab the person just asked for.
+    await this.#refreshLaunchers();
+  };
+
+  /**
+   * Ask the daemon again which shells it can launch.
+   *
+   * Only while connected. A menu opened mid-reconnect has nothing to ask, and a transport
+   * failure here would be taken for an older daemon refusing the verb — see
+   * {@link #profilesUnservedBy}.
+   */
+  refreshLaunchers = async (): Promise<void> => {
+    if (this.#snapshot.status !== 'ready') {
+      return;
+    }
+    await this.#refreshLaunchers();
   };
 
   /**
@@ -836,7 +889,8 @@ export class DaemonStore implements Store {
    */
   async #connectOnce(): Promise<ConnectOutcome> {
     try {
-      await this.#bridge.invoke('daemon_connect');
+      const identity = await this.#bridge.invoke<DaemonIdentity | undefined>('daemon_connect');
+      this.#launchNonce = typeof identity?.launchNonce === 'string' ? identity.launchNonce : null;
     } catch (cause) {
       // `failed` rather than `reconnecting` once the daemon side has said something that
       // waiting will not change — a protocol mismatch never resolves itself, a runtime that
@@ -906,9 +960,47 @@ export class DaemonStore implements Store {
     // sequence above turned that into an endless reconnect against a refusal that said, in
     // the envelope, that waiting would not help.
     await this.#refreshProjects();
+    // After the projects and for their reason: the menu is something the window would like,
+    // never a reason to fail the connection. It cannot throw.
+    await this.#refreshLaunchers();
 
     this.#update((current) => ({ ...current, status: 'ready' }));
     return 'connected';
+  }
+
+  /**
+   * Re-read which shells the daemon can launch, and never throw.
+   *
+   * On an answer, the `+` menu is redrawn from it. On a failure the menu is left as it was —
+   * the shells were true when the daemon said them — or, when there is no menu yet, drawn
+   * with nothing marked unavailable, which is what a daemon too old to be asked gets.
+   */
+  async #refreshLaunchers(): Promise<void> {
+    const nonce = this.#launchNonce;
+    if (nonce !== null && nonce === this.#profilesUnservedBy) {
+      this.#update((current) =>
+        current.launchers.length > 0 ? current : { ...current, launchers: launchersFrom(null) },
+      );
+      return;
+    }
+
+    let answer: unknown;
+    try {
+      answer = await this.#bridge.invoke<unknown>('profile_list');
+    } catch (cause) {
+      const failure = asCommandFailure(cause);
+      if (failure === null || TRANSPORT_FAILURES.has(failure.kind) || failure.kind === 'unsupported') {
+        // Not an answer from a daemon that read the question. See `#profilesUnservedBy`.
+        this.#profilesUnservedBy = nonce;
+      }
+      this.#update((current) =>
+        current.launchers.length > 0 ? current : { ...current, launchers: launchersFrom(null) },
+      );
+      return;
+    }
+
+    const launchers = launchersFrom(readProfiles(answer));
+    this.#update((current) => ({ ...current, launchers }));
   }
 
   /**
@@ -1009,7 +1101,6 @@ export class DaemonStore implements Store {
         ...current,
         tabs,
         activeTab,
-        launchers: LAUNCHERS,
         daemon: { ...current.daemon, terminalCount: sessions.length },
       };
     });
@@ -1084,33 +1175,89 @@ function toTab(session: WireSession): Tab {
 }
 
 /**
- * The `+` menu, derived from `ShellProfile`'s four variants.
+ * The failure kinds that mean the request never got an answer from the daemon.
  *
- * Which shells are actually installed is the daemon's answer and will replace this; the
- * four kinds, though, are on the wire already, so deriving the menu from a closed enum is
- * reading the protocol rather than inventing a second one.
- *
- * The agent row is Claude alone. There is one agent in v1 and no provider trait (D-3, D-4),
- * and listing providers that cannot be started would be an affordance that looks live and
- * does nothing.
+ * `DaemonError::kind` in Rust for a socket that failed, a line that would not parse and a
+ * connection that is gone. Anything else is the daemon's own error code: it read the request
+ * and refused it, which is an answer.
  */
-const LAUNCHERS: readonly LauncherGroup[] = [
-  {
-    label: 'AGENTS',
-    items: [
-      { id: 'agent.claude', label: 'Claude', hint: 'default', kind: 'agent' as SessionKind },
-    ],
-  },
-  {
-    label: 'TERMINALS',
-    items: [
-      { id: 'shell.pwsh', label: 'PowerShell 7', hint: 'pwsh', kind: 'shell' as SessionKind },
-      { id: 'shell.cmd', label: 'Command Prompt', hint: 'cmd', kind: 'shell' as SessionKind },
-      { id: 'shell.git_bash', label: 'Git Bash', hint: 'bash', kind: 'shell' as SessionKind },
-      { id: 'shell.wsl', label: 'WSL', hint: 'wsl', kind: 'shell' as SessionKind },
-    ],
-  },
-];
+const TRANSPORT_FAILURES: ReadonlySet<string> = new Set(['io', 'protocol', 'disconnected']);
+
+/**
+ * The agent row, which `profile_list` does not cover.
+ *
+ * Claude alone: there is one agent in v1 and no provider trait (D-3, D-4), and listing
+ * providers that cannot be started would be an affordance that looks live and does nothing.
+ * Whether the CLI is installed is not asked here; the launch still says so if it is not.
+ */
+const AGENTS: LauncherGroup = {
+  label: 'AGENTS',
+  items: [
+    {
+      id: 'agent.claude',
+      label: 'Claude',
+      hint: 'default',
+      kind: 'agent' as SessionKind,
+      unavailable: null,
+    },
+  ],
+};
+
+/** How each shell is drawn, keyed by the wire's own tag. */
+const SHELL_ROWS: Readonly<Record<ShellProfile['shell'], Omit<Launcher, 'unavailable'>>> = {
+  pwsh: { id: 'shell.pwsh', label: 'PowerShell 7', hint: 'pwsh', kind: 'shell' as SessionKind },
+  cmd: { id: 'shell.cmd', label: 'Command Prompt', hint: 'cmd', kind: 'shell' as SessionKind },
+  git_bash: { id: 'shell.git_bash', label: 'Git Bash', hint: 'bash', kind: 'shell' as SessionKind },
+  wsl: { id: 'shell.wsl', label: 'WSL', hint: 'wsl', kind: 'shell' as SessionKind },
+};
+
+/** The order the menu lists shells in when the daemon has not said. */
+const SHELL_ORDER: readonly ShellProfile['shell'][] = ['pwsh', 'cmd', 'git_bash', 'wsl'];
+
+/**
+ * The rows of a `profile_list` answer that this window can draw, or `null` for none.
+ *
+ * Read defensively rather than trusted, because a thrown `TypeError` here would be thrown
+ * out of the connect sequence. A row naming a shell this build does not know — a newer
+ * daemon's — is left out rather than drawn as something it cannot launch, and an answer that
+ * is not a list is treated as no answer at all.
+ */
+function readProfiles(answer: unknown): readonly ProfileAvailability[] | null {
+  if (!Array.isArray(answer)) {
+    return null;
+  }
+  return answer.filter((row: unknown): row is ProfileAvailability => {
+    if (typeof row !== 'object' || row === null) {
+      return false;
+    }
+    const { profile, unavailable } = row as { profile?: unknown; unavailable?: unknown };
+    const shell =
+      typeof profile === 'object' && profile !== null
+        ? (profile as { shell?: unknown }).shell
+        : undefined;
+    return (
+      typeof shell === 'string' &&
+      Object.hasOwn(SHELL_ROWS, shell) &&
+      (unavailable === null || (typeof unavailable === 'string' && unavailable !== ''))
+    );
+  });
+}
+
+/**
+ * The `+` menu, from the daemon's `profile_list` answer.
+ *
+ * One row per profile the daemon answered for, in its order, carrying its reason when it
+ * cannot launch one. `null` — no answer to be had — draws every shell with nothing marked
+ * unavailable, which is the menu as it was before the daemon could be asked: a daemon too
+ * old to answer is not thereby a daemon with no shells.
+ */
+function launchersFrom(profiles: readonly ProfileAvailability[] | null): readonly LauncherGroup[] {
+  const shells: Launcher[] =
+    profiles === null
+      ? SHELL_ORDER.map((shell) => ({ ...SHELL_ROWS[shell], unavailable: null }))
+      : profiles.map((row) => ({ ...SHELL_ROWS[row.profile.shell], unavailable: row.unavailable }));
+  return [AGENTS, { label: 'TERMINALS', items: shells }];
+}
 
 /** The wire profile a launcher asks for, or `null` for the default agent. */
 function profileFor(launcher: string): ShellProfile | null {
