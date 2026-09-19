@@ -1778,6 +1778,68 @@ describe('the + menu', () => {
     });
   }
 
+  it('writes off the daemon it asked, not one that replaced it before the answer', async () => {
+    // The nonce is taken as the question goes out. Read when the failure lands instead, an
+    // older daemon's refusal that arrived after a reconnect wrote off the daemon that
+    // replaced it, which had never been asked, for the rest of its life.
+    const { store, daemon } = build();
+    await ready(store);
+    await until(() => asked(daemon) === 1);
+    const walk = hold(daemon, 'profile_list');
+    const question = store.refreshLaunchers();
+    await until(() => walk.held === 1);
+
+    daemon.launchNonce = 'nonce_second';
+    daemon.drop();
+    await until(() => walk.held === 2);
+    // The second daemon answers the question its connect sequence asked…
+    walk.release(1);
+    await until(() => asked(daemon) === 2);
+    // …and then the first closes on the one it was asked.
+    daemon.failures.set('profile_list', UNANSWERED);
+    walk.release(0);
+    await question;
+
+    // The second is asked again the next time, rather than written off for the first.
+    withoutPwsh(daemon);
+    const again = store.refreshLaunchers();
+    await until(() => walk.held === 3);
+    walk.release(2);
+    await again;
+    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
+  });
+
+  it('asks a daemon that replaced the one a question is out to, without waiting for it', async () => {
+    // The connect sequence asks as the window reaches ready. With a question still out to
+    // the daemon that went away, it used to be handed that question back, and the new daemon
+    // was not asked until the menu next opened.
+    const { store, daemon } = build();
+    await ready(store);
+    await until(() => asked(daemon) === 1);
+    const walk = hold(daemon, 'profile_list');
+    void store.refreshLaunchers();
+    await until(() => walk.held === 1);
+
+    daemon.launchNonce = 'nonce_second';
+    withoutPwsh(daemon);
+    daemon.drop();
+    await until(() => walk.held === 2);
+    expect(walk.held, 'the new daemon was not asked until the menu next opened').toBe(2);
+    walk.release(1);
+    await until(() => shells(store)[0]?.unavailable === NO_PWSH);
+    expect(shells(store)[0]).toEqual({ id: 'shell.pwsh', unavailable: NO_PWSH });
+
+    // And the old daemon's answer, landing last, is that daemon's and is not drawn.
+    daemon.profiles = daemon.profiles.map((row) => ({ ...row, unavailable: null }));
+    walk.release(0);
+    await until(() => asked(daemon) === 3);
+    await until(() => shells(store)[0]?.unavailable === null, 20);
+    expect(shells(store)[0], 'a replaced daemon’s answer drew the menu').toEqual({
+      id: 'shell.pwsh',
+      unavailable: NO_PWSH,
+    });
+  });
+
   it('asks again a daemon that read the question and refused it', async () => {
     // Only a failure that is not an answer writes a daemon off. One that read the question
     // and said no — out of memory, a store it could not open — may well answer next time,
