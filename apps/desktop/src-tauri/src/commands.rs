@@ -253,10 +253,10 @@ pub(crate) fn create_session(
 ///
 /// # Errors
 ///
-/// [`CommandFailure`] if the daemon is unreachable. A daemon built before the verb existed
-/// cannot read the request at all and closes the connection it arrived on, which reaches the
-/// window as an `io` failure rather than as `unsupported` — and, because that connection was
-/// opened for this question alone, costs the window nothing else.
+/// [`CommandFailure`] if the daemon is unreachable or busy. A daemon built before the verb
+/// existed cannot read the request at all and closes the connection it arrived on, which
+/// reaches the window as `unanswered` rather than as `unsupported` — and, because that
+/// connection was opened for this question alone, costs the window nothing else.
 #[tauri::command]
 pub async fn profile_list(app: AppHandle) -> Failed<Vec<ProfileAvailability>> {
     let client = client(&app)?;

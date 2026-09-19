@@ -751,14 +751,41 @@ impl Client {
     /// and on the shared one that cost the window a reconnect. Here it costs one refused
     /// connection, and the shared one never learns about it.
     ///
+    /// ## A dial that failed is not a verb the daemon closed on
+    ///
+    /// The two stages fail differently and the caller is told which. Dialling and the `hello`
+    /// end before the daemon has seen the verb, so their failures come back as what they are:
+    /// nothing listening, a busy pipe, a refused handshake. Once the daemon has accepted the
+    /// `hello`, a connection that dies before the answer is [`DaemonError::Unanswered`] — what
+    /// a daemon too old to read the verb does with it. The web store writes a daemon off for
+    /// that and for nothing that happened before it. Before this split a busy pipe came back
+    /// as `io`, the same kind as that close, so a menu open that met one wrote a current
+    /// daemon off until it restarted.
+    ///
+    /// ## What it costs the daemon
+    ///
+    /// Every connection runs `Caller::new`'s ancestry walk once, after its `hello` (a
+    /// process-table snapshot per level). The shared connection pays it once; a verb asked
+    /// here pays it every time. Measured on a debug build, it was 0.109 ms per verb shared
+    /// and 27.2 ms per verb aside, with no leak over 300 calls. That is why only the verbs
+    /// that can walk `PATH` come here.
+    ///
     /// # Errors
     ///
-    /// [`DaemonError::Unreachable`] when nothing answers at the endpoint, whatever the
-    /// handshake produced, and whatever the daemon said to the verb.
+    /// Before the verb reached the daemon: [`DaemonError::Unreachable`],
+    /// [`DaemonError::Busy`], or whatever else the dial and the handshake produced. After:
+    /// [`DaemonError::Unanswered`], or whatever the daemon said to the verb.
     pub fn request_aside(&self, payload: RequestPayload) -> Result<ResponsePayload, DaemonError> {
         let endpoint = self.dial()?;
         // Dropped at the end of this call, which closes the socket and joins its worker.
-        Control::connect(endpoint.listening())?.request(payload)
+        let control = Control::connect(endpoint.listening())?;
+        control.request(payload).map_err(|error| match error {
+            // The daemon took the `hello` and closed the connection the verb was sent on. The
+            // worker says `Io` for that, whether the close came as an end of file or as a
+            // failed write, and nothing else it says is `Io`.
+            DaemonError::Io(_) => DaemonError::Unanswered,
+            other => other,
+        })
     }
 
     /// Take the webview's channel — or any other [`FrameSink`] — and open the output
@@ -1437,6 +1464,173 @@ mod tests {
             client.rendered(StreamId(1), 128),
             Err(DaemonError::Disconnected)
         ));
+    }
+
+    /// How a [`scripted_daemon`] treats the one connection it takes.
+    enum Script {
+        /// Accept the `hello`, then do with the verb what a daemon built before it does:
+        /// answer on an id nobody asked with, and close. That is `serve_control`'s arm for a
+        /// frame it cannot parse, in `nysia_core::rpc::server`.
+        OlderThanTheVerb,
+        /// Refuse the `hello`, as a retiring daemon does.
+        Retiring,
+    }
+
+    /// A listener at `endpoint` that serves one connection by `script` and closes it.
+    ///
+    /// Not a daemon, on purpose: no build of this tree's daemon closes a connection on a verb
+    /// it knows, and "an older daemon" is exactly the thing being modelled. It sits on core's
+    /// real [`nysia_core::rpc::Listener`], so the window dials the transport it always dials.
+    /// The runtime it returns is what keeps it running.
+    fn scripted_daemon(endpoint: &Endpoint, script: Script) -> tokio::runtime::Runtime {
+        use nysia_core::rpc::{ControlReader, ControlWriter, Listener};
+        use nysia_proto::envelope::{RequestId, ResponseEnvelope};
+        use nysia_proto::error::{ErrorCode, ErrorEnvelope, NextSteps};
+        use nysia_proto::handshake::{
+            HelloAccepted, HelloRejected, HelloRequest, HelloResponse, RejectReason,
+        };
+
+        // A Unix socket is bound inside its runtime directory, which nothing has made yet.
+        let _ = std::fs::create_dir_all(endpoint.runtime_dir());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("a runtime for the scripted daemon");
+        let mut listener = runtime
+            .block_on(async { Listener::bind(endpoint) })
+            .expect("the scripted daemon binds its endpoint");
+
+        runtime.spawn(async move {
+            let Ok(connection) = listener.accept().await else {
+                return;
+            };
+            let (reader, writer) = connection.split();
+            let mut reader = ControlReader::new(reader);
+            let mut writer = ControlWriter::new(writer);
+            let Ok(Some(_)) = reader.read_frame::<HelloRequest>().await else {
+                return;
+            };
+            match script {
+                Script::Retiring => {
+                    let _ = writer
+                        .write_frame(&HelloResponse::Rejected(HelloRejected::new(
+                            RejectReason::ShuttingDown,
+                        )))
+                        .await;
+                }
+                Script::OlderThanTheVerb => {
+                    let identity = DaemonIdentity {
+                        pid: std::process::id(),
+                        started_at_ms: 0,
+                        launch_nonce: "0e2fa1f4-4f3e-4c5f-9f2a-1b2c3d4e5f61"
+                            .parse()
+                            .expect("a well-formed nonce"),
+                        app_version: "0.3.0".to_owned(),
+                    };
+                    let _ = writer
+                        .write_frame(&HelloResponse::Accepted(HelloAccepted::new(identity)))
+                        .await;
+                    // Read as a line and not as a verb: this daemon could not parse it.
+                    let _ = reader.read_line().await;
+                    let _ = writer
+                        .write_frame(&ResponseEnvelope::new(
+                            RequestId::generate(),
+                            ResponsePayload::Error(ErrorEnvelope::new(
+                                ErrorCode::InvalidRequest,
+                                "unknown variant `profile_list`",
+                                NextSteps::new("send one JSON request envelope per line")
+                                    .expect("a non-empty step"),
+                            )),
+                        ))
+                        .await;
+                }
+            }
+            // Dropped here, which closes the connection.
+        });
+        runtime
+    }
+
+    /// Ask `profile_list` aside of `endpoint`, and give up rather than hang.
+    fn ask_aside(endpoint: &Endpoint) -> Result<ResponsePayload, DaemonError> {
+        let client = Client::at(endpoint.clone());
+        let (answer, answered) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = answer.send(client.request_aside(RequestPayload::ProfileList(
+                nysia_proto::session::ProfileList {},
+            )));
+        });
+        answered
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the aside question came back within 30 s")
+    }
+
+    #[test]
+    fn a_daemon_that_takes_the_hello_and_closes_on_the_verb_is_unanswered() {
+        // The one failure the web store may write a daemon off for, and the half of the rule
+        // the busy-pipe fix must not lose: a daemon older than `profile_list` still has to be
+        // asked once and then left alone, rather than costing a refused connection on every
+        // menu open for the rest of its life.
+        let endpoint = crate::interop::scratch("older");
+        let _daemon = scripted_daemon(&endpoint, Script::OlderThanTheVerb);
+
+        let failure = ask_aside(&endpoint).expect_err("this daemon cannot read the verb");
+        assert!(
+            matches!(failure, DaemonError::Unanswered),
+            "a daemon that took the hello and closed on the verb became {failure:?}"
+        );
+        // The word the web store reads. `DaemonStore.ts` writes a daemon off for this kind.
+        assert_eq!(
+            crate::daemon::CommandFailure::from(failure).kind,
+            "unanswered"
+        );
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    #[test]
+    fn a_daemon_that_refuses_the_hello_has_not_seen_the_verb() {
+        // A refusal at the handshake is a daemon saying no to this *client*, before any verb
+        // was sent. Reported as `unanswered`, a retiring daemon would be written off as one
+        // that cannot answer the menu — harmless for one that is going, and exactly the
+        // confusion the split exists to end.
+        let endpoint = crate::interop::scratch("retiring");
+        let _daemon = scripted_daemon(&endpoint, Script::Retiring);
+
+        let failure = ask_aside(&endpoint).expect_err("this daemon refused the hello");
+        assert!(
+            matches!(failure, DaemonError::Refused { .. }),
+            "a refused hello became {failure:?}"
+        );
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_verb_asked_of_a_busy_pipe_is_busy_and_names_no_pipe() {
+        // The round-two blocker. With one dial and no retry this came back as `io` in 244 µs,
+        // with the pipe's name in the sentence and "the daemon went away" as the next step,
+        // and the store read `io` as an older daemon refusing the verb.
+        let endpoint = crate::interop::scratch("aside-busy");
+        let _occupied = crate::interop::Occupied::at(&endpoint);
+
+        let failure = ask_aside(&endpoint).expect_err("every instance is taken");
+        let surfaced = crate::daemon::CommandFailure::from(failure);
+
+        assert_eq!(surfaced.kind, "busy");
+        let pipe = endpoint.listening().to_string();
+        assert!(
+            !surfaced.message.contains(&pipe),
+            "the notice names the pipe: {}",
+            surfaced.message
+        );
+        assert!(
+            surfaced
+                .next_steps
+                .iter()
+                .all(|step| !step.contains(&pipe) && !step.contains("went away")),
+            "the next step is not true of a busy daemon: {:?}",
+            surfaced.next_steps
+        );
     }
 
     #[test]
