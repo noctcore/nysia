@@ -617,6 +617,12 @@ impl Daemon {
                     // There is no request id to correlate an answer with, so this frame is
                     // answered on a generated one and the connection is closed. A client that
                     // correlates strictly ignores it; a person with a socket tool reads it.
+                    //
+                    // `%err` is safe here only because `ControlError`'s `Display` gives serde's
+                    // category and position and not its message, which quotes whatever it
+                    // could not read. The frame this is routinely logged about is an older
+                    // CLI's `session_create` with `--cwd <folder>` as a string.
+                    // `a_malformed_frame_leaves_no_path_in_the_log_or_the_answer` holds it.
                     tracing::debug!(%err, "closing a control connection over a malformed frame");
                     let _ = writer
                         .write_frame(&ResponseEnvelope::new(
@@ -2164,6 +2170,137 @@ mod tests {
         // Still open, so nothing but the rule ended this: a test where the client had hung up
         // would pass with the rule deleted.
         drop(peer);
+
+        daemon.shutdown();
+        drop(listener);
+        let _ = std::fs::remove_dir_all(endpoint.runtime_dir());
+    }
+
+    /// Serve one connection over an in-memory pipe and send it `lines` as raw bytes.
+    ///
+    /// Answers with everything the daemon wrote back before it closed the connection, each
+    /// frame as the JSON that crossed the wire, and waits for the daemon to finish serving.
+    async fn exchange_raw(daemon: &Arc<Daemon>, lines: &[&str]) -> Vec<String> {
+        let mine = PeerCredentials {
+            pid: Some(std::process::id()),
+            user: "me".to_owned(),
+            daemon_user: "me".to_owned(),
+        };
+        let (theirs, ours) = tokio::io::duplex(64 * 1024);
+        let (ours_reader, ours_writer) = tokio::io::split(ours);
+        let (their_reader, mut their_writer) = tokio::io::split(theirs);
+        let serving = tokio::spawn({
+            let daemon = Arc::clone(daemon);
+            async move {
+                daemon
+                    .serve_io(
+                        ControlReader::new(ours_reader),
+                        ControlWriter::new(ours_writer),
+                        Some(mine),
+                    )
+                    .await;
+            }
+        });
+
+        for line in lines {
+            their_writer
+                .write_all(line.as_bytes())
+                .await
+                .expect("the line goes out");
+        }
+        let mut reader = ControlReader::new(their_reader);
+        let mut answers = Vec::new();
+        while let Ok(Some(line)) =
+            tokio::time::timeout(crate::rpc::testing::DEADLINE, reader.read_line())
+                .await
+                .expect("the daemon answers, then closes, within the deadline")
+        {
+            answers.push(line);
+        }
+        tokio::time::timeout(crate::rpc::testing::DEADLINE, serving)
+            .await
+            .expect("the daemon stops serving a connection it has closed")
+            .expect("serving does not panic");
+        answers
+    }
+
+    #[tokio::test]
+    async fn a_malformed_frame_leaves_no_path_in_the_log_or_the_answer() {
+        // #111 made this routine rather than hostile: a CLI from before `cwd` became an object
+        // sends `--cwd <folder>` as a string, the daemon cannot read it, and serde's message
+        // quoted the folder — into the log at `debug`, and into the answer. `rpc::log_file`
+        // forbids the first, and `SessionError`'s envelopes are built so they never repeat a
+        // path they were handed, which is the second.
+        //
+        // `debug` is the level that matters: it is the one a person turns on because they are
+        // about to send somebody the file. The recorder takes every level, so this sees the
+        // line whatever the shipped filter is.
+        let recorder = crate::rpc::testing::Recorder::default();
+        let _installed = tracing::subscriber::set_default(recorder.clone());
+        let endpoint = crate::rpc::endpoint::scratch("malformed");
+        let (daemon, listener) = Daemon::bind(DaemonConfig {
+            idle_retire_after: None,
+            ..DaemonConfig::new(endpoint.clone())
+        })
+        .expect("binds");
+
+        let hello = format!(
+            "{}\n",
+            serde_json::to_string(&HelloRequest::new(
+                PROTOCOL_VERSION,
+                ClientRole::Control,
+                "nysia-test".parse().expect("a well-formed client id"),
+            ))
+            .expect("a hello serialises")
+        );
+        let old_create = crate::rpc::testing::OLD_SHAPE_CREATE;
+        // Twice: after a hello, where the frame is read as a verb, and as the first frame,
+        // where it is read as a hello and refused. Each is its own log line and its own answer.
+        let after_hello = exchange_raw(&daemon, &[&hello, old_create]).await;
+        let instead_of_hello = exchange_raw(&daemon, &[old_create]).await;
+
+        assert_eq!(
+            after_hello.len(),
+            2,
+            "an acceptance and a refusal: {after_hello:?}"
+        );
+        assert!(
+            after_hello[1].contains("\"error\"") && after_hello[1].contains("column"),
+            "the verb was not refused as a frame that would not parse: {}",
+            after_hello[1]
+        );
+        assert_eq!(
+            instead_of_hello.len(),
+            1,
+            "one rejection: {instead_of_hello:?}"
+        );
+        assert!(
+            instead_of_hello[0].contains("\"rejected\"")
+                || instead_of_hello[0].contains("malformed"),
+            "the frame was not refused as a hello: {}",
+            instead_of_hello[0]
+        );
+
+        let log = recorder.text();
+        // Both lines this guards were written — otherwise the check below passes on nothing.
+        assert!(
+            log.contains("closing a control connection over a malformed frame"),
+            "the malformed-frame line was not logged at all:\n{log}"
+        );
+        assert!(
+            log.contains("refused a hello"),
+            "the refused hello was not logged:\n{log}"
+        );
+        for (what, said) in [
+            ("the log", log.as_str()),
+            ("the answer to the verb", after_hello[1].as_str()),
+            ("the answer to the hello", instead_of_hello[0].as_str()),
+        ] {
+            assert!(
+                !said.contains("a-clients-private-repo") && !said.contains("Projekty"),
+                "{what} repeats the folder a malformed frame carried:\n{said}"
+            );
+        }
 
         daemon.shutdown();
         drop(listener);

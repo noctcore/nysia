@@ -12,6 +12,7 @@
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::error::Category;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 /// The longest control frame the daemon will read before refusing the connection.
@@ -35,11 +36,31 @@ pub enum ControlError {
     )]
     LineTooLong,
     /// The line was not the JSON this frame should have held.
-    #[error("could not read a control frame: {0}")]
-    Malformed(#[source] serde_json::Error),
+    ///
+    /// **Displayed as serde's category and position, never its message**, and not a
+    /// `#[source]` either, so no chain printer reaches the message by another road.
+    /// `serde_json::Error`'s `Display` echoes the scalar it choked on, and the one that
+    /// arrives in practice is a path: a CLI from before `cwd` became an object sends
+    /// `--cwd <folder>` as a string, and the message reads `invalid type: string
+    /// "C:\\Users\\…\\a-clients-private-repo"`. The daemon writes this error into its log and
+    /// into the answer, and `rpc::log_file` allows neither to carry a request body. The same
+    /// split `rpc::tasks` makes for `gh`'s answer.
+    #[error("could not read a control frame: {}", fault(.0))]
+    Malformed(serde_json::Error),
     /// The peer closed the connection before finishing a frame.
     #[error("the peer closed the connection part way through a control frame")]
     Truncated,
+}
+
+/// What was wrong with a frame, as a phrase and a position that repeat nothing from it.
+fn fault(err: &serde_json::Error) -> String {
+    let what = match err.classify() {
+        Category::Io => "the connection failed while it was being read",
+        Category::Syntax => "it is not JSON",
+        Category::Data => "it is JSON, but not in the shape this frame takes",
+        Category::Eof => "it ends part way through a value",
+    };
+    format!("{what} (line {}, column {})", err.line(), err.column())
 }
 
 /// Reads newline-delimited JSON frames, bounded.
@@ -269,5 +290,50 @@ mod tests {
         // The connection is still readable: the frame was bad, not the stream. That is what
         // lets the daemon answer a malformed `hello` with a rejection instead of a hang-up.
         assert!(reader.read_line().await.expect("reads").is_some());
+    }
+
+    #[test]
+    fn the_old_shape_fixture_is_json_in_the_wrong_shape() {
+        // The leak checks that use the fixture are only as good as the fixture: a frame
+        // serde rejects as a syntax error has a message that quotes nothing, and every check
+        // fed one passes whatever the daemon does with that message. So this holds it to the
+        // case that *can* leak — serde's own message, unfiltered, repeats the folder.
+        let fixture = crate::rpc::testing::OLD_SHAPE_CREATE;
+        serde_json::from_str::<serde_json::Value>(fixture).expect("the fixture is JSON");
+        let serde_said = serde_json::from_str::<nysia_proto::RequestEnvelope>(fixture)
+            .expect_err("a string where an object belongs does not parse");
+        assert_eq!(serde_said.classify(), Category::Data);
+        assert!(
+            serde_said.to_string().contains("a-clients-private-repo"),
+            "serde no longer quotes the value it could not read, so the leak checks below \
+             prove nothing: {serde_said}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_frame_that_will_not_parse_is_described_without_repeating_what_it_held() {
+        // The mechanism behind the daemon's log line and its answer to a malformed frame:
+        // both are this error's `Display`. serde's own message would print the folder whole.
+        // `rpc::server`'s `a_malformed_frame_leaves_no_path_in_the_log_or_the_answer` holds
+        // the two places it is written.
+        let mut reader = ControlReader::new(crate::rpc::testing::OLD_SHAPE_CREATE.as_bytes());
+        let err = reader
+            .read_frame::<nysia_proto::RequestEnvelope>()
+            .await
+            .expect_err("a string where an object belongs does not parse");
+        assert!(matches!(err, ControlError::Malformed(_)), "{err:?}");
+
+        let said = err.to_string();
+        assert!(
+            !said.contains("a-clients-private-repo") && !said.contains("Projekty"),
+            "the error repeats the frame it could not read: {said}"
+        );
+        // What it says instead, so this cannot pass by saying nothing.
+        assert!(said.contains("not in the shape this frame takes"), "{said}");
+        assert!(said.contains("line 1, column"), "{said}");
+        assert!(
+            std::error::Error::source(&err).is_none(),
+            "a source hands serde's message to any printer that walks the chain"
+        );
     }
 }
