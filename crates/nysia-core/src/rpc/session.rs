@@ -1968,12 +1968,21 @@ mod tests {
         //
         // A `cfg!(windows)` list fails on each leg: it offers `pwsh` on Windows where the
         // empty `PATH` has none, and withholds it on macOS where the fixture put one.
-        let scratch = crate::git::testing::Scratch::new("profiles");
-        let with_pwsh = scratch.folder("with-pwsh");
-        let empty = scratch.folder("empty");
+        // A directory of its own rather than `git::testing::Scratch`, which needs a `git` to
+        // build fixtures with: nothing here is a repository, and a machine without git still
+        // has shells to list.
+        let root = std::env::temp_dir().join(format!("nysia-profiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let folder = |name: &str| {
+            let path = root.join(name);
+            std::fs::create_dir_all(&path).expect("a folder for a PATH");
+            path
+        };
+        let with_pwsh = folder("with-pwsh");
+        let empty = folder("empty");
         // A distinctive component, so the leak check below cannot pass merely because the
         // folder's name was short or ordinary.
-        let broken = scratch.folder("a-clients-private-toolchain");
+        let broken = folder("a-clients-private-toolchain");
         if cfg!(windows) {
             // A batch shim, which resolution launches through `cmd.exe` from `System32` —
             // found by `SystemRoot`, not by `PATH`, so it resolves with nothing else on it.
@@ -2046,6 +2055,7 @@ mod tests {
                 "{said:?} names a folder"
             );
         }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A request for an agent session, with nothing else asked for.
