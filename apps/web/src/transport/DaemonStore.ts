@@ -198,23 +198,26 @@ export class DaemonStore implements Store {
    */
   #launchNonce: string | null = null;
   /**
-   * The daemon that dropped the connection when it was asked `profile_list`, by launch nonce.
+   * The daemon that could not answer `profile_list`, by launch nonce.
    *
-   * One built before the verb cannot read the request at all; it closes the connection the
-   * question arrived on instead of answering `unsupported`. That connection is one the Rust
-   * side opened for this question alone (`Client::request_aside`), so it costs the window
-   * no reconnect. Asking again would cost the same refused connection on every menu open,
-   * for ever, so the daemon that did it is remembered and not asked again. Its menu keeps
-   * the shells it would have offered before the verb existed.
+   * One built before the verb cannot read the request at all; it accepts the connection's
+   * `hello`, then closes the connection the question arrived on instead of answering
+   * `unsupported`. That connection is one the Rust side opened for this question alone
+   * (`Client::request_aside`), so it costs the window no reconnect. Asking again would cost
+   * the same refused connection on every menu open, for ever, so the daemon that did it is
+   * remembered and not asked again. Its menu keeps the shells it would have offered before
+   * the verb existed.
    *
-   * Only a failure that is not an answer, or an answer of `unsupported`, writes a daemon
-   * off. A daemon that read the question and refused it for any other reason is asked again
-   * next time.
+   * **Only {@link CANNOT_ANSWER_PROFILES} writes a daemon off**, and that is a positive
+   * signal rather than "anything but an answer". Writing a daemon off for any transport
+   * failure meant a pipe that was busy for a moment — hooks and the window dial it constantly
+   * — cost a current daemon its menu until it restarted, with nothing on screen to say so. A
+   * failure this window has no word for is taken as not knowing, and the daemon is asked
+   * again next time.
    *
-   * The cost of being wrong is small and bounded: a transport failure that merely
-   * *coincided* with the question leaves that one daemon's menu without availability until
-   * it restarts or the window reloads, and every launch still reaches the daemon's own
-   * refusal.
+   * Written against the daemon that was connected **when the question was asked**, never
+   * the one connected when the failure lands. A reconnect can come in between, and writing
+   * off the new daemon for the old one's answer would cost it its menu for its whole life.
    */
   #profilesUnservedBy: string | null = null;
   /** The `profile_list` question in flight, which a second ask waits on rather than repeating. */
@@ -347,9 +350,8 @@ export class DaemonStore implements Store {
     } catch (cause) {
       const failure = asCommandFailure(cause);
       // A refusal, and only a refusal. A create that got no answer says nothing about which
-      // shells exist, and asking straight after one is asking into the same trouble: a
-      // transport failure *then* is taken for an older daemon, which writes this one's
-      // menu off until it restarts. `does not take a launch that got no answer…` holds it.
+      // shells exist, and asking straight after one is asking into the same trouble.
+      // `does not take a launch that got no answer…` holds it.
       if (failure !== null && !TRANSPORT_FAILURES.has(failure.kind)) {
         // The daemon read the request and said no — possibly because the shell the menu
         // offered has gone since it was drawn — so the menu is re-read before the notice
@@ -992,9 +994,8 @@ export class DaemonStore implements Store {
    * with nothing marked unavailable, which is what a daemon too old to be asked gets.
    *
    * **Only while connected**, on every path that asks: the connect sequence, a launch, and a
-   * menu opening. With nothing connected there is nobody to answer, and a transport failure
-   * then would be taken for an older daemon refusing the verb — see
-   * {@link #profilesUnservedBy}.
+   * menu opening. With nothing connected there is nobody to answer, and no daemon to write
+   * off if the question fails — see {@link #profilesUnservedBy}.
    *
    * **One question at a time.** The daemon walks its `PATH` to answer, which can take
    * seconds, and the answer does not depend on who asked. A second ask while one is out
@@ -1033,8 +1034,8 @@ export class DaemonStore implements Store {
       answer = await this.#bridge.invoke<unknown>('profile_list');
     } catch (cause) {
       const failure = asCommandFailure(cause);
-      if (failure === null || TRANSPORT_FAILURES.has(failure.kind) || failure.kind === 'unsupported') {
-        // Not an answer from a daemon that read the question. See `#profilesUnservedBy`.
+      if (failure !== null && CANNOT_ANSWER_PROFILES.has(failure.kind)) {
+        // The daemon asked, not the one connected now. See `#profilesUnservedBy`.
         this.#profilesUnservedBy = nonce;
       }
       this.#update((current) =>
@@ -1222,10 +1223,34 @@ function toTab(session: WireSession): Tab {
  * The failure kinds that mean the request never got an answer from the daemon.
  *
  * `DaemonError::kind` in Rust for a socket that failed, a line that would not parse and a
- * connection that is gone. Anything else is the daemon's own error code: it read the request
- * and refused it, which is an answer.
+ * connection that is gone — and, for a verb asked on a connection of its own
+ * (`Client::request_aside`), a dial that found nothing, a pipe that stayed busy, a `hello`
+ * the daemon refused, and a connection it closed before answering. Anything else is the
+ * daemon's own error code: it read the request and refused it, which is an answer.
+ *
+ * Not the rule for writing a daemon off: see `#profilesUnservedBy`, which reads one kind and
+ * no set.
  */
-const TRANSPORT_FAILURES: ReadonlySet<string> = new Set(['io', 'protocol', 'disconnected']);
+const TRANSPORT_FAILURES: ReadonlySet<string> = new Set([
+  'io',
+  'protocol',
+  'disconnected',
+  'unreachable',
+  'busy',
+  'refused',
+  'unanswered',
+]);
+
+/**
+ * The failures that say a daemon cannot answer `profile_list`, and that nothing else says.
+ *
+ * `unanswered` is Rust's word for a connection the daemon accepted the `hello` on and then
+ * closed with the verb unanswered, which is what a daemon built before the verb does with it
+ * (`DaemonError::Unanswered`). `unsupported` is a daemon that read the verb and said it does
+ * not serve it. A dial that failed, a busy pipe and a refused `hello` all end before the
+ * daemon has seen the question, so they say nothing about whether it could answer.
+ */
+const CANNOT_ANSWER_PROFILES: ReadonlySet<string> = new Set(['unanswered', 'unsupported']);
 
 /**
  * The agent row, which `profile_list` does not cover.
