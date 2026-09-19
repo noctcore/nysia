@@ -445,6 +445,14 @@ impl ProjectService {
     /// A project whose drive has been unplugged lists perfectly well — that is deliberate,
     /// see `list` — so the verbs that need the folder are the first to find out, and each
     /// must say which of the two it is rather than "could not start".
+    ///
+    /// **Re-resolved, not pinned.** A project folder replaced by a junction resolves to the
+    /// junction's target, and the session opens there. That is left alone on purpose. "I moved
+    /// the repository and left a junction where it was" is a real setup, and a refusal whenever
+    /// the resolved path differs from the stored one would break it. Pointing a project
+    /// somewhere else this way needs write access to the folder's parent, which is already
+    /// enough to replace the repository itself. #111's review recorded the case, and this is
+    /// the answer to it.
     fn folder_of(&self, id: &ProjectId) -> Result<(StoredProject, CanonicalPath), ErrorEnvelope> {
         let stored = self
             .store
