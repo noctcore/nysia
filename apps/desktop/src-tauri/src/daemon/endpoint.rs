@@ -518,11 +518,9 @@ mod tests {
         if cfg!(windows) {
             assert!(matches!(busy, DaemonError::Busy), "got {busy:?}");
         } else {
-            // No socket on Unix fails this way, and 231 is not an errno there.
-            assert!(
-                !matches!(busy, DaemonError::Unreachable { .. }),
-                "got {busy:?}"
-            );
+            // No socket on Unix fails this way, and 231 is not an errno there. `Busy` is a
+            // pipe's answer, and a Unix dial that produced it would be saying something false.
+            assert!(matches!(busy, DaemonError::Io(_)), "got {busy:?}");
         }
         assert!(busy.retryable(), "a busy daemon is worth dialling again");
     }
