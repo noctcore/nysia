@@ -404,6 +404,19 @@ fn create_request(args: &CreateArgs) -> Result<SessionCreate, VerbError> {
     }
 
     refuse_shell_flags_on_an_agent(args.kind, args.profile.is_some(), args.distro.is_some())?;
+    let cwd = match (&args.project, &args.cwd) {
+        (Some(_), Some(_)) => {
+            return Err(VerbError::argument(
+                "--project and --cwd both name where to start",
+                "pass one: --project for a registered project's folder, --cwd for any other",
+            ));
+        }
+        (Some(id), None) => Some(WorkingDirectory::Project {
+            project: parse_project_id(id)?,
+        }),
+        (None, Some(path)) => Some(WorkingDirectory::Path { path: path.clone() }),
+        (None, None) => None,
+    };
     Ok(SessionCreate {
         // The daemon serves both kinds. session create has no worktree to write, so there
         // is nothing to refuse before a write — but `--kind agent` with `--profile` is
@@ -414,7 +427,7 @@ fn create_request(args: &CreateArgs) -> Result<SessionCreate, VerbError> {
         profile: args
             .profile
             .map(|profile| profile.to_wire(args.distro.clone())),
-        cwd: args.cwd.clone().map(|path| WorkingDirectory::Path { path }),
+        cwd,
         env_overrides,
         cols: args.cols,
         rows: args.rows,
@@ -844,6 +857,7 @@ mod tests {
             profile: None,
             distro: None,
             cwd: None,
+            project: None,
             pane_key: None,
             env: Vec::new(),
             cols: 120,
@@ -1007,6 +1021,49 @@ mod tests {
                 distro: Some("Ubuntu-24.04".to_owned())
             })
         );
+    }
+
+    #[test]
+    fn a_create_starts_in_a_project_a_folder_or_neither_and_never_both() {
+        let id = "proj_0123456789abcdef0123456789abcdef";
+        let in_project = create_request(&CreateArgs {
+            project: Some(id.to_owned()),
+            ..create_args()
+        })
+        .expect("a project id is somewhere to start");
+        assert_eq!(
+            in_project.cwd,
+            Some(WorkingDirectory::Project {
+                project: id.parse().expect("a well-formed id"),
+            })
+        );
+
+        let folder = std::path::PathBuf::from("/src/nysia");
+        let at_path = create_request(&CreateArgs {
+            cwd: Some(folder.clone()),
+            ..create_args()
+        })
+        .expect("a folder is somewhere to start");
+        assert_eq!(at_path.cwd, Some(WorkingDirectory::Path { path: folder }));
+
+        // Neither: where the daemon is running, which is what this verb has always done.
+        let nowhere = create_request(&create_args()).expect("no flag is valid");
+        assert_eq!(nowhere.cwd, None);
+
+        let both = create_request(&CreateArgs {
+            project: Some(id.to_owned()),
+            cwd: Some(std::path::PathBuf::from("/src/nysia")),
+            ..create_args()
+        })
+        .expect_err("two answers to one question");
+        assert!(!both.envelope().next_steps().is_empty());
+
+        let malformed = create_request(&CreateArgs {
+            project: Some("/src/nysia".to_owned()),
+            ..create_args()
+        })
+        .expect_err("a path is not a project id");
+        assert!(!malformed.envelope().next_steps().is_empty());
     }
 
     #[test]
