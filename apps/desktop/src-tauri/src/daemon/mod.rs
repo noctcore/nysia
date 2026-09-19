@@ -62,6 +62,21 @@ pub enum DaemonError {
     /// beside a busy daemon leaves it unable to bind.
     #[error("the daemon did not take a new connection: every one it offers was in use")]
     Busy,
+    /// The daemon accepted this connection's `hello` and then closed it without answering
+    /// the verb sent on it.
+    ///
+    /// **Only [`crate::state::Client::request_aside`] says this**, and it is the one failure
+    /// there that the daemon itself caused after reading the request. A daemon built before a
+    /// verb existed cannot parse it, answers on an id nobody asked with, and closes the
+    /// connection (`serve_control` in `nysia_core::rpc::server`); so do a daemon retiring
+    /// between the two and one whose connection died mid-verb. A dial that failed, a busy
+    /// pipe and a refused `hello` all end **before** the daemon has seen the verb, so none of
+    /// them is this, and the web store writes a daemon off for this and never for those.
+    ///
+    /// On the shared connection the same close is [`Self::Io`], because there it is a lost
+    /// connection and the window reconnects.
+    #[error("the daemon closed the connection without answering")]
+    Unanswered,
     /// The daemon declined the handshake, or speaks a protocol this build cannot attach to.
     ///
     /// `retryable` comes off the wire rather than being inferred from the reason: a daemon
@@ -154,6 +169,7 @@ impl DaemonError {
             Self::Endpoint(_) => "endpoint",
             Self::Unreachable { .. } => "unreachable",
             Self::Busy => "busy",
+            Self::Unanswered => "unanswered",
             Self::Refused { .. } => "refused",
             Self::Spawn { .. } => "spawn",
             Self::Starting { .. } => "starting",
@@ -176,6 +192,7 @@ impl DaemonError {
         match self {
             Self::Unreachable { .. }
             | Self::Busy
+            | Self::Unanswered
             | Self::Io(_)
             | Self::Disconnected
             | Self::Starting { .. } => true,
@@ -202,6 +219,11 @@ impl DaemonError {
             Self::Busy => {
                 vec!["The daemon is busy with other connections. Try again in a moment.".to_owned()]
             }
+            Self::Unanswered => vec![
+                "Try again. If it keeps happening, the running daemon may be older than this \
+                 window: restart it so both are the same version."
+                    .to_owned(),
+            ],
             Self::Io(_) => {
                 vec!["The daemon went away. Nysia will reconnect on its own.".to_owned()]
             }
@@ -292,6 +314,7 @@ mod tests {
             .retryable()
         );
         assert!(DaemonError::Busy.retryable());
+        assert!(DaemonError::Unanswered.retryable());
         assert!(DaemonError::Io("reset".to_owned()).retryable());
         assert!(DaemonError::Disconnected.retryable());
         assert!(
@@ -338,6 +361,7 @@ mod tests {
                 cause: "not found".to_owned(),
             },
             DaemonError::Busy,
+            DaemonError::Unanswered,
             DaemonError::Refused {
                 reason: "this daemon speaks v9".to_owned(),
                 retryable: false,
