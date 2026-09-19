@@ -265,8 +265,17 @@ pub struct CreateArgs {
     #[arg(long)]
     pub distro: Option<String>,
     /// Where to start. Must be an absolute path to a directory that exists.
+    ///
+    /// Omit both this and `--project` to start where the daemon is running.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+    /// Start in a registered project's folder, named by its `proj_…` id.
+    ///
+    /// The daemon resolves the folder from the registration, which is what the window does
+    /// too: it holds a project's id and never its path. Refused with `--cwd`, which names a
+    /// folder of its own.
+    #[arg(long, value_name = "ID")]
+    pub project: Option<String>,
     /// The pane this session belongs to, `<tabId>:<leafId>`.
     ///
     /// The GUI supplies one because it owns the tab tree. The CLI has no pane, so leaving
