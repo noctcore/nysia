@@ -196,3 +196,9 @@ apps/web/              React 19 + Vite + Tailwind 4
 tools/lint-meta/       architecture rules (D-14)
 scripts/e2e/           the end-to-end proofs a test runner cannot run for you
 ```
+
+## Contributing and security
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before a pull request, and report vulnerabilities as
+[SECURITY.md](SECURITY.md) describes, never in a public issue. Everyone taking part follows the
+[Code of Conduct](CODE_OF_CONDUCT.md).
