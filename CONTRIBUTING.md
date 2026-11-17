@@ -1,8 +1,8 @@
 # Contributing
 
 Thanks for looking. Nysia is early (v0.3) and moves fast, so please open an issue before writing
-anything larger than a small fix, and we can agree on the shape first. The repository has no
-license file yet; until one is added, an issue is the way in.
+anything larger than a small fix, and we can agree on the shape first. Contributions are accepted
+under the [MIT License](LICENSE).
 
 ## Setup and the gates
 
