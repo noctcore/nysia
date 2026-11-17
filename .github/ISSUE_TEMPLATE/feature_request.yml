@@ -1,0 +1,27 @@
+name: Feature request
+description: Something Nysia should do that it does not do yet.
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [changelog](https://github.com/noctcore/nysia/blob/main/CHANGELOG.md) first: each release says what it deliberately did not build yet, and the next one may already plan it.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you were trying to do, and where Nysia got in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: The behaviour you want. A CLI verb, a window change or a daemon capability.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: What you do today instead, or other shapes this could take.

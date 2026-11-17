@@ -1,0 +1,6 @@
+# Blank issues are off so every report arrives with the commit and platform filled in.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/noctcore/nysia/blob/main/SECURITY.md
+    about: Report it privately as SECURITY.md describes. Please do not open a public issue for a vulnerability.
